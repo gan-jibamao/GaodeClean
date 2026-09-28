@@ -13,12 +13,19 @@ static BOOL LayingOutHome;
 static BOOL Scheduled, Applying, Cleaning;
 static CGFloat SearchBarSettledY;
 static BOOL SearchBarSettled;
+static NSInteger BarStableTicks;
+static BOOL HomeSettled;
+static NSHashTable<UIView *> *ColdWidgets;
+static NSInteger ColdTicks;
+static char AlignedKey;
+static dispatch_source_t ScheduleTimer;
+static __weak UIView *BarParent;
+static __weak UIView *CachedCar, *CachedRight;
 static void UpdateMask(UIView *page);
 static void Schedule(void);
 static void LayoutMinimalHome(id handler);
 static void AlignCornerWidgets(UIView *bar);
 static void AlignOneWidget(UIView *bar, UIView *w, CGFloat barTop);
-static void DumpDebugTree(NSString *phase);
 
 @class GCCState;
 @interface GCCLimit : NSObject
@@ -306,7 +313,7 @@ static void SaveDiagnostics(UIView *page, GCCState *state, NSArray<UIView *> *no
         @"matched": @(state.matched), @"scrollContainers": @(state.scrolls.count),
         @"opaqueBlankArea": @(state.blankArea != nil && state.blankArea.superview == page),
         @"blankAreaFrame": NSStringFromCGRect(state.blankArea.frame), @"tree": tree};
-    NSData *data = [NSJSONSerialization dataWithJSONObject:@{@"version": @"0.4.40", @"pages": records} options:NSJSONWritingPrettyPrinted error:nil];
+    NSData *data = [NSJSONSerialization dataWithJSONObject:@{@"version": @"0.5.0", @"pages": records} options:NSJSONWritingPrettyPrinted error:nil];
     NSURL *documents = [NSFileManager.defaultManager URLsForDirectory:NSDocumentDirectory inDomains:NSUserDomainMask].firstObject;
     if (data && documents) [data writeToURL:[documents URLByAppendingPathComponent:@"GaodeClean-diagnostics.json"] options:NSDataWritingAtomic error:nil];
 }
@@ -387,7 +394,7 @@ static void CleanPage(UIView *page) {
                 NSData *data = [NSData dataWithContentsOfFile:[dir stringByAppendingPathComponent:@"GaodeClean-diagnostics.json"]];
                 NSDictionary *report = data ? [NSJSONSerialization JSONObjectWithData:data options:0 error:nil] : nil;
                 NSDictionary *mine = report[@"pages"][@"3"];
-                if ([@[@"0.3.0", @"0.3.1", @"0.4.0", @"0.4.32", @"0.4.33", @"0.4.34", @"0.4.35", @"0.4.36", @"0.4.37", @"0.4.38", @"0.4.39", @"0.4.40"] containsObject:report[@"version"] ?: @""] && [mine[@"matched"] boolValue]) {
+                if ([@[@"0.3.0", @"0.3.1", @"0.4.0", @"0.4.32", @"0.4.33", @"0.4.34", @"0.4.35", @"0.4.36", @"0.4.37", @"0.4.38", @"0.4.39", @"0.4.40", @"0.4.41", @"0.4.42", @"0.4.43", @"0.4.44", @"0.4.45", @"0.4.46", @"0.4.47", @"0.4.48", @"0.4.49", @"0.4.50", @"0.5.0"] containsObject:report[@"version"] ?: @""] && [mine[@"matched"] boolValue]) {
                     CGRect blank = CGRectFromString(mine[@"blankAreaFrame"] ?: @"");
                     if (blank.origin.y > 100) cached = @{@"width":@(blank.size.width), @"bottom":@(blank.origin.y)};
                 }
@@ -537,7 +544,34 @@ static void Schedule(void) {
         }
         for (id controller in NearbyControllers.allObjects) RegisterNearby(controller);
         for (UIView *page in Pages.allObjects) CleanPage(page);
-        for (id handler in HomeHandlers.allObjects) LayoutMinimalHome(handler);
+        // 0.4.41 冷启动兜底：定位超时(约 2.4s)仍未完成则强制显示，避免卡在隐藏态
+        ColdTicks++;
+        if (!HomeSettled && ColdTicks > 12) {
+            HomeSettled = YES;
+            for (UIView *w in ColdWidgets.allObjects) {
+                if ([w isKindOfClass:UIView.class]) {
+                    objc_setAssociatedObject(w, &AlignedKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+                    w.hidden = NO;
+                }
+            }
+        }
+        // 0.4.45：搜索栏被 app 拉回原生位置(447)时重新隐藏并重置稳定性计数（兜底）
+        for (id handler in HomeHandlers.allObjects) {
+            UIView *hb = ObjectGetter(handler, @"searchBar");
+            if ([hb isKindOfClass:UIView.class]) {
+                if (SearchBarSettled && fabs(hb.frame.origin.y - SearchBarSettledY) > 2) {
+                    hb.hidden = YES;
+                    BarStableTicks = 0;
+                }
+                break;
+            }
+        }
+        for (id handler in HomeHandlers.allObjects) {
+            LayoutMinimalHome(handler);
+            // 0.4.44：对齐独立于 LayoutMinimalHome（后者早退时仍能持续把圆钮拉回对齐位）
+            UIView *bar = ObjectGetter(handler, @"searchBar");
+            if ([bar isKindOfClass:UIView.class]) AlignCornerWidgets(bar);
+        }
 #if GCC_DEVICE_TEST
         RunDeviceCheck();
 #endif
@@ -691,17 +725,6 @@ static BOOL IsHiddenMapPromo(UIView *view) {
     return [identity containsString:@"扫街榜"] || [lower containsString:@"saojie"] || [lower containsString:@"streetrank"];
 }
 
-static NSString *DumpText(UIView *v) {
-    NSMutableString *s = [NSMutableString string];
-    if ([v isKindOfClass:UILabel.class]) [s appendString:((UILabel *)v).text ?: @""];
-    // AJX label 用 attributedString 存富文本（0.4.24 dump 实锤：text/attributedText getter 拿不到）
-    for (NSString *getter in @[@"attributedString", @"attributedText", @"text"]) {
-        id value = ObjectGetter(v, getter);
-        if ([value isKindOfClass:NSAttributedString.class]) value = [value string];
-        if ([value isKindOfClass:NSString.class] && [(NSString *)value length] < 200) [s appendString:value];
-    }
-    return s;
-}
 
 // 输入框实时文本（含 AJX 输入组件），用于识别「用户打字的回显 label」——
 // 回显与推广预填（湘满天）渲染在同一位置（y≈74），必须按文本内容区分。
@@ -711,51 +734,7 @@ static NSString *DumpText(UIView *v) {
 // 回显 label（文字只存在 accessibilityLabel 里，getter 读不到，无法按文本区分）
 // 与历史/建议区。此时两条带整体休眠；输入框为空时才隐藏推广与分类行。
 
-static void DumpDebugTree(NSString *phase) {
-    if (![NSThread isMainThread]) return;
-    NSMutableArray *lines = [NSMutableArray array];
-    NSUInteger total = 0;
-    for (UIWindow *win in UIApplication.sharedApplication.windows) {
-        [lines addObject:[NSString stringWithFormat:@"===== %@ ===== window=%@ bounds={%.0f,%.0f}", phase, win, win.bounds.origin.x, win.bounds.origin.y]];
-        NSMutableArray *queue = [NSMutableArray arrayWithObject:win];
-        NSMutableArray *flags = [NSMutableArray arrayWithObject:@0]; // bit0=underMap bit1=underTab
-        for (NSUInteger i = 0; i < queue.count && queue.count < 12000; i++) {
-            UIView *v = queue[i];
-            NSInteger f = [flags[i] integerValue];
-            NSString *cn = NSStringFromClass(v.class);
-            if ([cn containsString:@"MapWidgetContainerView"]) f |= 1;
-            if ([cn containsString:@"WINTabBar"]) f |= 2;
-            CGRect r = [v convertRect:v.bounds toView:win];
-            NSString *textContent = DumpText(v);
-            BOOL topLeft = r.origin.x > 0 && r.origin.x < 340 && r.origin.y > 0 && r.origin.y < 340 && r.size.width > 20 && r.size.height > 12;
-            BOOL interesting = [cn containsString:@"Widget"] || [cn containsString:@"Logo"] || [cn containsString:@"Scale"] ||
-                               [cn containsString:@"Locate"] || [cn containsString:@"Layer"] || [cn containsString:@"Route"] ||
-                               [cn containsString:@"BigPear"] || [cn containsString:@"Notch"] || [cn containsString:@"Combined"] ||
-                               [cn containsString:@"SearchBar"] || [cn containsString:@"Input"] || (f & 3) || topLeft ||
-                               [textContent length] > 0;
-            if (interesting) {
-                total++;
-                id tag = ObjectGetter(v, @"getItemTag");
-                id icon = ObjectGetter(v, @"iconImageName");
-                [lines addObject:[NSString stringWithFormat:@"%@ | {%.0f,%.0f %.0fx%.0f} | text=%@ | label=%@ | icon=%@ | tag=%@ | hid=%d a=%.2f | up=%@",
-                    cn, r.origin.x, r.origin.y, r.size.width, r.size.height, textContent,
-                    v.accessibilityLabel ?: @"", [icon isKindOfClass:NSString.class] ? icon : @"",
-                    [tag isKindOfClass:NSString.class] ? tag : @"", v.hidden, v.alpha,
-                    v.superview ? NSStringFromClass(v.superview.class) : @"nil"]];
-            }
-            for (UIView *sub in v.subviews) {
-                [queue addObject:sub];
-                [flags addObject:@(f)];
-            }
-        }
-    }
-    NSString *body = [lines componentsJoinedByString:@"\n"];
-    NSString *dir = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES).firstObject;
-    NSString *path = [dir stringByAppendingPathComponent:[NSString stringWithFormat:@"GaodeClean-dump-%@.txt", phase]];
-    [body writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:nil];
-    [body writeToFile:[@"/var/mobile/Documents/GaodeClean-dump-" stringByAppendingFormat:@"%@.txt", phase] atomically:YES encoding:NSUTF8StringEncoding error:nil];
-    NSLog(@"[GaodeClean] dump %@ -> %@ (%lu total)", phase, path, (unsigned long)total);
-}
+
 
 // 0.4.32 核心防线：输入相关的一切（文本框本体、祖先容器、键盘、第一响应者）
 // 一律不隐藏、不清空、不移动。这就是 0.4.29-0.4.31 输入文字不显示的根因——
@@ -799,6 +778,7 @@ static void LayoutMinimalHome(id handler) {
     UIView *tabBar = ObjectGetter(tabs, @"tabBar");
     UIView *parent = sheet.superview;
     if (!parent.window || ![tabBar isKindOfClass:UIView.class]) return;
+    BarParent = parent;
     LayingOutHome = YES;
     if (bar.superview != parent) [parent addSubview:bar];
     sheet.hidden = YES;
@@ -809,14 +789,16 @@ static void LayoutMinimalHome(id handler) {
     CGRect tabFrame = [tabBar convertRect:tabBar.bounds toView:parent];
     CGFloat height = MAX(50, MIN(64, bar.bounds.size.height));
     bar.frame = CGRectMake(0, MAX(0, tabFrame.origin.y - height - 12), parent.bounds.size.width, height);
-    bar.hidden = NO;
     [parent bringSubviewToFront:bar];
     // 0.4.19 首帧锁定：缓存最终 y，state 机/原生布局再拉也立即弹回
     if (!SearchBarSettled) {
         SearchBarSettledY = bar.frame.origin.y;
         SearchBarSettled = YES;
-        NSLog(@"[GaodeClean] search bar settled y=%.0f", SearchBarSettledY);
     }
+    // 0.4.45：连续稳定 3 轮(~0.6s)后才显示，避免 app 中途把搜索栏拉回原生(447)造成闪跳
+    if (fabs(bar.frame.origin.y - SearchBarSettledY) < 0.5) BarStableTicks++;
+    else BarStableTicks = 0;
+    bar.hidden = (BarStableTicks < 3 && ColdTicks < 15);
     LayingOutHome = NO;
     AlignCornerWidgets(bar);
 }
@@ -824,18 +806,29 @@ static void LayoutMinimalHome(id handler) {
 // 车机圆钮（WINDeviceInterconnectWidget）与右下组合钮（WINAJXCombinedWidgetView
 // tag=template_mainmapRightBottom）原本按全景地图布局；搜索框下沉到底栏上方后
 // 把它们对齐到搜索框上方 8pt（0.4.4 方向），随 0.2s 周期持续跟随。
+static BOOL IsRightBottomWidget(UIView *v) {
+    if (![NSStringFromClass(v.class) isEqualToString:@"WINAJXCombinedWidgetView"]) return NO;
+    id tag = ObjectGetter(v, @"getItemTag");
+    if (![tag isKindOfClass:NSString.class]) return NO;
+    NSString *t = [(NSString *)tag lowercaseString];
+    return [t containsString:@"rightbottom"] || [t containsString:@"locate"] || [t containsString:@"location"];
+}
+
 static void AlignOneWidget(UIView *bar, UIView *w, CGFloat barTop) {
-    if (!w.window || w.hidden) return;
+    if (!w.window) return;
     UIWindow *win = bar.window;
     CGRect r = [w convertRect:w.bounds toView:win];
-    if (r.size.height < 30 || r.size.height > 100) return;   // 排除比例尺(20)/路线等
-    CGFloat targetBottom = barTop - 8;                       // 圆钮底边贴搜索框上方 8pt
-    if (fabs(CGRectGetMaxY(r) - targetBottom) < 1) return;   // 已对齐
-    CGFloat dy = targetBottom - CGRectGetMaxY(r);
-    CGRect f = w.frame;
-    f.origin.y += dy;
-    w.frame = f;
-    NSLog(@"[GaodeClean] aligned %@ by %+.0fpt", NSStringFromClass(w.class), dy);
+    // 0.4.43：改顶边对齐（固定 44pt 高），高度变化(两钮88→单钮44)不再移动顶部
+    CGFloat targetTop = barTop - 52;   // 44pt 圆钮顶边：底边 = barTop-8
+    if (fabs(r.origin.y - targetTop) >= 1) {
+        CGRect f = w.frame;
+        f.origin.y += (targetTop - r.origin.y);
+        w.frame = f;
+    }
+    // 逐 widget 对齐标记：对齐过才显示，避免冷启动在原生位置(如 {0,0})闪现
+    objc_setAssociatedObject(w, &AlignedKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    if (w.hidden) w.hidden = NO;
+    HomeSettled = YES;
 }
 
 static void AlignCornerWidgets(UIView *bar) {
@@ -844,22 +837,61 @@ static void AlignCornerWidgets(UIView *bar) {
     CGFloat barTop = [bar convertPoint:CGPointZero toView:win].y;
     if (barTop < 40) return;                                 // 搜索框尚未就位（0.4.6: 80→40）
 
-    // 遍历整棵窗口树。
-    NSMutableArray<UIView *> *queue = [NSMutableArray arrayWithObject:win];
-    for (NSUInteger i = 0; i < queue.count && queue.count < 20000; i++) {
-        UIView *v = queue[i];
-        [queue addObjectsFromArray:v.subviews];
-        NSString *cn = NSStringFromClass(v.class);
-        BOOL isCar = [cn isEqualToString:@"WINDeviceInterconnectWidget"];
-        BOOL isRight = NO;
-        if ([cn isEqualToString:@"WINAJXCombinedWidgetView"]) {
-            id tag = ObjectGetter(v, @"getItemTag");
-            if ([tag isKindOfClass:NSString.class]) {
-                NSString *t = [(NSString *)tag lowercaseString];
-                isRight = [t containsString:@"rightbottom"] || [t containsString:@"locate"] || [t containsString:@"location"];
-            }
+    // 0.5.0：缓存两个圆钮实例，每轮直接对齐，只有实例失效时才重扫窗口树
+    if (!CachedCar || !CachedCar.window) CachedCar = nil;
+    if (!CachedRight || !CachedRight.window) CachedRight = nil;
+    if (!CachedCar || !CachedRight) {
+        NSMutableArray<UIView *> *queue = [NSMutableArray arrayWithObject:win];
+        for (NSUInteger i = 0; i < queue.count && queue.count < 20000; i++) {
+            UIView *v = queue[i];
+            [queue addObjectsFromArray:v.subviews];
+            NSString *cn = NSStringFromClass(v.class);
+            if ([cn isEqualToString:@"WINDeviceInterconnectWidget"]) CachedCar = v;
+            else if (IsRightBottomWidget(v)) CachedRight = v;
+            if (CachedCar && CachedRight) break;
         }
-        if (isCar || isRight) AlignOneWidget(bar, v, barTop);
+    }
+    if (CachedCar) AlignOneWidget(bar, CachedCar, barTop);
+    if (CachedRight) AlignOneWidget(bar, CachedRight, barTop);
+}
+
+static void HookWidgetSetFrame(NSString *className) {
+    Class cls = NSClassFromString(className);
+    if (!cls) return;
+    SEL fs = @selector(setFrame:);
+    Method fm = class_getInstanceMethod(cls, fs);
+    IMP fo = fm ? method_getImplementation(fm) : NULL;
+    if (fm) {
+        Replace(cls, fs, imp_implementationWithBlock(^(UIView *self, CGRect rect) {
+            // 0.4.47：对齐后把圆钮 y 钉死在搜索框上方 8pt，app 再拉回原生位置也不动
+            if (SearchBarSettled && objc_getAssociatedObject(self, &AlignedKey)) {
+                UIView *sv = self.superview;
+                if (sv && self.window) {
+                    CGPoint p = [sv convertPoint:CGPointMake(rect.origin.x, rect.origin.y) toView:self.window];
+                    CGFloat targetTop = SearchBarSettledY - 52;
+                    if (fabs(p.y - targetTop) > 2) rect.origin.y += (targetTop - p.y);
+                }
+            }
+            ((void (*)(id, SEL, CGRect))fo)(self, fs, rect);
+        }), method_getTypeEncoding(fm));
+    }
+    // 0.4.48：补 setCenter: 拦截
+    SEL cs = @selector(setCenter:);
+    Method cm = class_getInstanceMethod(cls, cs);
+    if (cm) {
+        IMP co = method_getImplementation(cm);
+        Replace(cls, cs, imp_implementationWithBlock(^(UIView *self, CGPoint center) {
+            if (SearchBarSettled && objc_getAssociatedObject(self, &AlignedKey)) {
+                UIView *sv = self.superview;
+                if (sv && self.window) {
+                    CGFloat proposedY = center.y - self.bounds.size.height / 2;
+                    CGPoint p = [sv convertPoint:CGPointMake(0, proposedY) toView:self.window];
+                    CGFloat targetTop = SearchBarSettledY - 52;
+                    if (fabs(p.y - targetTop) > 2) center.y += (targetTop - p.y);
+                }
+            }
+            ((void (*)(id, SEL, CGPoint))co)(self, cs, center);
+        }), method_getTypeEncoding(cm));
     }
 }
 
@@ -892,7 +924,6 @@ static void CenterTabButtons(UIView *bar) {
             f.origin.x = r.origin.x - 8;
             f.size.width = r.size.width + 16;
             pill.frame = f;
-            NSLog(@"[GaodeClean] selection follow selected -> {%.0f,%.0f %.0fx%.0f}", f.origin.x, f.origin.y, f.size.width, f.size.height);
         }
     }
     adjusting = NO;
@@ -902,7 +933,12 @@ static void InstallMinimalHome(void) {
     HookVoid(@"WINTabBar", @"layoutSubviews", ^(UIView *bar) { CenterTabButtons(bar); });
     HookVoid(@"WINTabBar", @"amap_relayoutTabItems", ^(UIView *bar) { CenterTabButtons(bar); });
 
-    HookVoid(@"GDAmapHomeHandler", @"viewDidLoad", ^(id handler) { [HomeHandlers addObject:handler]; });
+    HookVoid(@"GDAmapHomeHandler", @"viewDidLoad", ^(id handler) {
+        [HomeHandlers addObject:handler];
+        // 0.4.41：冷启动先隐藏搜索栏，LayoutMinimalHome 定位到最终位置后再显示，消除跳动
+        UIView *bar = ObjectGetter(handler, @"searchBar");
+        if ([bar isKindOfClass:UIView.class]) bar.hidden = YES;
+    });
     HookVoid(@"GDAmapHomeHandler", @"layoutBottomSearchBar", ^(id handler) { [HomeHandlers addObject:handler]; LayoutMinimalHome(handler); });
     HookVoid(@"GDAmapHomeHandler", @"viewDidLayoutSubviews", ^(id handler) { [HomeHandlers addObject:handler]; LayoutMinimalHome(handler); });
     Class cls = NSClassFromString(@"WINAMapHomeStateMachine");
@@ -938,6 +974,11 @@ static void InstallMinimalHome(void) {
     HookVoid(@"WINQuickSearchBarV2", @"layoutSubviews", ^(id bar) {
         UIView *text = ObjectGetter(bar, @"verticalScrollText");
         if ([text isKindOfClass:UIView.class]) text.hidden = YES;
+        // 0.4.42：搜索栏尚未定位完成前保持隐藏，定位完成(LayoutMinimalHome)后再显示
+        if (!SearchBarSettled) {
+            UIView *b = bar;
+            if (!b.hidden) b.hidden = YES;
+        }
         // 0.4.19 首帧锁定：原生布局把搜索栏拉回顶部时立即钉回最终位置
         if (SearchBarSettled) {
             UIView *b = bar;
@@ -947,6 +988,18 @@ static void InstallMinimalHome(void) {
                 b.frame = f;
             }
         }
+        // 0.4.49：app 会把搜索栏重新塞回 sheet(AMapUIWaterFallContentSlidableView)并挪离屏(1140)，
+        // 检测到父视图被换即挂回 BarParent 并钉回 702——不依赖 timer，下一次布局自愈
+        if (SearchBarSettled && BarParent) {
+            UIView *b = bar;
+            if (b.superview != BarParent) {
+                [BarParent addSubview:b];
+                CGRect f = b.frame;
+                f.origin.y = SearchBarSettledY;
+                b.frame = f;
+                [BarParent bringSubviewToFront:b];
+            }
+        }
         // 0.4.8 首页搜索框去文字：隐藏推广 label/富文本视图，保留输入与按钮
         NSArray *nodes = Flatten(bar);
         if (!nodes || nodes.count > 400) return;
@@ -954,13 +1007,52 @@ static void InstallMinimalHome(void) {
             if (v == bar || v.hidden) continue;
             if ([v isKindOfClass:UIButton.class]) continue;
             if (IsInputLike(v)) continue;
-            NSString *cn = NSStringFromClass(v.class);
-            if ([cn containsString:@"TextField"] || [cn containsString:@"SearchField"] || [cn containsString:@"Input"]) continue;
             if ([v isKindOfClass:UILabel.class]) { v.hidden = YES; continue; }
             id t = ObjectGetter(v, @"text");
             if ([t isKindOfClass:NSString.class] && [(NSString *)t length]) { v.hidden = YES; continue; }
             id a = ObjectGetter(v, @"attributedText");
             if ([a isKindOfClass:NSAttributedString.class] && [(NSAttributedString *)a length]) v.hidden = YES;
+        }
+    });
+    // 0.4.46：拦截 setFrame:，settled 后把搜索栏 y 钉死，杜绝 app 动画/布局拉回原生 447 造成闪跳
+    {
+        Class barCls = NSClassFromString(@"WINQuickSearchBarV2");
+        SEL fs = @selector(setFrame:);
+        Method fm = class_getInstanceMethod(barCls, fs);
+        if (fm) {
+            IMP fo = method_getImplementation(fm);
+            Replace(barCls, fs, imp_implementationWithBlock(^(UIView *self, CGRect rect) {
+                if (SearchBarSettled && fabs(rect.origin.y - SearchBarSettledY) > 2) {
+                    rect.origin.y = SearchBarSettledY;
+                }
+                ((void (*)(id, SEL, CGRect))fo)(self, fs, rect);
+            }), method_getTypeEncoding(fm));
+        }
+    }
+    // 0.4.48：补 setCenter: 拦截——app 也会走 center/layer 路径把搜索栏挪走(如 1140 离屏)
+    {
+        Class barCls = NSClassFromString(@"WINQuickSearchBarV2");
+        SEL cs = @selector(setCenter:);
+        Method cm = class_getInstanceMethod(barCls, cs);
+        if (cm) {
+            IMP co = method_getImplementation(cm);
+            Replace(barCls, cs, imp_implementationWithBlock(^(UIView *self, CGPoint center) {
+                if (SearchBarSettled) {
+                    CGFloat targetCenterY = SearchBarSettledY + self.bounds.size.height / 2;
+                    if (fabs(center.y - targetCenterY) > 2) center.y = targetCenterY;
+                }
+                ((void (*)(id, SEL, CGPoint))co)(self, cs, center);
+            }), method_getTypeEncoding(cm));
+        }
+    }
+    // 0.4.50：hook didMoveToSuperview——app 重挂搜索栏时同步触发，父视图一被换立刻挂回 BarParent
+    HookVoid(@"WINQuickSearchBarV2", @"didMoveToSuperview", ^(UIView *b) {
+        if (SearchBarSettled && BarParent && b.superview && b.superview != BarParent) {
+            [BarParent addSubview:b];
+            CGRect f = b.frame;
+            f.origin.y = SearchBarSettledY;
+            b.frame = f;
+            [BarParent bringSubviewToFront:b];
         }
     });
     HookVoid(@"WINAJXCombinedItemView", @"layoutSubviews", ^(id view) { if (IsHiddenMapPromo(view)) [view setHidden:YES]; });
@@ -973,7 +1065,19 @@ static void InstallMinimalHome(void) {
             ((void (*)(id, SEL, BOOL))original)(self, sel, hidden || IsHiddenMapPromo(self));
         }), method_getTypeEncoding(method));
     }
-    HookVoid(@"WINAJXCombinedWidgetView", @"layoutSubviews", ^(id view) { if (IsHiddenMapPromo(view)) [view setHidden:YES]; });
+    HookVoid(@"WINAJXCombinedWidgetView", @"layoutSubviews", ^(UIView *view) {
+        if (IsHiddenMapPromo(view)) [view setHidden:YES];
+        else if (view.window && !objc_getAssociatedObject(view, &AlignedKey) && IsRightBottomWidget(view)) {
+            view.hidden = YES; [ColdWidgets addObject:view];
+        }
+    });
+    // 0.4.41：车机圆钮冷启动先隐藏，对齐后再显示，消除跳动
+    HookVoid(@"WINDeviceInterconnectWidget", @"layoutSubviews", ^(UIView *w) {
+        if (w.window && !objc_getAssociatedObject(w, &AlignedKey)) { w.hidden = YES; [ColdWidgets addObject:w]; }
+    });
+    // 0.4.47：拦截两圆钮 setFrame:，对齐后 y 钉死，杜绝 app 挪回原生位置闪跳
+    HookWidgetSetFrame(@"WINDeviceInterconnectWidget");
+    HookWidgetSetFrame(@"WINAJXCombinedWidgetView");
     cls = NSClassFromString(@"WINAJXCombinedWidgetView");
     sel = @selector(setHidden:);
     method = class_getInstanceMethod(cls, sel);
@@ -983,11 +1087,6 @@ static void InstallMinimalHome(void) {
             ((void (*)(id, SEL, BOOL))original)(self, sel, hidden || IsHiddenMapPromo(self));
         }), method_getTypeEncoding(method));
     }
-    // 0.4.26 推广 AJXLabel 一布局即隐藏；0.4.33 修正：
-    // 判定必须用窗口坐标（局部 frame 会把滚动列表/按钮里所有 label 错杀），
-    // 且跳过滚动视图与按钮内的文字。
-    // 0.4.28：搜索框内滚动推广容器一布局即隐藏——0.4.37 起只在落地态生效
-    //（输入框住在这个容器里，打字时藏它 = 文字不显示）
 }
 
 __attribute__((constructor)) static void Initialize(void) {
@@ -1001,6 +1100,7 @@ __attribute__((constructor)) static void Initialize(void) {
         NearbyControllers = [NSHashTable weakObjectsHashTable];
         TabControllers = [NSHashTable weakObjectsHashTable];
         HomeHandlers = [NSHashTable weakObjectsHashTable];
+        ColdWidgets = [NSHashTable weakObjectsHashTable];
         InstallScrollHooks();
         InstallMinimalHome();
         HookVoid(@"GDMapHomeTabBarControl", @"loadViewControlParams", ^(id tabs) {
@@ -1042,15 +1142,12 @@ __attribute__((constructor)) static void Initialize(void) {
         // Recheck after asynchronous cards and cell reuse; only attached target pages are scanned.
         dispatch_async(dispatch_get_main_queue(), ^{
             Schedule();
-            // 0.4.7：轮询 0.5s→0.2s，首帧后立即排一轮
-            [NSTimer scheduledTimerWithTimeInterval:0.2 repeats:YES block:^(__unused NSTimer *timer) { Schedule(); }];
+            // 0.4.44：GCD 计时器（模式无关，比 NSTimer 更可靠；NSTimer 在 1.4s 后曾停止）
+            ScheduleTimer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, dispatch_get_main_queue());
+            dispatch_source_set_timer(ScheduleTimer, dispatch_time(DISPATCH_TIME_NOW, 200 * NSEC_PER_MSEC), 200 * NSEC_PER_MSEC, 20 * NSEC_PER_MSEC);
+            dispatch_source_set_event_handler(ScheduleTimer, ^{ Schedule(); });
+            dispatch_resume(ScheduleTimer);
         });
-        // 0.4.23-diag：诊断 dump（含 text 字段与 Input 类），若仍有残留可凭 dump 定点
-        for (NSNumber *delay in @[@2, @5, @8, @12, @18, @25]) {
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (dispatch_time_t)delay.unsignedIntegerValue * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
-                DumpDebugTree([NSString stringWithFormat:@"t%@", delay]);
-            });
-        }
-        NSLog(@"[GaodeClean] loaded 0.4.40 (17.00.2 only)");
+        NSLog(@"[GaodeClean] loaded 0.5.0 (17.00.2 only)");
     }
 }
