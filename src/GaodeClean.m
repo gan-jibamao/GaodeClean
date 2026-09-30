@@ -983,9 +983,29 @@ static void AlignWeatherRow(UIView *row) {
     CGPoint wantCenter = CGPointMake(wantInParent.x + row.bounds.size.width * 0.5,
                                      wantInParent.y + row.bounds.size.height * 0.5);
     if (fabs(row.center.x - wantCenter.x) > 0.5 || fabs(row.center.y - wantCenter.y) > 0.5) {
+        // 0.6.2：切 2D/3D 时 app 会把这一行往下推 ~17pt，我的对齐随后才追上 ——
+        // 中间那 3–4 帧就是用户看到的「天气和 LOGO 跳一下」
+        // （逐帧实测：云图标 y 379.2 → 388.7/389.0/388.6/389.1 → 383 → 380 → 379）。
+        // 两处修正：① 禁掉隐式动画，否则修正本身会走动画 = 掉下去再弹回来；
+        //           ② 偏差 >2pt 时清掉 layer 上正在跑的动画，让修正瞬时落到当前帧。
+        BOOL big = (fabs(row.center.y - wantCenter.y) > 2.0 || fabs(row.center.x - wantCenter.x) > 2.0);
+        [CATransaction begin];
+        [CATransaction setDisableActions:YES];
+        if (big) [row.layer removeAllAnimations];
         row.center = wantCenter;
+        [CATransaction commit];
     }
     inAlign = NO;
+}
+
+// 0.6.2：天气行的尺寸自识别（认「行」不认实例）。
+// 实测这一行是宽 200-320、高 <40 的容器；离屏实例（历史上见过 y=1073）直接排除。
+static BOOL IsWeatherRowView(UIView *v) {
+    if (!v || !v.window || !v.superview) return NO;
+    CGRect r = [v convertRect:v.bounds toView:v.window];
+    if (r.size.width < 150 || r.size.width > 360 || r.size.height >= 40) return NO;
+    if (r.origin.y < 60 || r.origin.y > v.window.bounds.size.height - 40) return NO;
+    return YES;
 }
 
 static void HookWeatherRow(void) {
@@ -1008,12 +1028,34 @@ static void HookWeatherRow(void) {
             id sel = ObjectGetter(CachedTabs, @"selectedViewControl");
             if (sel && ![NSStringFromClass([sel class]) isEqualToString:@"WINAmapHomeControl"]) return;
         }
-        CGRect r = [v convertRect:v.bounds toView:win];
-        if (r.size.width < 150 || r.size.width > 360 || r.size.height >= 40) return;
-        if (r.origin.y < 60 || r.origin.y > win.bounds.size.height - 40) return;
+        if (!IsWeatherRowView(v)) return;
         objc_setAssociatedObject(v, &AlignedKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         AlignWeatherRow(v);
     });
+    // 0.6.2：有些时刻 app 是直接写位置（不走 layoutSubviews），
+    // 那样我只能等下一次布局才追上（实测落后 3-4 帧）。这里在 app 一写就同步纠回，
+    // 同一个 runloop 内完成，那一帧就不会显示在错误位置。
+    {
+        Class rc = NSClassFromString(@"WINGroupMapWidget");
+        Method mc = class_getInstanceMethod(rc, @selector(setCenter:));
+        Method mf = class_getInstanceMethod(rc, @selector(setFrame:));
+        if (mc) {
+            IMP o = method_getImplementation(mc);
+            const char *t = method_getTypeEncoding(mc);
+            Replace(rc, @selector(setCenter:), imp_implementationWithBlock(^(UIView *self, CGPoint c) {
+                ((void (*)(id, SEL, CGPoint))o)(self, @selector(setCenter:), c);
+                if (IsWeatherRowView(self)) AlignWeatherRow(self);
+            }), t);
+        }
+        if (mf) {
+            IMP o = method_getImplementation(mf);
+            const char *t = method_getTypeEncoding(mf);
+            Replace(rc, @selector(setFrame:), imp_implementationWithBlock(^(UIView *self, CGRect f) {
+                ((void (*)(id, SEL, CGRect))o)(self, @selector(setFrame:), f);
+                if (IsWeatherRowView(self)) AlignWeatherRow(self);
+            }), t);
+        }
+    }
 }
 
 static void LayoutMinimalHome(id handler) {

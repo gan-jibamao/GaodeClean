@@ -1,9 +1,9 @@
-# GaodeClean 0.6.1 — 源码与构建说明
+# GaodeClean 0.6.2 — 源码与构建说明
 
 高德地图 17.00.2 (com.autonavi.amap) UI 清理 tweak。纯 ObjC runtime hook，
 不依赖 substrate/frida，不碰网络与 IPA，仅视图层。
 
-## 当前终态 0.6.1 的功能清单
+## 当前终态 0.6.2 的功能清单
 - 底栏两钮居中 + 胶囊(选中视图)跟随选中按钮 (0.3.1 + 0.4.13-0.4.17)
 - 左侧车机圆钮、右下组合钮(定位+回正)对齐到搜索框上方 8pt (0.4.3/0.4.4/0.4.40)
 - 首页搜索栏下沉 + 首帧锁定 + setFrame/setCenter 钳位 + didMoveToSuperview 重挂自愈
@@ -74,6 +74,34 @@
   中位 pt 68.7，**唯一偏移段 f893–f905 仅 Δ2.0pt（转场边界噪声）**；
   约 10 次 2D↔3D 切换，位置零变化。
 
+### D. 切 2D/3D 时天气行「瞬时下坠 17pt 再弹回」（0.6.2）
+- 0.6.1 之后用户复报：「切换 2D 和 3D 的时候天气和 LOGO 没有固定位置，在跳动」。**确实还在。**
+- **★ 0.6.1 为什么漏掉它（方法论）**：偏移检测器写的是「持续 ≥8 帧才算异常」，
+  而**这事件只持续 1–4 帧**，整个被跳过 → 得出了错误的「位置稳定」结论。
+  **教训：瞬态（1–4 帧）事件必须用「瞬时偏离」检测（|y−中位| > 阈值即算），不能用「持续段」检测。**
+- **量化**（云图标质心逐帧，664 帧 / 5.5s）：
+  - 水平已稳（x 中位 raw 39.5 恒定）→ 0.6.1 的水平修复有效
+  - 垂直 4 次事件，每次下移 ~17pt 再回落：
+
+    | 事件 | 峰值 | 回落 |
+    |---|---|---|
+    | f215-216 | 388.7（−16.9pt） | f217 |
+    | f252-253 | 389.0（−17.5pt） | f254 |
+    | f575-576 | 388.6（−16.7pt） | f577 |
+    | f613 | 384.4（−9.3pt） | f614 |
+
+    y 序列：`389 → 383 → 380 → 379`（掉下去再弹回来）
+  - **车机钮（对齐基准）y=385.8 全程纹丝不动** → 不是基准漂移，
+    是 **app 在推这一行**，我的修正晚 3–4 帧才追上，且写入走隐式动画。
+- **0.6.2 修法（零延迟纠回）**：
+  1. `AlignWeatherRow` 的写入包进 `[CATransaction setDisableActions:YES]`；
+     偏差 >2pt 时 `[row.layer removeAllAnimations]`（否则修正本身也走动画）
+  2. **拦截 `WINGroupMapWidget -setCenter:` / `-setFrame:`** —— app 有些时刻不走
+     layoutSubviews、直接写位置；现在一写就同步纠回，同一个 runloop 内完成，
+     那一帧不会显示在错误位置
+  3. 抽出 `IsWeatherRowView()` 尺寸自识别助手（宽 150–360、高 <40、y 在地图区），
+     layoutSubviews 钩子与 setter 拦截共用
+
 ## 核心机制（可复用）
 - 冷启动跳动：隐藏→定位→一次性显示 + 逐 widget AlignedKey + 顶边对齐 + setFrame/setCenter 钳位
   + `didMoveToSuperview` 同步重挂（**注意：守卫不能写成 `b.superview &&`，否则会漏掉「被摘掉」这条**）
@@ -95,7 +123,7 @@
 0.4.40 右下钮跟随 → 0.4.41-50 冷启动跳动根除 → 0.5.0 优化清理 →
 0.5.1-7 白块/模糊带 → 0.5.8 EmptyImmersiveState → 0.5.9 白块修复 →
 0.5.34-44 白雾追查(6 版空枪) → 0.5.50 上拉定稿 → 0.5.53 装回 →
-0.5.54-58 切页搜索栏闪 → 0.6.0 定版（摘诊断）→ **0.6.1 切 2D/3D 天气行位移**
+0.5.54-58 切页搜索栏闪 → 0.6.0 定版（摘诊断）→ 0.6.1 切 2D/3D 天气行位移 → **0.6.2 瞬时下坠弹回**
 
 ## 从源码重建
 SDK：theos patched iPhoneOS16.5.sdk（https://github.com/theos/sdks）
@@ -117,9 +145,12 @@ SDK：theos patched iPhoneOS16.5.sdk（https://github.com/theos/sdks）
   **输出路径必须传绝对路径**，脚本会 cd 到临时目录）
 
 ## 本包产物
-- `dist/GaodeClean.dylib` — 0.6.1 构建件（ldid 签名）
-- `dist/local.gaode.clean_0.6.1_iphoneos-arm64.deb` — rootless
-- `dist/local.gaode.clean_0.6.1_iphoneos-arm64-roothide.deb` — RootHide
+- `dist/GaodeClean.dylib` — 0.6.2 构建件（ldid 签名）
+- `dist/local.gaode.clean_0.6.2_iphoneos-arm64.deb` — rootless
+- `dist/local.gaode.clean_0.6.2_iphoneos-arm64-roothide.deb` — RootHide
+
+## 0.6.2 验证记录
+- 切 2D/3D：4 次「下坠 17pt 再弹回」事件（f215/f252/f575/f613）全部消除 → **用户确认通过**
 
 ## 0.6.1 验证记录（前接 0.6.0）
 - 切 2D/3D：云图标质心全片 1168 帧中位 pt 68.7，唯一偏移段 Δ2.0pt（噪声）→ **通过**
