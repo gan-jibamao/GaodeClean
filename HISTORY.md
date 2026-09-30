@@ -1,9 +1,9 @@
-# GaodeClean 0.6.0 — 源码与构建说明
+# GaodeClean 0.6.1 — 源码与构建说明
 
 高德地图 17.00.2 (com.autonavi.amap) UI 清理 tweak。纯 ObjC runtime hook，
 不依赖 substrate/frida，不碰网络与 IPA，仅视图层。
 
-## 当前终态 0.6.0 的功能清单
+## 当前终态 0.6.1 的功能清单
 - 底栏两钮居中 + 胶囊(选中视图)跟随选中按钮 (0.3.1 + 0.4.13-0.4.17)
 - 左侧车机圆钮、右下组合钮(定位+回正)对齐到搜索框上方 8pt (0.4.3/0.4.4/0.4.40)
 - 首页搜索栏下沉 + 首帧锁定 + setFrame/setCenter 钳位 + didMoveToSuperview 重挂自愈
@@ -49,6 +49,31 @@
 - **0.5.58**：不再等 `selectedViewControl` 翻转（app 切页完成才翻，实测 ~33ms 延迟），
   被摘的同一瞬间直接挂回并显示；快修提到 8ms。**实测：三次切页零缺席（仅冷启动首帧 1 帧）。**
 
+### C. 切 2D/3D 时「天气 + LOGO」位置跳变（0.6.1）
+- 用户报告：「切换地图 3D 和 2D，天气和 LOGO 位置在变动」。确认是真问题。
+- **量化**（pt 标尺读原生分辨率裁剪）：
+
+  | 元素 | 2D (f171) | 3D (f189/f195) | 位移 |
+  |---|---|---|---|
+  | ☁ 云图标 | pt 58 | pt 45 | **−13pt** |
+  | 30°C | pt 76 | pt 65 | **−11pt** |
+  | 🔷高德地图 LOGO | pt 118 | pt 105 | **−13pt** |
+  | 比例尺 | pt 215 | pt 215 | 0 |
+
+  同时车机钮 pt18-45 → pt22-50（右移 4pt）—— **天气行与车机钮反向移动**，
+  说明不是 app 整体重排，而是「我方对齐丢了」。
+- **根因（代码级，`HookWeatherRow` 两个脆弱点）**：
+  1. 钩子写成 `if (!objc_getAssociatedObject(v, &AlignedKey)) return;`
+     —— 依赖「缓存实例 + 一次性标记」。**切 2D/3D 时 app 重建地图控件树，
+     新实例没有 AlignedKey → 钩子第一行就 return → 天气行退回 app 原生位置。**
+  2. `CachedRow` 的失效判据是「旧实例的 window 没了」，但切模式时旧实例常常还挂着
+     → 缓存一直指着旧的，永远轮不到新实例。
+- **修法**：钩子改为**按尺寸自识别**（宽 150–360、高 <40、y 落在地图区、且当前是首页），
+  认「行」不认「实例」；缓存失效条件补上「尺寸不再匹配」。
+- **验证（逐帧）**：云图标高饱和蓝质心追踪，全片 1168 帧
+  中位 pt 68.7，**唯一偏移段 f893–f905 仅 Δ2.0pt（转场边界噪声）**；
+  约 10 次 2D↔3D 切换，位置零变化。
+
 ## 核心机制（可复用）
 - 冷启动跳动：隐藏→定位→一次性显示 + 逐 widget AlignedKey + 顶边对齐 + setFrame/setCenter 钳位
   + `didMoveToSuperview` 同步重挂（**注意：守卫不能写成 `b.superview &&`，否则会漏掉「被摘掉」这条**）
@@ -70,7 +95,7 @@
 0.4.40 右下钮跟随 → 0.4.41-50 冷启动跳动根除 → 0.5.0 优化清理 →
 0.5.1-7 白块/模糊带 → 0.5.8 EmptyImmersiveState → 0.5.9 白块修复 →
 0.5.34-44 白雾追查(6 版空枪) → 0.5.50 上拉定稿 → 0.5.53 装回 →
-0.5.54-58 切页搜索栏闪 → **0.6.0 定版（摘诊断）**
+0.5.54-58 切页搜索栏闪 → 0.6.0 定版（摘诊断）→ **0.6.1 切 2D/3D 天气行位移**
 
 ## 从源码重建
 SDK：theos patched iPhoneOS16.5.sdk（https://github.com/theos/sdks）
@@ -92,9 +117,14 @@ SDK：theos patched iPhoneOS16.5.sdk（https://github.com/theos/sdks）
   **输出路径必须传绝对路径**，脚本会 cd 到临时目录）
 
 ## 本包产物
-- `dist/GaodeClean.dylib` — 0.6.0 构建件（195,952 B，ldid 签名）
-- `dist/local.gaode.clean_0.6.0_iphoneos-arm64.deb` — rootless
-- `dist/local.gaode.clean_0.6.0_iphoneos-arm64-roothide.deb` — RootHide
+- `dist/GaodeClean.dylib` — 0.6.1 构建件（ldid 签名）
+- `dist/local.gaode.clean_0.6.1_iphoneos-arm64.deb` — rootless
+- `dist/local.gaode.clean_0.6.1_iphoneos-arm64-roothide.deb` — RootHide
+
+## 0.6.1 验证记录（前接 0.6.0）
+- 切 2D/3D：云图标质心全片 1168 帧中位 pt 68.7，唯一偏移段 Δ2.0pt（噪声）→ **通过**
+- 搜索栏：无缺席（仅冷启动首帧与启动段）→ **通过**
+- 地图压白：std 全程正常 → **通过**
 
 ## 0.6.0 验证记录（逐帧量化，25.5s / 3059 帧 + 10.5s / 1257 帧）
 - 上拉闪白：地图区 std 全程未掉出正常区间（真压白会掉到 1–5）→ **通过**

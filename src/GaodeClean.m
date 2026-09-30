@@ -996,7 +996,22 @@ static void HookWeatherRow(void) {
     Class cls = NSClassFromString(@"WINGroupMapWidget");
     if (!cls) return;
     HookVoid(@"WINGroupMapWidget", @"layoutSubviews", ^(UIView *v) {
-        if (!objc_getAssociatedObject(v, &AlignedKey)) return;
+        // 0.6.1：原来这里写的是 if (!AlignedKey) return —— 依赖「缓存实例 + 一次性标记」。
+        // 但切换 2D/3D 时 app 会重建地图控件树，**新实例没有 AlignedKey**，
+        // 钩子直接 return，天气行就退回 app 的原生位置 ——
+        // 逐帧实测：切到 3D 后 ☁ 云 −13pt、30°C −11pt、🔷高德地图 −13pt（比例尺不动），
+        // 就是「切 2D/3D 时天气和 LOGO 位置跳一下」。
+        // 现在改为按尺寸自识别，任何实例都能立即对齐，不再依赖缓存命中。
+        UIView *win = v.window;
+        if (!win || !CachedCar || !CachedCar.window) return;
+        if (CachedTabs) {
+            id sel = ObjectGetter(CachedTabs, @"selectedViewControl");
+            if (sel && ![NSStringFromClass([sel class]) isEqualToString:@"WINAmapHomeControl"]) return;
+        }
+        CGRect r = [v convertRect:v.bounds toView:win];
+        if (r.size.width < 150 || r.size.width > 360 || r.size.height >= 40) return;
+        if (r.origin.y < 60 || r.origin.y > win.bounds.size.height - 40) return;
+        objc_setAssociatedObject(v, &AlignedKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         AlignWeatherRow(v);
     });
 }
@@ -1044,7 +1059,14 @@ static void LayoutMinimalHome(id handler) {
     {
         UIWindow *win = bar.window;
         static __weak UIView *CachedRow = nil;
-        if (win && (!CachedRow || !CachedRow.window)) {
+        // 0.6.1：缓存失效条件加上「尺寸不再匹配」—— 切 2D/3D 后 app 换掉的是实例，
+        // 旧实例的 window 可能还在，原本的 !CachedRow.window 判据抓不到，缓存会一直指着旧的。
+        BOOL rowStale = (!CachedRow || !CachedRow.window);
+        if (!rowStale && win) {
+            CGRect r0 = [CachedRow convertRect:CachedRow.bounds toView:win];
+            if (r0.size.width < 150 || r0.size.width > 360 || r0.size.height >= 40) rowStale = YES;
+        }
+        if (win && rowStale) {
             NSMutableArray *q = [NSMutableArray arrayWithObject:win];
             for (NSUInteger qi = 0; qi < q.count && q.count < 20000; qi++) {
                 UIView *v = q[qi];
