@@ -20,7 +20,9 @@ static NSInteger ColdTicks;
 static char AlignedKey;
 static dispatch_source_t ScheduleTimer;
 static __weak UIView *BarParent;
-static __weak UIView *CachedCar, *CachedRight;
+static __weak UIView *CachedCar, *CachedRight, *CachedRoute;
+static __weak id CachedTabs;
+static __weak UIView *SearchBarView;   // 0.5.58   // 0.5.55：用于判断当前是否「首页」选中
 static void UpdateMask(UIView *page);
 static void Schedule(void);
 static void LayoutMinimalHome(id handler);
@@ -313,7 +315,7 @@ static void SaveDiagnostics(UIView *page, GCCState *state, NSArray<UIView *> *no
         @"matched": @(state.matched), @"scrollContainers": @(state.scrolls.count),
         @"opaqueBlankArea": @(state.blankArea != nil && state.blankArea.superview == page),
         @"blankAreaFrame": NSStringFromCGRect(state.blankArea.frame), @"tree": tree};
-    NSData *data = [NSJSONSerialization dataWithJSONObject:@{@"version": @"0.5.0", @"pages": records} options:NSJSONWritingPrettyPrinted error:nil];
+    NSData *data = [NSJSONSerialization dataWithJSONObject:@{@"version": @"0.5.1", @"pages": records} options:NSJSONWritingPrettyPrinted error:nil];
     NSURL *documents = [NSFileManager.defaultManager URLsForDirectory:NSDocumentDirectory inDomains:NSUserDomainMask].firstObject;
     if (data && documents) [data writeToURL:[documents URLByAppendingPathComponent:@"GaodeClean-diagnostics.json"] options:NSDataWritingAtomic error:nil];
 }
@@ -394,7 +396,7 @@ static void CleanPage(UIView *page) {
                 NSData *data = [NSData dataWithContentsOfFile:[dir stringByAppendingPathComponent:@"GaodeClean-diagnostics.json"]];
                 NSDictionary *report = data ? [NSJSONSerialization JSONObjectWithData:data options:0 error:nil] : nil;
                 NSDictionary *mine = report[@"pages"][@"3"];
-                if ([@[@"0.3.0", @"0.3.1", @"0.4.0", @"0.4.32", @"0.4.33", @"0.4.34", @"0.4.35", @"0.4.36", @"0.4.37", @"0.4.38", @"0.4.39", @"0.4.40", @"0.4.41", @"0.4.42", @"0.4.43", @"0.4.44", @"0.4.45", @"0.4.46", @"0.4.47", @"0.4.48", @"0.4.49", @"0.4.50", @"0.5.0"] containsObject:report[@"version"] ?: @""] && [mine[@"matched"] boolValue]) {
+                if ([@[@"0.3.0", @"0.3.1", @"0.4.0", @"0.4.32", @"0.4.33", @"0.4.34", @"0.4.35", @"0.4.36", @"0.4.37", @"0.4.38", @"0.4.39", @"0.4.40", @"0.4.41", @"0.4.42", @"0.4.43", @"0.4.44", @"0.4.45", @"0.4.46", @"0.4.47", @"0.4.48", @"0.4.49", @"0.4.50", @"0.5.0", @"0.5.1"] containsObject:report[@"version"] ?: @""] && [mine[@"matched"] boolValue]) {
                     CGRect blank = CGRectFromString(mine[@"blankAreaFrame"] ?: @"");
                     if (blank.origin.y > 100) cached = @{@"width":@(blank.size.width), @"bottom":@(blank.origin.y)};
                 }
@@ -559,7 +561,12 @@ static void Schedule(void) {
         for (id handler in HomeHandlers.allObjects) {
             UIView *hb = ObjectGetter(handler, @"searchBar");
             if ([hb isKindOfClass:UIView.class]) {
-                if (SearchBarSettled && fabs(hb.frame.origin.y - SearchBarSettledY) > 2) {
+                // 0.5.52：这条兜底**只用于冷启动**。页面切换（我的→首页）时 app 会
+                // 临时重排整个首页，搜索栏 y 短暂偏离，旧逻辑立刻 hidden=YES 并重置稳定
+                // 计数 → 搜索栏闪一下再回来。下面那行显示逻辑本来就带 ColdTicks<15
+                // 条件，隐藏这条当初漏了，现在补齐（切页不再隐藏搜索栏）。
+                if (ColdTicks < 15 && SearchBarSettled &&
+                    fabs(hb.frame.origin.y - SearchBarSettledY) > 2) {
                     hb.hidden = YES;
                     BarStableTicks = 0;
                 }
@@ -621,6 +628,199 @@ static void HookVoid(NSString *name, NSString *methodName, void (^after)(id)) {
         after(self);
     });
     Replace(cls, sel, imp, method_getTypeEncoding(m));
+}
+
+// 0.5.34：底栏上滑时出现的全屏白雾 = WINMapMaskView（393x852 全屏蒙版）
+// + AUGlobalBlurService（往屏幕加模糊层的全局服务）。
+// 实测该层 alpha 从 0 渐涨到 0.84 后常驻，把整张地图蒙白。
+// 这里从三个入口封死：setHidden: / setAlpha: / addBlurViewToScreen。
+static BOOL IsBlurOverlayView(UIView *v) {
+    if (!v) return NO;
+    return [NSStringFromClass(v.class) isEqualToString:@"WINMapMaskView"];
+}
+
+
+static NSString *GCCColorStr(CGColorRef cg) {
+    if (!cg) return @"-";
+    size_t n = CGColorGetNumberOfComponents(cg);
+    const CGFloat *c = CGColorGetComponents(cg);
+    if (n == 2) return [NSString stringWithFormat:@"gray%.2f/a%.2f", c[0], c[1]];
+    if (n == 4) return [NSString stringWithFormat:@"rgba%.2f,%.2f,%.2f,%.2f", c[0], c[1], c[2], c[3]];
+    return [NSString stringWithFormat:@"%zucomp", n];
+}
+
+
+
+// 判定：半透明白色（白雾的特征——不透明白会把地图整个盖死，
+// 纯透明的又不显形）。只对这一类出手，避免误伤正常 UI。
+// 把窗口渲染到一张小灰度图上，返回「地图区」的平均亮度。
+// 白雾正在生效时这个值会接近 250；正常地图约 220-230。这样文件能自证抓取时机。
+// 把窗口截图到一张 39x85 的 sRGB 位图上，返回「地图区」的平均亮度。
+// 用它来自证：抓取的那一刻白雾在不在（正常地图 ~200-235，被压白 ~245+）。
+static CGFloat GCCScreenMapMean(UIWindow *w) {
+    const size_t W = 39, H = 85;
+    unsigned char *buf = calloc(W * H * 4, 1);
+    CGColorSpaceRef cs = CGColorSpaceCreateDeviceRGB();
+    CGContextRef c = CGBitmapContextCreate(buf, W, H, 8, W * 4, cs,
+                                           kCGImageAlphaPremultipliedLast | kCGBitmapByteOrder32Big);
+    CGColorSpaceRelease(cs);
+    if (!c) { free(buf); return -1; }
+    CGFloat px = w.bounds.size.width > 0 ? (CGFloat)W / w.bounds.size.width : 1;
+    CGContextScaleCTM(c, px * (w.bounds.size.width > 0 ? 1 : 1), px);
+    UIGraphicsPushContext(c);
+    [w drawViewHierarchyInRect:CGRectMake(0, 0, w.bounds.size.width, w.bounds.size.height)
+           afterScreenUpdates:NO];
+    UIGraphicsPopContext();
+    CGContextRelease(c);
+    double sum = 0; int n = 0;
+    for (size_t y = 20; y < 56; y++)
+        for (size_t x = 2; x < 37; x++) {
+            size_t o = (y * W + x) * 4;
+            sum += (buf[o] + buf[o + 1] + buf[o + 2]) / 3.0; n++;
+        }
+    free(buf);
+    return n ? (CGFloat)(sum / n) : -1;
+}
+
+static BOOL GCCIsWhiteVeil(UIView *v, CGFloat *outA) {
+    UIColor *bg = v.backgroundColor;
+    if (!bg) return NO;
+    if (@available(iOS 13.0, *)) bg = [bg resolvedColorWithTraitCollection:v.traitCollection];
+    CGColorRef cg = bg.CGColor;
+    if (!cg) return NO;
+    size_t n = CGColorGetNumberOfComponents(cg);
+    const CGFloat *c = CGColorGetComponents(cg);
+    CGFloat r = 0, g = 0, b = 0, a = 0;
+    if (n == 2) { r = g = b = c[0]; a = c[1]; }
+    else if (n == 4) { r = c[0]; g = c[1]; b = c[2]; a = c[3]; }
+    else return NO;
+    if (outA) *outA = a;
+    return r > 0.72 && g > 0.72 && b > 0.72 && a > 0.30 && a < 0.995;
+}
+
+static NSMutableArray *SweepLog = nil;
+
+// 每 300ms 扫一次：找出「覆盖 ≥70% 窗口的半透明白色视图」并压掉。
+
+
+// 0.5.46：上拉闪白的真凶是 AMapUIWaterFallContentSlidableView 的
+// headerPanGestureRecognizer / mockPanGestureRecognizer —— 手势不在类本体上，
+// 所以拦 addGestureRecognizer: 拦不住。这里精准摘除这两个手势（不动搜索栏）。
+static void StripSlidablePan(void) {
+    Class sv = NSClassFromString(@"AMapUIWaterFallContentSlidableView");
+    if (!sv) return;
+    for (UIWindow *w in UIApplication.sharedApplication.windows) {
+        if (w.hidden) continue;
+        NSMutableArray *q = [NSMutableArray arrayWithObject:w];
+        for (NSUInteger i = 0; i < q.count && q.count < 6000; i++) {
+            UIView *v = q[i];
+            for (UIView *sub in v.subviews) [q addObject:sub];
+            if (![v isKindOfClass:sv]) continue;
+            for (NSString *prop in @[@"headerPanGestureRecognizer", @"mockPanGestureRecognizer"]) {
+                id g = ObjectGetter(v, prop);
+                if (![g isKindOfClass:UIGestureRecognizer.class]) continue;
+                UIView *gv = ((UIGestureRecognizer *)g).view;
+                if (gv) [gv removeGestureRecognizer:g];
+                [v setValue:nil forKey:prop];
+            }
+            for (UIGestureRecognizer *g in [v.gestureRecognizers copy])
+                if ([g isKindOfClass:UIPanGestureRecognizer.class]) [v removeGestureRecognizer:g];
+        }
+    }
+}
+static void SweepFogOverlay(void) {
+    for (UIWindow *w in UIApplication.sharedApplication.windows) {
+        if (w.hidden || w.alpha < 0.02) continue;
+        CGRect wb = w.bounds;
+        NSMutableArray *q = [NSMutableArray arrayWithObject:w];
+        for (NSUInteger i = 0; i < q.count && q.count < 6000; i++) {
+            UIView *v = q[i];
+            for (UIView *sub in v.subviews) [q addObject:sub];
+            if (v == w || v.hidden || v.alpha < 0.02) continue;
+            CGRect f = [v convertRect:v.bounds toView:w];
+            if (f.size.width < wb.size.width * 0.50 || f.size.height < wb.size.height * 0.50) continue;
+            CGFloat a = 0;
+            if (!GCCIsWhiteVeil(v, &a)) continue;
+            if (SweepLog) {
+                [SweepLog addObject:[NSString stringWithFormat:@"%@ {{%.0f,%.0f},{%.0f,%.0f}} a=%.2f 父=%@",
+                    NSStringFromClass(v.class), f.origin.x, f.origin.y, f.size.width, f.size.height, a,
+                    NSStringFromClass(v.superview.class)]];
+            }
+            NSLog(@"[GaodeClean] fog sweep hides %@ a=%.2f", NSStringFromClass(v.class), a);
+            v.hidden = YES;
+        }
+    }
+}
+
+static void SealBlurOverlay(void) {
+    Class mask = NSClassFromString(@"WINMapMaskView");
+    if (mask) {
+        SEL sh = @selector(setHidden:);
+        Method m = class_getInstanceMethod(mask, sh);
+        if (m) {
+            IMP o = method_getImplementation(m);
+            const char *t = method_getTypeEncoding(m);
+            Replace(mask, sh, imp_implementationWithBlock(^(UIView *self, __unused BOOL hidden) {
+                ((void (*)(id, SEL, BOOL))o)(self, sh, YES);
+            }), t);
+        }
+        SEL sa = @selector(setAlpha:);
+        Method m2 = class_getInstanceMethod(mask, sa);
+        if (m2) {
+            IMP o2 = method_getImplementation(m2);
+            const char *t2 = method_getTypeEncoding(m2);
+            Replace(mask, sa, imp_implementationWithBlock(^(UIView *self, __unused CGFloat a) {
+                ((void (*)(id, SEL, CGFloat))o2)(self, sa, 0);
+            }), t2);
+        }
+        HookVoid(@"WINMapMaskView", @"layoutSubviews", ^(UIView *v) { v.hidden = YES; v.alpha = 0; });
+    }
+    // AUGlobalBlurService 往窗口加的全屏模糊视图同样封死。
+    HookVoid(@"AUGlobalBlurService", @"addBlurViewToScreen", ^(id s) { [[s valueForKey:@"maskViews"] makeObjectsPerformSelector:@selector(removeFromSuperview)]; });
+    HookVoid(@"AUGlobalBlurService", @"startService", ^(id s) { ((void (*)(id, SEL))objc_msgSend)(s, NSSelectorFromString(@"clearBlurViews")); });
+    // 根因入口：底栏上滑 → WINViewControl showMapMaskView → 亮起全屏白色蒙版。
+    // 二进制实测签名：showMapMaskView B16@0:8（返回 BOOL！）、resetMapMaskView v16@0:8、
+    // setShowMapMaskView: v20@0:8B16。showMapMaskView 必须返回 NO 才算拒绝，
+    // 早先按 "void" 判断会直接跳过它 —— 拦截落空的坑。
+    {
+        Class vc = NSClassFromString(@"WINViewControl");
+        SEL sl = NSSelectorFromString(@"showMapMaskView");
+        Method mm = class_getInstanceMethod(vc, sl);
+        if (mm) Replace(vc, sl, imp_implementationWithBlock(^(id self) { return NO; }),
+                        method_getTypeEncoding(mm));
+        SEL rl = NSSelectorFromString(@"resetMapMaskView");
+        Method rm = class_getInstanceMethod(vc, rl);
+        if (rm) Replace(vc, rl, imp_implementationWithBlock(^(id self) {}),
+                        method_getTypeEncoding(rm));
+        SEL sl2 = NSSelectorFromString(@"setShowMapMaskView:");
+        Method mm2 = class_getInstanceMethod(vc, sl2);
+        if (mm2) Replace(vc, sl2, imp_implementationWithBlock(^(id self, __unused BOOL on) {}),
+                         method_getTypeEncoding(mm2));
+    }
+    // 诊断 v2：把「谁盖在地图上」查清楚。
+    // 上一版只按类名关键词过滤，漏掉了普通 UIView。这一版直接列
+    //  (A) 地图上几个探测点上的完整图层栈（自下而上）
+    //  (B) MapWidgetContainerView 的整棵子树
+    //  (C) 所有面积 ≥ 50% 窗口且可见的视图
+    // 全部迭代 BFS，不递归。
+    // 0.6.0（正式版）：摘除全部诊断埋点。
+    // 这个定时器原本同时挂着两件事 —— 功能性动作 + 诊断日志，现在只留功能：
+    //   SweepFogOverlay()  清掉「覆盖 >=50% 窗口的半透明白层」（0.5.37 起）
+    //   StripSlidablePan() 维护上拉手势的摘除结果（0.5.46 起）
+    // 诊断部分（每 1.5s 全窗口树 BFS + 写 Documents/GaodeClean-blur.txt）整段删除：
+    // 正式包不再产生任何日志文件，也没有每分钟 40 次的全树遍历。
+    static dispatch_source_t actionTimer = nil;
+    if (!actionTimer) {
+        actionTimer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, dispatch_get_main_queue());
+        dispatch_source_set_timer(actionTimer, dispatch_time(DISPATCH_TIME_NOW, 300 * NSEC_PER_MSEC),
+                                  300 * NSEC_PER_MSEC, 100 * NSEC_PER_MSEC);
+        dispatch_source_set_event_handler(actionTimer, ^{
+            if (!SweepLog) SweepLog = [NSMutableArray array];
+            SweepFogOverlay();
+            StripSlidablePan();
+        });
+        dispatch_resume(actionTimer);
+    }
 }
 
 static CGPoint LimitedOffset(UIScrollView *scroll, CGPoint point) {
@@ -766,11 +966,48 @@ static BOOL IsInputLike(UIView *v) {
 // - 行容器收起 + 内容上移各带一次性守卫（0.4.31 无守卫 = 历史列表飞出屏幕）；
 // - 任何输入相关视图先被 IsInputLike 拦下。
 
+static void AlignWeatherRow(UIView *row) {
+    // 0.5.33：把「天气+LOGO」行对齐到车机钮右边。用坐标转换 + center 写入
+    // （transform 安全、幂等，不累积误差）。
+    static BOOL inAlign = NO;
+    if (inAlign) return;
+    if (!row || !row.window || !row.superview) return;
+    UIView *car = CachedCar;
+    if (!car || !car.window) return;
+    inAlign = YES;
+    UIWindow *win = row.window;
+    CGRect carRect = [car convertRect:car.bounds toView:win];
+    CGPoint wantWin = CGPointMake(CGRectGetMaxX(carRect) + 8,
+                                  CGRectGetMidY(carRect) - row.bounds.size.height * 0.5);
+    CGPoint wantInParent = [row.superview convertPoint:wantWin fromView:win];
+    CGPoint wantCenter = CGPointMake(wantInParent.x + row.bounds.size.width * 0.5,
+                                     wantInParent.y + row.bounds.size.height * 0.5);
+    if (fabs(row.center.x - wantCenter.x) > 0.5 || fabs(row.center.y - wantCenter.y) > 0.5) {
+        row.center = wantCenter;
+    }
+    inAlign = NO;
+}
+
+static void HookWeatherRow(void) {
+    // 0.5.39：改为「布局完成后再对齐」，不再拦截 setFrame:/setCenter:。
+    // 0.5.33 的 setFrame:/setCenter: 拦截会在 app 每一次写入时重排布局，
+    // 上拉发现时 app 的地图快照背板被截成空白 → 整张地图被白雾蒙住
+    // （实测：0.5.30/0.5.32 无白雾，只有 0.5.33 有，唯一差异就是这个拦截器）。
+    Class cls = NSClassFromString(@"WINGroupMapWidget");
+    if (!cls) return;
+    HookVoid(@"WINGroupMapWidget", @"layoutSubviews", ^(UIView *v) {
+        if (!objc_getAssociatedObject(v, &AlignedKey)) return;
+        AlignWeatherRow(v);
+    });
+}
+
 static void LayoutMinimalHome(id handler) {
     if (LayingOutHome) return;
     UIView *bar = ObjectGetter(handler, @"searchBar");
     UIView *sheet = ObjectGetter(handler, @"slidableView");
     id tabs = ObjectGetter(handler, @"tabBarControl");
+    if (tabs) CachedTabs = tabs;
+    if ([bar isKindOfClass:UIView.class]) SearchBarView = bar;
     id selected = ObjectGetter(tabs, @"selectedViewControl");
     if (![bar isKindOfClass:UIView.class] || ![sheet isKindOfClass:UIView.class] || !sheet.superview) return;
     BOOL home = [NSStringFromClass([selected class]) isEqualToString:@"WINAmapHomeControl"];
@@ -781,6 +1018,10 @@ static void LayoutMinimalHome(id handler) {
     BarParent = parent;
     LayingOutHome = YES;
     if (bar.superview != parent) [parent addSubview:bar];
+    // 0.5.9：恢复隐藏「上拉发现」容器（sheet）与其遮罩。
+    // 0.5.1 曾移除这三行，结果面板的白底永久露出（跨版本实测：0.5.0 无白块，
+    // 0.5.7/0.5.8 每帧都在 544-682pt 出现纯白块）。搜索栏已挂到 parent
+    // 并在 sheet 之外，隐藏 sheet 不会影响它（0.5.0 即如此工作）。
     sheet.hidden = YES;
     UIView *mask = ObjectGetter(handler, @"maskView");
     if ([mask isKindOfClass:UIView.class]) mask.hidden = YES;
@@ -790,7 +1031,40 @@ static void LayoutMinimalHome(id handler) {
     CGFloat height = MAX(50, MIN(64, bar.bounds.size.height));
     bar.frame = CGRectMake(0, MAX(0, tabFrame.origin.y - height - 12), parent.bounds.size.width, height);
     [parent bringSubviewToFront:bar];
-    // 0.4.19 首帧锁定：缓存最终 y，state 机/原生布局再拉也立即弹回
+    // 0.5.27：移除全部天气行实验代码（含导致闪退的诊断块）。
+    // 结论：415pt 那行「☀温度+高德地图+比例尺」不是 WINScaleLineLogoMapWidget
+    // （该类只有 logoView+scaleLineView，实测在 1073pt 屏幕外）。待确认真身。
+    // ===== 0.5.30：把「天气+LOGO+比例尺」整行移到车机钮右边 =====
+    // 诊断（diag4）确认结构：
+    //   WINGroupMapWidget {{10,411},{259,20}}          ← 父容器（整行）
+    //     ├─ WINWeatherLimitView      {{10,411},{61,20}}    ☀26°C
+    //     └─ WINScaleLineLogoMapWidget{{72,1073},{188,20}}  🔷高德地图+200米
+    //   WINDeviceInterconnectWidget {{10,650},{44,44}}  ← 车机钮
+    // 之前只移子视图 LOGO → 温度没动，只对一半。现在移**父容器**，两个一起走。
+    {
+        UIWindow *win = bar.window;
+        static __weak UIView *CachedRow = nil;
+        if (win && (!CachedRow || !CachedRow.window)) {
+            NSMutableArray *q = [NSMutableArray arrayWithObject:win];
+            for (NSUInteger qi = 0; qi < q.count && q.count < 20000; qi++) {
+                UIView *v = q[qi];
+                [q addObjectsFromArray:v.subviews];
+                if ([NSStringFromClass(v.class) isEqualToString:@"WINGroupMapWidget"]) {
+                    // 确认是承载天气行的那个（宽 200~320、高 <40）
+                    CGRect r = [v convertRect:v.bounds toView:win];
+                    if (r.size.width > 150 && r.size.width < 360 && r.size.height < 40) {
+                        CachedRow = v; break;
+                    }
+                }
+            }
+        }
+        if (CachedRow && CachedRow.window && !CachedRow.hidden
+            && CachedCar && CachedCar.window && bar.window && CachedRow.superview) {
+            objc_setAssociatedObject(CachedRow, &AlignedKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            AlignWeatherRow(CachedRow);
+        }
+    }
+    // ===== 0.4.19 首帧锁定：缓存最终 y，state 机/原生布局再拉也立即弹回
     if (!SearchBarSettled) {
         SearchBarSettledY = bar.frame.origin.y;
         SearchBarSettled = YES;
@@ -803,9 +1077,26 @@ static void LayoutMinimalHome(id handler) {
     AlignCornerWidgets(bar);
 }
 
-// 车机圆钮（WINDeviceInterconnectWidget）与右下组合钮（WINAJXCombinedWidgetView
-// tag=template_mainmapRightBottom）原本按全景地图布局；搜索框下沉到底栏上方后
-// 把它们对齐到搜索框上方 8pt（0.4.4 方向），随 0.2s 周期持续跟随。
+// 0.5.57：切页时 app 会把搜索栏从父视图摘掉，而归位只发生在 LayoutMinimalHome 里 ——
+// 它由 100ms 的 tick 驱动。逐帧实测缺席时长恰好是 16.7ms 的整数倍(17/33/67/83/100ms)，
+// 就是在「等下一次 tick」。这里加一段 16ms 的快修窗口：搜索栏被动到的瞬间启动，
+// 640ms 内以 60Hz 反复跑 LayoutMinimalHome，把缺席从「最多 100ms」压到「最多 1 帧」。
+static dispatch_source_t BarFixTimer;
+static int BarFixTicks;
+static void KickBarFix(void) {
+    BarFixTicks = 80;                       // 80 × 8ms ≈ 640ms
+    if (BarFixTimer) return;
+    BarFixTimer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, dispatch_get_main_queue());
+    dispatch_source_set_timer(BarFixTimer, dispatch_time(DISPATCH_TIME_NOW, 0),
+                              8ull * NSEC_PER_MSEC, 2ull * NSEC_PER_MSEC);
+    dispatch_source_set_event_handler(BarFixTimer, ^{
+        if (BarFixTicks <= 0) { dispatch_source_cancel(BarFixTimer); BarFixTimer = nil; return; }
+        BarFixTicks--;
+        for (id h in HomeHandlers.allObjects) LayoutMinimalHome(h);
+    });
+    dispatch_resume(BarFixTimer);
+}
+
 static BOOL IsRightBottomWidget(UIView *v) {
     if (![NSStringFromClass(v.class) isEqualToString:@"WINAJXCombinedWidgetView"]) return NO;
     id tag = ObjectGetter(v, @"getItemTag");
@@ -818,11 +1109,11 @@ static void AlignOneWidget(UIView *bar, UIView *w, CGFloat barTop) {
     if (!w.window) return;
     UIWindow *win = bar.window;
     CGRect r = [w convertRect:w.bounds toView:win];
-    // 0.4.43：改顶边对齐（固定 44pt 高），高度变化(两钮88→单钮44)不再移动顶部
-    CGFloat targetTop = barTop - 52;   // 44pt 圆钮顶边：底边 = barTop-8
-    if (fabs(r.origin.y - targetTop) >= 1) {
+    // 0.5.1：改底边对齐——不管 44/88 高，底边都贴在搜索框上方 8pt
+    CGFloat targetBottom = barTop - 8;
+    if (fabs(CGRectGetMaxY(r) - targetBottom) >= 1) {
         CGRect f = w.frame;
-        f.origin.y += (targetTop - r.origin.y);
+        f.origin.y += (targetBottom - CGRectGetMaxY(r));
         w.frame = f;
     }
     // 逐 widget 对齐标记：对齐过才显示，避免冷启动在原生位置(如 {0,0})闪现
@@ -831,16 +1122,18 @@ static void AlignOneWidget(UIView *bar, UIView *w, CGFloat barTop) {
     HomeSettled = YES;
 }
 
+
 static void AlignCornerWidgets(UIView *bar) {
     if (!bar.window) return;
     UIWindow *win = bar.window;
     CGFloat barTop = [bar convertPoint:CGPointZero toView:win].y;
     if (barTop < 40) return;                                 // 搜索框尚未就位（0.4.6: 80→40）
 
-    // 0.5.0：缓存两个圆钮实例，每轮直接对齐，只有实例失效时才重扫窗口树
+    // 0.5.0：缓存圆钮实例，每轮直接对齐，只有实例失效时才重扫窗口树
     if (!CachedCar || !CachedCar.window) CachedCar = nil;
     if (!CachedRight || !CachedRight.window) CachedRight = nil;
-    if (!CachedCar || !CachedRight) {
+    if (!CachedRoute || !CachedRoute.window) CachedRoute = nil;
+    if (!CachedCar || !CachedRight || !CachedRoute) {
         NSMutableArray<UIView *> *queue = [NSMutableArray arrayWithObject:win];
         for (NSUInteger i = 0; i < queue.count && queue.count < 20000; i++) {
             UIView *v = queue[i];
@@ -848,11 +1141,22 @@ static void AlignCornerWidgets(UIView *bar) {
             NSString *cn = NSStringFromClass(v.class);
             if ([cn isEqualToString:@"WINDeviceInterconnectWidget"]) CachedCar = v;
             else if (IsRightBottomWidget(v)) CachedRight = v;
-            if (CachedCar && CachedRight) break;
+            else if ([cn isEqualToString:@"WINRouteLineWidgetView"]) CachedRoute = v;
+            if (CachedCar && CachedRight && CachedRoute) break;
         }
     }
     if (CachedCar) AlignOneWidget(bar, CachedCar, barTop);
     if (CachedRight) AlignOneWidget(bar, CachedRight, barTop);
+    // 0.5.1：线路按钮（组合按钮下半部分）原生 hid=1，强制显示，保持原位在组合按钮内部
+    if (CachedRoute) {
+        if (CachedRoute.hidden) CachedRoute.hidden = NO;
+        // 组合按钮高度不足时撑到 88，让线路按钮完整显示（不再溢出被裁）
+        if (CachedRight && CachedRight.bounds.size.height < 88 && CachedRight.bounds.size.width > 0) {
+            CGRect f = CachedRight.frame;
+            f.size.height = 88;
+            CachedRight.frame = f;
+        }
+    }
 }
 
 static void HookWidgetSetFrame(NSString *className) {
@@ -863,13 +1167,14 @@ static void HookWidgetSetFrame(NSString *className) {
     IMP fo = fm ? method_getImplementation(fm) : NULL;
     if (fm) {
         Replace(cls, fs, imp_implementationWithBlock(^(UIView *self, CGRect rect) {
-            // 0.4.47：对齐后把圆钮 y 钉死在搜索框上方 8pt，app 再拉回原生位置也不动
+            // 0.5.1：底边对齐钳位——不管 44/88 高，底边都贴在搜索框上方 8pt
             if (SearchBarSettled && objc_getAssociatedObject(self, &AlignedKey)) {
                 UIView *sv = self.superview;
                 if (sv && self.window) {
                     CGPoint p = [sv convertPoint:CGPointMake(rect.origin.x, rect.origin.y) toView:self.window];
-                    CGFloat targetTop = SearchBarSettledY - 52;
-                    if (fabs(p.y - targetTop) > 2) rect.origin.y += (targetTop - p.y);
+                    CGFloat targetBottom = SearchBarSettledY - 8;
+                    CGFloat proposedBottom = p.y + rect.size.height;
+                    if (fabs(proposedBottom - targetBottom) > 2) rect.origin.y += (targetBottom - proposedBottom);
                 }
             }
             ((void (*)(id, SEL, CGRect))fo)(self, fs, rect);
@@ -886,13 +1191,97 @@ static void HookWidgetSetFrame(NSString *className) {
                 if (sv && self.window) {
                     CGFloat proposedY = center.y - self.bounds.size.height / 2;
                     CGPoint p = [sv convertPoint:CGPointMake(0, proposedY) toView:self.window];
-                    CGFloat targetTop = SearchBarSettledY - 52;
-                    if (fabs(p.y - targetTop) > 2) center.y += (targetTop - p.y);
+                    CGFloat targetBottom = SearchBarSettledY - 8;
+                    CGFloat proposedBottom = p.y + self.bounds.size.height;
+                    if (fabs(proposedBottom - targetBottom) > 2) center.y += (targetBottom - proposedBottom);
                 }
             }
             ((void (*)(id, SEL, CGPoint))co)(self, cs, center);
         }), method_getTypeEncoding(cm));
     }
+}
+
+// 0.5.1：移除底栏首页「上拉发现」提示文字（按文本内容隐藏）
+static void HideDiscoverPrompt(UIView *bar) {
+    NSArray *nodes = Flatten(bar);
+    if (!nodes) return;
+    for (UIView *v in nodes) {
+        if (v == bar || v.hidden) continue;
+        NSString *text = NodeText(v);
+        if ([text containsString:@"上拉"] || [text containsString:@"发现"]) {
+            v.hidden = YES;
+        }
+    }
+}
+
+// 底栏的 legacy 玻璃（模糊/backdrop/chrome/shadow）被 app 在按下时放大到覆盖地图区，
+// 这就是残留的模糊带。只把「明显超出底栏范围」的收回到底栏矩形；不隐藏、不改 alpha。
+static void ConfineLegacyChrome(UIView *bar) {
+    if (!bar.bounds.size.width || !bar.bounds.size.height) return;
+    UIWindow *win = bar.window;
+    CGFloat sw = win ? win.bounds.size.width : bar.bounds.size.width;
+    CGFloat sh = win ? win.bounds.size.height : bar.bounds.size.height;
+    for (NSString *name in @[@"amap_legacyBlurView", @"amap_legacyChromeView",
+                             @"amap_legacyBackdropView", @"amap_legacyShadowView",
+                             @"amap_legacyBackdropGradient"]) {
+        UIView *v = ObjectGetter(bar, name);
+        if (![v isKindOfClass:UIView.class] || !v.superview || v.hidden) continue;
+        CGRect f = v.frame;
+        if (f.size.width < sw * 0.7 || f.size.height < sh * 0.35) continue;   // 没被放大就不动
+        CGRect target = [bar convertRect:bar.bounds toView:v.superview];
+        [CATransaction begin];
+        [CATransaction setDisableActions:YES];
+        v.frame = target;
+        [CATransaction commit];
+    }
+}
+
+// 只写文件：完整 dump 窗口中「比 300x200 还大」的视图（含底栏内部子视图），
+// 用来定位产生模糊/压暗的那个视图。不 hook 任何显示 API，不改任何状态。
+static void LogCoveringViews(UIView *bar) {
+    UIWindow *win = bar.window;
+    if (!win) return;
+    static NSUInteger written;
+    if (written >= 400) return;
+    NSMutableArray<NSString *> *lines = [NSMutableArray array];
+    [lines addObject:@"--- BAR.PARENT CHAIN ---"];
+    for (UIView *v = bar; v; v = v.superview) {
+        [lines addObject:[NSString stringWithFormat:@"  %@ %.0f,%.0f %.0fx%.0f hid=%d a=%.2f",
+                          NSStringFromClass(v.class), v.frame.origin.x, v.frame.origin.y,
+                          v.frame.size.width, v.frame.size.height, v.hidden, v.alpha]];
+    }
+    [lines addObject:@"--- BAR SUBVIEWS ---"];
+    for (UIView *v in Flatten(bar)) {
+        CGRect f = v.frame;
+        if (f.size.width < 100 || f.size.height < 40) continue;
+        NSString *cn = NSStringFromClass(v.class);
+        UIColor *bg = v.backgroundColor;
+        CGFloat a = 0;
+        BOOL hasBG = [bg getRed:NULL green:NULL blue:NULL alpha:&a] && a > 0.05;
+        [lines addObject:[NSString stringWithFormat:@"  %@ %.0f,%.0f %.0fx%.0f hid=%d a=%.2f bg=%d",
+                          cn, f.origin.x, f.origin.y, f.size.width, f.size.height,
+                          v.hidden, v.alpha, hasBG]];
+        if (lines.count > 60) break;
+    }
+    [lines addObject:@"--- WINDOW BIG VIEWS ---"];
+    for (UIView *v in Flatten(win)) {
+        CGRect f = v.frame;
+        if (f.size.width < 300 || f.size.height < 200) continue;
+        NSString *cn = NSStringFromClass(v.class);
+        [lines addObject:[NSString stringWithFormat:@"  %@ %.0f,%.0f %.0fx%.0f hid=%d a=%.2f inBar=%d",
+                          cn, f.origin.x, f.origin.y, f.size.width, f.size.height,
+                          v.hidden, v.alpha, (int)[v isDescendantOfView:bar]]];
+        if (lines.count > 130) break;
+    }
+    if (lines.count < 4) return;
+    written += lines.count;
+    NSURL *doc = [NSFileManager.defaultManager URLsForDirectory:NSDocumentDirectory inDomains:NSUserDomainMask].firstObject;
+    if (!doc) return;
+    NSURL *url = [doc URLByAppendingPathComponent:@"GaodeClean-cover.txt"];
+    NSString *text = [[lines componentsJoinedByString:@"\n"] stringByAppendingString:@"\n=====\n"];
+    NSFileHandle *fh = [NSFileHandle fileHandleForWritingAtPath:url.path];
+    if (!fh) [text writeToURL:url atomically:YES encoding:NSUTF8StringEncoding error:nil];
+    else { [fh seekToEndOfFile]; [fh writeData:[text dataUsingEncoding:NSUTF8StringEncoding]]; [fh closeFile]; }
 }
 
 static void CenterTabButtons(UIView *bar) {
@@ -913,9 +1302,14 @@ static void CenterTabButtons(UIView *bar) {
         center.x = CGRectGetMidX(bar.bounds) + (index == 0 ? -0.5 : 0.5) * separation;
         item.center = [bar convertPoint:center toView:item.superview];
     }
+    // 0.5.12：完整恢复 0.5.0 的胶囊跟随逻辑。
+    // 0.5.11 的对照实验证明「完全不写胶囊」会错位——胶囊留在原生位置，
+    // 而图标被 CenterTabButtons 挪到了 136/256pt，所以胶囊看起来跑到了两端。
+    // 0.5.0 之所以对得上，靠的就是下面这两步：
+    //   ① amap_syncLegacySelectionAnimated:NO —— 让 app 按新图标位置重算胶囊
+    //   ② 只写 origin.x / width —— 跟随选中项，绝不碰 transform
     SEL sync = NSSelectorFromString(@"amap_syncLegacySelectionAnimated:");
     if ([bar respondsToSelector:sync]) ((void (*)(id, SEL, BOOL))objc_msgSend)(bar, sync, NO);
-    // 0.4.17：legacy 选中胶囊只跟随当前选中的那个按钮（药丸），不再框两个。
     UIView *pill = ObjectGetter(bar, @"amap_legacySelectionView");
     if (selectedItem && [pill isKindOfClass:UIView.class]) {
         CGRect r = [selectedItem convertRect:selectedItem.bounds toView:pill.superview];
@@ -927,11 +1321,12 @@ static void CenterTabButtons(UIView *bar) {
         }
     }
     adjusting = NO;
+    LogCoveringViews(bar);
 }
 
 static void InstallMinimalHome(void) {
-    HookVoid(@"WINTabBar", @"layoutSubviews", ^(UIView *bar) { CenterTabButtons(bar); });
-    HookVoid(@"WINTabBar", @"amap_relayoutTabItems", ^(UIView *bar) { CenterTabButtons(bar); });
+    HookVoid(@"WINTabBar", @"layoutSubviews", ^(UIView *bar) { CenterTabButtons(bar); HideDiscoverPrompt(bar); });
+    HookVoid(@"WINTabBar", @"amap_relayoutTabItems", ^(UIView *bar) { CenterTabButtons(bar); HideDiscoverPrompt(bar); });
 
     HookVoid(@"GDAmapHomeHandler", @"viewDidLoad", ^(id handler) {
         [HomeHandlers addObject:handler];
@@ -941,17 +1336,143 @@ static void InstallMinimalHome(void) {
     });
     HookVoid(@"GDAmapHomeHandler", @"layoutBottomSearchBar", ^(id handler) { [HomeHandlers addObject:handler]; LayoutMinimalHome(handler); });
     HookVoid(@"GDAmapHomeHandler", @"viewDidLayoutSubviews", ^(id handler) { [HomeHandlers addObject:handler]; LayoutMinimalHome(handler); });
+    // 0.5.32：移除「上拉发现」——把 sheet 的手势/交互彻底关掉，
+    // 上拉不再弹出发现面板（面板本身也被 sheet.hidden 挡着）。
+    SealBlurOverlay();
+    // 0.5.47：MapWidgetContainerView 被 app 在滑动时淡到 0（实测 a=0.00，弹簧过冲到 -2.33）
+    // → 控件整片消失。这里把它的 alpha 恒定为 1（不动 setHidden:，避免按死搜索栏）。
+    {
+        Class mc = NSClassFromString(@"MapWidgetContainerView");
+        if (mc) {
+            SEL sa = @selector(setAlpha:);
+            Method m = class_getInstanceMethod(mc, sa);
+            if (m) {
+                IMP o = method_getImplementation(m); const char *t = method_getTypeEncoding(m);
+                Replace(mc, sa, imp_implementationWithBlock(^(UIView *self, __unused CGFloat a) {
+                    ((void (*)(id, SEL, CGFloat))o)(self, sa, 1.0);
+                }), t);
+            }
+        }
+    }
+    // 0.5.48：地图本体 AMap3DView 的透明度（两个入口，防止绕过 setAlpha:）。
+    {
+        Class mv = NSClassFromString(@"AMap3DView");
+        if (mv) {
+            SEL sa = @selector(setAlpha:);
+            Method m = class_getInstanceMethod(mv, sa);
+            if (m) {
+                IMP o = method_getImplementation(m); const char *t = method_getTypeEncoding(m);
+                Replace(mv, sa, imp_implementationWithBlock(^(UIView *self, __unused CGFloat a) {
+                    ((void (*)(id, SEL, CGFloat))o)(self, sa, 1.0);
+                }), t);
+            }
+        }
+        SEL so = @selector(setOpacity:);
+        Method lm = class_getInstanceMethod(CALayer.class, so);
+        if (lm) {
+            IMP o2 = method_getImplementation(lm); const char *t2 = method_getTypeEncoding(lm);
+            Replace(CALayer.class, so, imp_implementationWithBlock(^(CALayer *self, float op) {
+                id dg = self.delegate;
+                if (dg && [dg isKindOfClass:mv] && op < 0.99f) op = 1.0f;
+                ((void (*)(id, SEL, float))o2)(self, so, op);
+            }), t2);
+        }
+    }
+    // 0.5.49：地图引擎的全局蒙版（VMap）—— 从命令层封死，永不开启。
+    {
+        Class vc = NSClassFromString(@"VMapDSLBaseCommand");
+        if (vc) {
+            SEL sl = NSSelectorFromString(@"setGlobalShowMask:");
+            Method m = class_getInstanceMethod(vc, sl);
+            if (m) Replace(vc, sl, imp_implementationWithBlock(^(id self, __unused BOOL on) {}),
+                           method_getTypeEncoding(m));
+            SEL sc = NSSelectorFromString(@"setMaskColor:value:");
+            Method m2 = class_getInstanceMethod(vc, sc);
+            if (m2) Replace(vc, sc, imp_implementationWithBlock(^(id self, __unused id ek, __unused int c) {}),
+                            method_getTypeEncoding(m2));
+        }
+    }
+    // 0.5.50：上拉手势的另一个宿主 —— 只对这两个类的【本体】摘 pan/swipe，
+    // 绝不碰子树（搜索栏是 WINMultiStyleRootView 的子视图）。
+    {
+        static dispatch_source_t gt = nil;
+        if (!gt) {
+            gt = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, dispatch_get_main_queue());
+            dispatch_source_set_timer(gt, dispatch_time(DISPATCH_TIME_NOW, 400 * NSEC_PER_MSEC),
+                                      400 * NSEC_PER_MSEC, 150 * NSEC_PER_MSEC);
+            dispatch_source_set_event_handler(gt, ^{
+                for (UIWindow *w in UIApplication.sharedApplication.windows) {
+                    if (w.hidden) continue;
+                    NSMutableArray *q = [NSMutableArray arrayWithObject:w];
+                    for (NSUInteger i = 0; i < q.count && q.count < 6000; i++) {
+                        UIView *v = q[i];
+                        for (UIView *sub in v.subviews) [q addObject:sub];
+                        NSString *cn = NSStringFromClass(v.class);
+                        if (![cn isEqualToString:@"WINTabBar"] &&
+                            ![cn isEqualToString:@"WINMultiStyleRootView"]) continue;
+                        for (UIGestureRecognizer *g in [v.gestureRecognizers copy])
+                            if ([g isKindOfClass:UIPanGestureRecognizer.class] ||
+                                [g isKindOfClass:UISwipeGestureRecognizer.class])
+                                [v removeGestureRecognizer:g];
+                    }
+                }
+            });
+            dispatch_resume(gt);
+        }
+    }
+    HookWeatherRow();
+    HookVoid(@"AMapUIWaterFallContentSlidableView", @"didMoveToWindow", ^(UIView *v) {
+        v.userInteractionEnabled = NO;
+        v.hidden = YES;
+    });
+    HookVoid(@"AMapUIWaterFallContentSlidableView", @"layoutSubviews", ^(UIView *v) {
+        v.hidden = YES;
+        v.userInteractionEnabled = NO;
+    });
+    // 0.5.45：压白雾的最小组合 —— 只断「上拉」这条路。
+    // 绝不碰 setHidden:（那是按死搜索页的元凶：高德搜索页本身就是这个面板）。
+    {
+        Class sv = NSClassFromString(@"AMapUIWaterFallContentSlidableView");
+        if (sv) {
+            SEL ag = @selector(addGestureRecognizer:);
+            Method m = class_getInstanceMethod(sv, ag);
+            if (m) Replace(sv, ag, imp_implementationWithBlock(^(id self, __unused id g) {}),
+                           method_getTypeEncoding(m));
+            for (NSString *setter in @[@"setHeaderPanGestureRecognizer:",
+                                       @"setMockPanGestureRecognizer:"]) {
+                SEL sl = NSSelectorFromString(setter);
+                Method mm = class_getInstanceMethod(sv, sl);
+                if (mm) Replace(sv, sl, imp_implementationWithBlock(^(id self, __unused id g) {}),
+                                method_getTypeEncoding(mm));
+            }
+        }
+    }
     Class cls = NSClassFromString(@"WINAMapHomeStateMachine");
     SEL sel = NSSelectorFromString(@"setState:");
     Method method = class_getInstanceMethod(cls, sel);
     if (method) {
         IMP original = method_getImplementation(method);
         Replace(cls, sel, imp_implementationWithBlock(^(id self, id state) {
+            // 0.5.8：ImmersiveState 进入时会发 D_map_immersive_gauss_active 事件
+            // （地图高斯模糊 = 那条软边白雾带）。改派到 EmptyImmersiveState ——
+            // 保留沉浸布局，但不触发高斯。这是源头修法：
+            // 不再需要隐藏 WaterFall 容器（那是白区 506pt 的成因）。
             NSString *name = NSStringFromClass([state class]);
-            id compact = nil;
-            if ([name containsString:@"BottomSearchBar"]) compact = ObjectGetter(self, @"bottomSearchBarImmersiveState");
-            if ([name containsString:@"TopSearchBar"]) compact = ObjectGetter(self, @"topSearchBarImmersiveState");
-            ((void (*)(id, SEL, id))original)(self, sel, compact ?: state);
+            id replacement = state;
+            // 0.5.45：拒绝「上拉」状态跃迁 —— 上拉手势的落点就在这，
+            // 白雾是这条路径上的产物。保持当前状态即可（不动任何 setHidden:）。
+            if ([name containsString:@"PullUp"]) {
+                id cur = ObjectGetter(self, @"currentState");
+                if (cur) replacement = cur;
+            }
+            if ([name containsString:@"Immersive"] && ![name containsString:@"EmptyImmersive"]) {
+                id empty = nil;
+                if ([name containsString:@"BottomSearchBar"]) empty = ObjectGetter(self, @"bottomSearchBarEmptyImmersiveState");
+                if ([name containsString:@"TopSearchBar"]) empty = ObjectGetter(self, @"topSearchBarEmptyImmersiveState");
+                if (!empty) empty = ObjectGetter(self, @"bottomSearchBarEmptyImmersiveState");
+                if (empty) replacement = empty;
+            }
+            ((void (*)(id, SEL, id))original)(self, sel, replacement);
         }), method_getTypeEncoding(method));
     }
     sel = NSSelectorFromString(@"showTabBar:animated:");
@@ -978,6 +1499,13 @@ static void InstallMinimalHome(void) {
         if (!SearchBarSettled) {
             UIView *b = bar;
             if (!b.hidden) b.hidden = YES;
+        }
+        // 0.5.54：切页（我的→首页）时 app 会短暂隐藏搜索栏 —— 逐帧实测 5 帧(≈42ms)
+        // 搜索栏缺席、露出地图，就是你看到的「闪一下」。冷启动结束后一律强制可见；
+        // 位置由下面的首帧锁定负责，不会跑偏（冷启动阶段仍按原逻辑隐藏）。
+        if (SearchBarSettled && ColdTicks >= 15) {
+            UIView *b = bar;
+            if (b.hidden) b.hidden = NO;
         }
         // 0.4.19 首帧锁定：原生布局把搜索栏拉回顶部时立即钉回最终位置
         if (SearchBarSettled) {
@@ -1046,15 +1574,50 @@ static void InstallMinimalHome(void) {
         }
     }
     // 0.4.50：hook didMoveToSuperview——app 重挂搜索栏时同步触发，父视图一被换立刻挂回 BarParent
+    // 0.5.56：真正的机制查清了 —— app 切页时是把搜索栏 **removeFromSuperview**（不是 hidden，
+    //         所以 0.5.54/0.5.55 的 layoutSubviews 强制可见 与 setHidden: 拦截全部无效）。
+    //         而 b.superview && 这个守卫恰好把「被摘掉」(superview==nil) 这个唯一要管的场景跳过了，
+    //         于是搜索栏以「无父视图」状态消失 4-5 帧(≈40ms) —— 就是「切到首页搜索栏闪一下」。
+    // 新规则：当前是【首页】选中、冷启动已结束、且搜索栏被摘掉时显示状态 → 立刻挂回 BarParent 并钉回 y。
+    //         被摘时若已 hidden（切到「我的」的正常摘除）则不介入；切「我的」时 onHome=NO 也不介入。
     HookVoid(@"WINQuickSearchBarV2", @"didMoveToSuperview", ^(UIView *b) {
-        if (SearchBarSettled && BarParent && b.superview && b.superview != BarParent) {
-            [BarParent addSubview:b];
-            CGRect f = b.frame;
-            f.origin.y = SearchBarSettledY;
-            b.frame = f;
-            [BarParent bringSubviewToFront:b];
-        }
+        if (!SearchBarSettled || !BarParent || b.superview == BarParent) return;
+        if (ColdTicks < 15) return;
+        KickBarFix();                               // 0.5.57：被动到就立刻进快修，不等 100ms tick
+        // 0.5.58：不再等 selectedViewControl 翻转（app 切页完成才翻，实测有 ~33ms 延迟），
+        // 搜索栏一被 app 动到就立刻挂回并显示 —— 若当前其实是「我的」页，
+        // 8ms 快修会在 1 帧内由 LayoutMinimalHome(!home 分支) 再把它藏回去，视觉上不可见。
+        if (SearchBarView) b = SearchBarView;
+        [BarParent addSubview:b];
+        b.hidden = NO;
+        CGRect f = b.frame;
+        f.origin.y = SearchBarSettledY;
+        b.frame = f;
+        [BarParent bringSubviewToFront:b];
     });
+    // 0.5.55：切页（我的→首页）时 app 直接 hidden=YES 把搜索栏藏起来 —— 不移动父视图，
+    // 所以 0.4.50 的 didMoveToSuperview 钩子抓不到；逐帧实测缺席 4-5 帧(≈40ms)，
+    // 就是「切到首页搜索栏闪一下」。这里定向拒绝：
+    //   仅当【首页选中】且冷启动结束后，拒绝隐藏搜索栏。
+    //   切到「我的」时 onHome=NO，隐藏照常放行，不会在「我的」页露出搜索栏。
+    {
+        Class bc = NSClassFromString(@"WINQuickSearchBarV2");
+        if (bc) {
+            SEL sh = @selector(setHidden:);
+            Method m = class_getInstanceMethod(bc, sh);
+            if (m) {
+                IMP o = method_getImplementation(m);
+                const char *t = method_getTypeEncoding(m);
+                Replace(bc, sh, imp_implementationWithBlock(^(UIView *self, BOOL h) {
+                    if (h && ColdTicks >= 15 && CachedTabs) {
+                        id sel = ObjectGetter(CachedTabs, @"selectedViewControl");
+                        if ([NSStringFromClass([sel class]) isEqualToString:@"WINAmapHomeControl"]) h = NO;
+                    }
+                    ((void (*)(id, SEL, BOOL))o)(self, sh, h);
+                }), t);
+            }
+        }
+    }
     HookVoid(@"WINAJXCombinedItemView", @"layoutSubviews", ^(id view) { if (IsHiddenMapPromo(view)) [view setHidden:YES]; });
     cls = NSClassFromString(@"WINAJXCombinedItemView");
     sel = @selector(setHidden:);
@@ -1078,6 +1641,19 @@ static void InstallMinimalHome(void) {
     // 0.4.47：拦截两圆钮 setFrame:，对齐后 y 钉死，杜绝 app 挪回原生位置闪跳
     HookWidgetSetFrame(@"WINDeviceInterconnectWidget");
     HookWidgetSetFrame(@"WINAJXCombinedWidgetView");
+    // 0.5.19：拦截天气行 setFrame:，对齐后钉死到车机钮右边
+    // 0.5.1：线路按钮原生 hid=1，setHidden: 强制 NO，app 再藏也压不住
+    {
+        Class rc = NSClassFromString(@"WINRouteLineWidgetView");
+        SEL sh = @selector(setHidden:);
+        Method sm = class_getInstanceMethod(rc, sh);
+        if (sm) {
+            IMP so = method_getImplementation(sm);
+            Replace(rc, sh, imp_implementationWithBlock(^(UIView *self, __unused BOOL hidden) {
+                ((void (*)(id, SEL, BOOL))so)(self, sh, NO);
+            }), method_getTypeEncoding(sm));
+        }
+    }
     cls = NSClassFromString(@"WINAJXCombinedWidgetView");
     sel = @selector(setHidden:);
     method = class_getInstanceMethod(cls, sel);
@@ -1087,6 +1663,38 @@ static void InstallMinimalHome(void) {
             ((void (*)(id, SEL, BOOL))original)(self, sel, hidden || IsHiddenMapPromo(self));
         }), method_getTypeEncoding(method));
     }
+    // 0.5.3：彻底去掉「重复点击首页」的所有触发链。
+    // app 有两个注册入口（GDMapHomeTabBarControl / WINAmapHomeVAppService），
+    // 两条都换成空 block（非 nil）；再把 item 自带的重复点击开关关掉，
+    // 这样「已在首页再点首页」从注册层和 item 层同时被掐断。
+    for (NSString *cn in @[@"GDMapHomeTabBarControl", @"WINAmapHomeVAppService"]) {
+        Class tb = NSClassFromString(cn);
+        if (!tb) continue;
+        SEL selr = NSSelectorFromString(@"registerTabBarItemRepeatClickBlockWithKey:repeatBlock:");
+        Method mr = class_getInstanceMethod(tb, selr);
+        if (!mr) continue;
+        IMP origr = method_getImplementation(mr);
+        method_setImplementation(mr, imp_implementationWithBlock(^(id self, id key, id blk) {
+            void (^noop)(void) = ^{};
+            ((void (*)(id, SEL, id, id))origr)(self, selr, key, noop);
+        }));
+    }
+    // 注册顺序可能晚于此处，所以在每个 item 建好后同步清一次。
+    HookVoid(@"WINTabBarItem", @"initWithFrame:model:", ^(UIView *item) {
+        for (NSString *setter in @[@"setAllowRepeatClick:", @"setAmap_allowRepeatClick:"]) {
+            SEL s = NSSelectorFromString(setter);
+            if ([item respondsToSelector:s]) ((void (*)(id, SEL, BOOL))objc_msgSend)(item, s, NO);
+        }
+    });
+    HookVoid(@"WINTabBar", @"amap_relayoutTabItems", ^(UIView *bar) {
+        for (id item in (ObjectGetter(bar, @"tabBarItems") ?: @[])) {
+            if (![item isKindOfClass:UIView.class]) continue;
+            for (NSString *setter in @[@"setAllowRepeatClick:", @"setAmap_allowRepeatClick:"]) {
+                SEL s = NSSelectorFromString(setter);
+                if ([item respondsToSelector:s]) ((void (*)(id, SEL, BOOL))objc_msgSend)(item, s, NO);
+            }
+        }
+    });
 }
 
 __attribute__((constructor)) static void Initialize(void) {
@@ -1148,6 +1756,6 @@ __attribute__((constructor)) static void Initialize(void) {
             dispatch_source_set_event_handler(ScheduleTimer, ^{ Schedule(); });
             dispatch_resume(ScheduleTimer);
         });
-        NSLog(@"[GaodeClean] loaded 0.5.0 (17.00.2 only)");
+        NSLog(@"[GaodeClean] loaded 0.5.1 (17.00.2 only)");
     }
 }

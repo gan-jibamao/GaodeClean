@@ -1,62 +1,102 @@
-# GaodeClean 0.5.0 — 源码备份说明
+# GaodeClean 0.6.0 — 源码与构建说明
 
 高德地图 17.00.2 (com.autonavi.amap) UI 清理 tweak。纯 ObjC runtime hook，
 不依赖 substrate/frida，不碰网络与 IPA，仅视图层。
 
-## 当前终态 0.5.0 的功能清单
+## 当前终态 0.6.0 的功能清单
 - 底栏两钮居中 + 胶囊(选中视图)跟随选中按钮 (0.3.1 + 0.4.13-0.4.17)
 - 左侧车机圆钮、右下组合钮(定位+回正)对齐到搜索框上方 8pt (0.4.3/0.4.4/0.4.40)
 - 首页搜索栏下沉 + 首帧锁定 + setFrame/setCenter 钳位 + didMoveToSuperview 重挂自愈
-  （0.3.1 + 0.4.19 + 0.4.46/0.4.48/0.4.50，冷启动零跳动，含稳定性门槛 0.4.45）
+  + **切页 8ms 快修（0.5.57/0.5.58，见下）**
 - 首页搜索栏去文字(城市名/滚词) (0.4.7/0.4.8)
 - 来扫街(template_oparate_icon) + 扫街榜(template_rank) 隐藏 (0.4.7)
 - 探索/附近/我的页裁剪与滚动限制 (0.3.1 机制)
+- **底栏上拉白雾/闪白根除 (0.5.44/0.5.50/0.5.53)**
+- **顶部「沉浸高斯」模糊带根除 (0.5.8, EmptyImmersiveState 改派)**
+- **首页白块根除 (0.5.9, 恢复 sheet/mask/bottomMask hidden)**
+- **正式包零诊断**：不再写 Documents/GaodeClean-blur.txt (0.6.0)
 
-## 已移除（0.4.38 起，搜索页 = 完全原生）
-0.4.20-0.4.37 的搜索页干预层全部剥除：CleanSearchPromo、AJXLabel/AJXScrollView
-即时钩子、分类行收起、推广带隐藏、输入态探针（焦点/清空/字段文本）。
-教训：输入框 AJXInputView 住在「滚动推广词」AJXScrollView 里；AJX label 文字
-只存 accessibilityLabel；位置类隐藏必须窗口坐标 + 输入态联动。
+## 本轮（0.5.1 → 0.6.0）主线：两场闪光的追查
 
-## 0.5.0 优化（本次）
-1. 剥除诊断埋点：RecFrame/FrameHist/DumpDebugTree/心跳帧/热路径 NSLog 全删
-   （正式包零诊断开销；调试期产物已进 git 历史 0.4.50 提交）
-2. AlignCornerWidgets 缓存两个圆钮实例（weak），每轮直接对齐，实例失效才重扫窗口树
-3. 清死代码：孤儿注释、IsInputLike 后的冗余 TextField/Input 判断
-4. 版本 0.4.50 → 0.5.0
+### A. 底栏上拉「白雾/闪白」
+现象：底栏首页/我的往上滑动松手时，地图被一层白蒙住，短暂后消失。
 
-## 冷启动跳动根除（0.4.41-0.4.50 完整链，可复用）
-跳动 = 原生位置先渲染一帧再被拉到位。最终三层闭环：
-- 隐藏→定位→一次性显示（HomeSettled/ColdWidgets 超时兜底 2.4s）
-- 逐 widget AlignedKey 标记 + 顶边对齐(固定 44pt)，高度 88→44 不跳
-- setFrame/setCenter 钳位 + didMoveToSuperview 重挂自愈（app 抢回去也不动）
-关键坑：①全局 HomeSettled 标志竞态→改逐 widget 关联对象 ②app 周期性重挂搜索栏
-进 sheet 并挪离屏(1140)→didMoveToSuperview 同步挂回 ③NSTimer/GCD timer 都在
-~1.35s 停跑→位置修正不能依赖 timer，必须走 layoutSubviews/didMoveToSuperview 自愈。
+- 量化（逐帧最小二乘回归）：`out = 0.2035 × in + 204.22` → **一层纯白 alpha≈0.80 的覆盖层**，
+  只盖地图区（y>59pt），底栏/搜索栏不受影响（它们画在玻璃之上）。
+- **连打 6 版空枪**：钳 `MapWidgetContainerView` alpha、钳 `AMap3DView` alpha、
+  钳 `layer.opacity`、拦 VMap `setGlobalShowMask:`、封 `WINMapMaskView`、封 `AUGlobalBlurService`
+  —— 诊断全部显示「钳位记录为空 / 该 setter 从未被调用」。
+  地图是 C++ 引擎（VMap）直接画在 `AMap3DView` 的 backing layer 上，**无子视图、无子层**，UIKit 层够不着。
+- **决定性对照**：逐帧扫 0.5.30 的老视频 → 全程无闪白。**结论：闪白是 tweak 自己造的。**
+- **真根因**：0.5.45 起加的各种「拦截上拉」（拒绝手势 / 拒绝 PullUp 状态跃迁 /
+  强行 hidden 面板）**打断了 app 的转场动画**，地图被留在「已洗白」的中间态几十毫秒。
+- **正解（0.5.50）**：只对 `WINTabBar` / `WINMultiStyleRootView` 的**本体**摘 pan/swipe，
+  **绝不碰子树**（子树里有搜索栏），不拦状态机、不抢 setHidden。转场正常跑完 → 不闪。
+- 0.5.51/0.5.52 曾误回退到 0.5.44（把 0.5.50 的修复删掉）→ 闪白回归；0.5.53 装回。
+
+### B. 「我的 → 首页」切页时搜索栏闪一下
+- 逐帧实测：搜索栏区域亮度掉到 **216–226 档**（正常 254）即「缺席」。
+- 排除顺序（**重要方法论**）：
+  1. 拦 `layoutSubviews` 强制 `hidden = NO` → 无效
+  2. 拦 `setHidden:` 定向拒绝 → 无效
+  3. 拦 `didMoveToSuperview` 重挂 → 无效
+  → 说明不是「谁藏了它」，而是**归位逻辑跑得太慢**。
+- **真根因（代码级）**：搜索栏归位只发生在 `LayoutMinimalHome` 里，
+  而它**只由 100ms 的 Schedule tick 驱动**。实测缺席时长恰好是 **16.7ms 的整数倍
+  （17/33/67/83/100ms）** —— 就是在「等下一次 tick」。
+- **0.5.57**：`KickBarFix()` —— 搜索栏一被 app 动到就启动 16ms 快修窗口，
+  640ms 内以 60Hz 反复跑 `LayoutMinimalHome`。100ms → 33ms。
+- **0.5.58**：不再等 `selectedViewControl` 翻转（app 切页完成才翻，实测 ~33ms 延迟），
+  被摘的同一瞬间直接挂回并显示；快修提到 8ms。**实测：三次切页零缺席（仅冷启动首帧 1 帧）。**
+
+## 核心机制（可复用）
+- 冷启动跳动：隐藏→定位→一次性显示 + 逐 widget AlignedKey + 顶边对齐 + setFrame/setCenter 钳位
+  + `didMoveToSuperview` 同步重挂（**注意：守卫不能写成 `b.superview &&`，否则会漏掉「被摘掉」这条**）
+- 顶部模糊：`WINAMapHome*SearchBar*State` 的 `*ImmersiveState` → 改派 `*EmptyImmersiveState`
+- 首页白块：`sheet.hidden / maskView.hidden / bottomMaskLayer.hidden`（移除会露出上拉发现面板白底）
+- 胶囊跟手：只写 `origin.x` 与宽度，**绝不碰 transform**（位置基准是 app 用 transform 建立的）
+
+## 关键教训
+1. **视图「不见了」要按三个通道依次排除**：`hidden` → `alpha` → `removeFromSuperview`；
+   三个都无效时，第四类是**「归位逻辑的调度频率不够」**（缺席时长呈 16.7ms 整数倍即为特征）。
+2. **不要碰子树**：`WINMultiStyleRootView` 子树含搜索栏，摘它的手势 = 按死搜索栏（0.5.42 事故）。
+3. **改「面板背景」前先确认底下有没有别的视觉层**（0.5.3 清 alpha → 露出容器自带磨砂玻璃）。
+4. **跨版本同指标对照**是识别「我引入的回归」最快的手段；否定证据（拦截记录为空）同样是硬信息。
+5. **先确认基于哪个源码版本编的**（0.5.52 基于 0.5.51 编译 → 静默删掉已验证的修复）。
 
 ## 版本链
-0.3.1 基线 → 0.4.0 两圆钮 → 0.4.3/4 对齐定稿 → 0.4.6/7 promo 定稿 →
-0.4.8 首页bar去文字 → 0.4.14 底栏回退 → 0.4.17 胶囊跟随 → 0.4.19 首帧锁定 →
-0.4.20-37 搜索页层(已废) → 0.4.38 搜索页回退 → 0.4.40 右下钮跟随 →
-0.4.41-50 冷启动跳动根除 → **0.5.0 优化清理(本包)**
+0.3.1 基线 → 0.4.0 两圆钮 → 0.4.3/4 对齐 → 0.4.6/7 promo → 0.4.8 首页bar去文字 →
+0.4.14-17 底栏/胶囊 → 0.4.19 首帧锁定 → 0.4.20-37 搜索页层(已废) → 0.4.38 回退 →
+0.4.40 右下钮跟随 → 0.4.41-50 冷启动跳动根除 → 0.5.0 优化清理 →
+0.5.1-7 白块/模糊带 → 0.5.8 EmptyImmersiveState → 0.5.9 白块修复 →
+0.5.34-44 白雾追查(6 版空枪) → 0.5.50 上拉定稿 → 0.5.53 装回 →
+0.5.54-58 切页搜索栏闪 → **0.6.0 定版（摘诊断）**
 
 ## 从源码重建
 SDK：theos patched iPhoneOS16.5.sdk（https://github.com/theos/sdks）
-clang -target arm64-apple-ios15.0 -isysroot $SDK -fobjc-arc -fblocks \
-  -fobjc-runtime=ios-15 -dynamiclib -fuse-ld=lld -Wl,-fixup_chains \
-  -Wl,-install_name,@rpath/GaodeClean.dylib -Wl,-no_adhoc_codesign \
-  -framework UIKit -framework Foundation -framework CoreGraphics \
-  -framework QuartzCore src/GaodeClean.m -o GaodeClean.dylib
-ldid -S GaodeClean.dylib
+
+    clang -target arm64-apple-ios15.0 -isysroot $SDK -fobjc-arc -fblocks \
+      -fobjc-runtime=ios-15 -dynamiclib -fuse-ld=lld -Wl,-fixup_chains \
+      -Wl,-install_name,@rpath/GaodeClean.dylib -Wl,-no_adhoc_codesign \
+      -framework UIKit -framework Foundation -framework CoreGraphics \
+      -framework QuartzCore src/GaodeClean.m -o GaodeClean.dylib
+    ldid -S GaodeClean.dylib
+
 （arm64e 编不出：lld 不支持 arm64e chained fixups；A16 加载 arm64 切片正常）
 
 ## rootless deb 结构
-data.tar.gz: var/jb/Library/MobileSubstrate/DynamicLibraries/{GaodeClean.dylib,GaodeClean.plist}
-control: Package local.gaode.clean / Architecture iphoneos-arm64 / Depends firmware>=15.0, mobilesubstrate
-RootHide 转换：scripts/make-roothide.sh（去 /var/jb 前缀 + Depends 补 oldabi；
-注意输出路径必须传绝对路径，脚本会 cd 到临时目录）
+- `data.tar.gz`: `var/jb/Library/MobileSubstrate/DynamicLibraries/{GaodeClean.dylib,GaodeClean.plist}`
+- `control`: Package `local.gaode.clean` / Architecture `iphoneos-arm64` /
+  Depends `firmware (>= 15.0), mobilesubstrate`
+- RootHide 转换：`scripts/make-roothide.sh`（去 `/var/jb` 前缀 + Depends 补 oldabi；
+  **输出路径必须传绝对路径**，脚本会 cd 到临时目录）
 
 ## 本包产物
-dist/GaodeClean.dylib — 0.5.0 构建件(ldid 签名)
-dist/local.gaode.clean_0.5.0_iphoneos-arm64.deb — rootless
-dist/local.gaode.clean_0.5.0_iphoneos-arm64-roothide.deb — RootHide
+- `dist/GaodeClean.dylib` — 0.6.0 构建件（195,952 B，ldid 签名）
+- `dist/local.gaode.clean_0.6.0_iphoneos-arm64.deb` — rootless
+- `dist/local.gaode.clean_0.6.0_iphoneos-arm64-roothide.deb` — RootHide
+
+## 0.6.0 验证记录（逐帧量化，25.5s / 3059 帧 + 10.5s / 1257 帧）
+- 上拉闪白：地图区 std 全程未掉出正常区间（真压白会掉到 1–5）→ **通过**
+- 切页搜索栏：三次「我的→首页」回到首页的**第一帧**搜索栏即在位
+  （245 / 244 / 254），全程无 216–226 档；唯一一帧缺席在冷启动 0.4s 处，属设计内首帧锁定 → **通过**
