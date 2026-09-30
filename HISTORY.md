@@ -1,9 +1,9 @@
-# GaodeClean 0.6.2 — 源码与构建说明
+# GaodeClean 0.6.6 — 源码与构建说明
 
 高德地图 17.00.2 (com.autonavi.amap) UI 清理 tweak。纯 ObjC runtime hook，
 不依赖 substrate/frida，不碰网络与 IPA，仅视图层。
 
-## 当前终态 0.6.2 的功能清单
+## 当前终态 0.6.6 的功能清单
 - 底栏两钮居中 + 胶囊(选中视图)跟随选中按钮 (0.3.1 + 0.4.13-0.4.17)
 - 左侧车机圆钮、右下组合钮(定位+回正)对齐到搜索框上方 8pt (0.4.3/0.4.4/0.4.40)
 - 首页搜索栏下沉 + 首帧锁定 + setFrame/setCenter 钳位 + didMoveToSuperview 重挂自愈
@@ -102,6 +102,42 @@
   3. 抽出 `IsWeatherRowView()` 尺寸自识别助手（宽 150–360、高 <40、y 在地图区），
      layoutSubviews 钩子与 setter 拦截共用
 
+### E. 冷启动后天气行停在原生位置、切一次页才归位（0.6.6）
+- 用户报告：「删除后台重新进高德，冷启动后天气和 LOGO 的位置不正确，
+  点击我的再切回首页位置才正确」。
+- **★ 定位方式：放弃视频，改加诊断块。** 前四版（0.6.1–0.6.5）都在用视频猜，
+  每次都改「何时查找 / 如何对齐」，全部无效。0.6.5d 在 dylib 里加了一段诊断
+  （每 5 拍把 tick 状态 + `WINGroup*` 视图树写进 `Documents/GaodeClean-cold.txt`），
+  用户导出后**一次定位**：
+  ```
+  tick#20 ColdTicks=20 win=有 Car=WINDeviceInterconnectWidget
+     WINScaleLineLogoMapWidget {{10,411},{188,20}} hid=0 ok=1
+     NMScaleLineView           {{96,411},{102,20}} hid=0 ok=0
+  ```
+- **日志给出的三条硬事实**：
+  1. **tick 在跑**（tick#20，冷启动 20 拍后仍在）→ 0.6.4 的断链修复有效
+  2. **CachedCar 正常**（车机钮已找到）
+  3. **`WINGroupMapWidget` 整个不在视图树里**；承载这一行的是子件
+     `WINScaleLineLogoMapWidget`，位置仍是原生 `{{10,411}}`。
+     而且它**通过了原有尺寸判据**（`ok=1`，宽 188 / 高 20 / y 411）
+     → **判据没错，错的是类名**
+- **真根因（贯穿 0.6.1–0.6.5 全版）**：所有查找都硬编码 `WINGroupMapWidget`。
+
+  | 状态 | 视图树里有什么 | 结果 |
+  |---|---|---|
+  | 正常态（切页后） | 容器 `WINGroupMapWidget` 存在 | 找得到 → 归位 ✅ |
+  | 冷启动态 | 容器尚未创建，只有子件 `WINScaleLineLogoMapWidget` | 永远找不到 → 不归位 ❌ |
+
+  这正是「冷启动后位置不对、切一次页才对」：切页会把容器建出来。
+- **0.6.6 修法**：`IsWeatherRowClass()` 认三个类名
+  （`WINGroupMapWidget` / `WINScaleLineLogoMapWidget` / `WINWeatherLimitView`）；
+  查找时**优先外层容器**（存在时它就是整行），否则取最宽候选
+  （冷启动时是 188pt 的 `WINScaleLineLogoMapWidget`）。
+  同时 `layout` 与 `layoutSubviews` 两个钩子都挂上，tick 路径去掉「只在首页」限制。
+- **验证（逐帧）**：f1–f261 天气行在原生位置（pt≈50，左边被裁）；
+  **f301 起出现在车机钮正右边** —— 🔷高德地图 pt 85–145、200米 pt 165–215，
+  持续到片尾。左边缘 pt 85（期望 86 = 车机钮右缘 78 + 8pt 间距）→ **通过**。
+
 ## 核心机制（可复用）
 - 冷启动跳动：隐藏→定位→一次性显示 + 逐 widget AlignedKey + 顶边对齐 + setFrame/setCenter 钳位
   + `didMoveToSuperview` 同步重挂（**注意：守卫不能写成 `b.superview &&`，否则会漏掉「被摘掉」这条**）
@@ -123,7 +159,7 @@
 0.4.40 右下钮跟随 → 0.4.41-50 冷启动跳动根除 → 0.5.0 优化清理 →
 0.5.1-7 白块/模糊带 → 0.5.8 EmptyImmersiveState → 0.5.9 白块修复 →
 0.5.34-44 白雾追查(6 版空枪) → 0.5.50 上拉定稿 → 0.5.53 装回 →
-0.5.54-58 切页搜索栏闪 → 0.6.0 定版（摘诊断）→ 0.6.1 切 2D/3D 天气行位移 → **0.6.2 瞬时下坠弹回**
+0.5.54-58 切页搜索栏闪 → 0.6.0 定版（摘诊断）→ 0.6.1 切 2D/3D 天气行位移 → 0.6.2 瞬时下坠弹回 → 0.6.3/0.6.4 调度链 → **0.6.6 冷启动归位**
 
 ## 从源码重建
 SDK：theos patched iPhoneOS16.5.sdk（https://github.com/theos/sdks）
@@ -145,9 +181,12 @@ SDK：theos patched iPhoneOS16.5.sdk（https://github.com/theos/sdks）
   **输出路径必须传绝对路径**，脚本会 cd 到临时目录）
 
 ## 本包产物
-- `dist/GaodeClean.dylib` — 0.6.2 构建件（ldid 签名）
-- `dist/local.gaode.clean_0.6.2_iphoneos-arm64.deb` — rootless
-- `dist/local.gaode.clean_0.6.2_iphoneos-arm64-roothide.deb` — RootHide
+- `dist/GaodeClean.dylib` — 0.6.6 构建件（194,728 B，ldid 签名）
+- `dist/local.gaode.clean_0.6.6_iphoneos-arm64.deb` — rootless
+- `dist/local.gaode.clean_0.6.6_iphoneos-arm64-roothide.deb` — RootHide
+
+## 0.6.6 验证记录
+- 冷启动：f301 起天气行出现在车机钮正右边（pt 85-215），左边缘 pt 85（期望 86）→ **通过**
 
 ## 0.6.2 验证记录
 - 切 2D/3D：4 次「下坠 17pt 再弹回」事件（f215/f252/f575/f613）全部消除 → **用户确认通过**

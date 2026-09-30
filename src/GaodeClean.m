@@ -27,6 +27,7 @@ static void UpdateMask(UIView *page);
 static void Schedule(void);
 static void LayoutMinimalHome(id handler);
 static void AlignCornerWidgets(UIView *bar);
+static void AlignWeatherRowTick(UIWindow *win);
 static void AlignOneWidget(UIView *bar, UIView *w, CGFloat barTop);
 
 @class GCCState;
@@ -530,7 +531,19 @@ static void Schedule(void) {
     Scheduled = YES;
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 100 * NSEC_PER_MSEC), dispatch_get_main_queue(), ^{
         Scheduled = NO;
-        if (UIApplication.sharedApplication.applicationState != UIApplicationStateActive) return;
+        // 0.6.4：**这里原本直接 return，把整条调度链掐死了**——
+        // 冷启动瞬间 applicationState 还是 Inactive（app 已在屏幕上、但系统尚未置为 Active），
+        // 于是这一拍提前返回、末尾的 Schedule() 不再执行 → 整个 tick 永久停跑。
+        // 表现就是「冷启动后天气行停在原生位置，切一次页才归位」：搜索栏/车机钮各有自己的
+        // layoutSubviews 钩子兜底，唯独天气行的对齐只挂在 tick 上，链一断就再也不跑。
+        // （历史记录里那条「NSTimer/GCD timer 都在 ~1.35s 停跑」是同一个坑。）
+        // 修法：不 return，而是「不活跃时不干活、但照样续链」；并用 dispatch_after 兜底续链，
+        // 即使某一拍真的返回了，1 秒后也会重新接上。
+        if (UIApplication.sharedApplication.applicationState != UIApplicationStateActive) {
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 100 * NSEC_PER_MSEC),
+                           dispatch_get_main_queue(), ^{ Schedule(); });
+            return;
+        }
         for (id tabs in TabControllers.allObjects) {
             id selected = ObjectGetter(tabs, @"selectedViewControl");
             id params = ObjectGetter(tabs, @"viewControlParams");
@@ -577,7 +590,10 @@ static void Schedule(void) {
             LayoutMinimalHome(handler);
             // 0.4.44：对齐独立于 LayoutMinimalHome（后者早退时仍能持续把圆钮拉回对齐位）
             UIView *bar = ObjectGetter(handler, @"searchBar");
-            if ([bar isKindOfClass:UIView.class]) AlignCornerWidgets(bar);
+            if ([bar isKindOfClass:UIView.class]) {
+                AlignCornerWidgets(bar);
+                AlignWeatherRowTick(bar.window);
+            }
         }
 #if GCC_DEVICE_TEST
         RunDeviceCheck();
@@ -1000,6 +1016,18 @@ static void AlignWeatherRow(UIView *row) {
 
 // 0.6.2：天气行的尺寸自识别（认「行」不认实例）。
 // 实测这一行是宽 200-320、高 <40 的容器；离屏实例（历史上见过 y=1073）直接排除。
+// 0.6.6：冷启动诊断（GaodeClean-cold.txt）给出决定性事实 ——
+//   tick 在跑、CachedCar=WINDeviceInterconnectWidget 正常，
+//   但 **WINGroupMapWidget 整个不在视图树里**；承载这一行的是
+//   WINScaleLineLogoMapWidget {{10,411},{188,20}}（原生位置）。
+// 也就是说：正常态用容器 WINGroupMapWidget，冷启动态只有子件 WINScaleLineLogoMapWidget。
+// 原来的查找只认前者 → 冷启动永远找不到 → 不归位；切页后容器才被建出来 → 才归位。
+static BOOL IsWeatherRowClass(NSString *cn) {
+    return [cn isEqualToString:@"WINGroupMapWidget"]
+        || [cn isEqualToString:@"WINScaleLineLogoMapWidget"]
+        || [cn isEqualToString:@"WINWeatherLimitView"];
+}
+
 static BOOL IsWeatherRowView(UIView *v) {
     if (!v || !v.window || !v.superview) return NO;
     CGRect r = [v convertRect:v.bounds toView:v.window];
@@ -1015,6 +1043,20 @@ static void HookWeatherRow(void) {
     // （实测：0.5.30/0.5.32 无白雾，只有 0.5.33 有，唯一差异就是这个拦截器）。
     Class cls = NSClassFromString(@"WINGroupMapWidget");
     if (!cls) return;
+    // 0.6.5：**关键** —— WINGroupMapWidget 自己有一个 `-layout` 方法（不是 layoutSubviews），
+    // app 走的是它。原来的钩子挂 layoutSubviews，冷启动时根本不触发；
+    // 只有切页等个别路径才会连带跑到一次 → 表现为「冷启动后不归位，切一次页才对」。
+    // 两个方法都挂。
+    HookVoid(@"WINGroupMapWidget", @"layout", ^(id v) {
+        UIView *win = nil;
+        if ([v isKindOfClass:UIView.class]) {
+            win = ((UIView *)v).window;
+            if (!win || !CachedCar || !CachedCar.window) return;
+            if (!IsWeatherRowView(v)) return;
+            objc_setAssociatedObject(v, &AlignedKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            AlignWeatherRow(v);
+        }
+    });
     HookVoid(@"WINGroupMapWidget", @"layoutSubviews", ^(UIView *v) {
         // 0.6.1：原来这里写的是 if (!AlignedKey) return —— 依赖「缓存实例 + 一次性标记」。
         // 但切换 2D/3D 时 app 会重建地图控件树，**新实例没有 AlignedKey**，
@@ -1028,6 +1070,7 @@ static void HookWeatherRow(void) {
             id sel = ObjectGetter(CachedTabs, @"selectedViewControl");
             if (sel && ![NSStringFromClass([sel class]) isEqualToString:@"WINAmapHomeControl"]) return;
         }
+        if (!IsWeatherRowClass(NSStringFromClass(v.class))) return;
         if (!IsWeatherRowView(v)) return;
         objc_setAssociatedObject(v, &AlignedKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         AlignWeatherRow(v);
@@ -1113,11 +1156,12 @@ static void LayoutMinimalHome(id handler) {
             for (NSUInteger qi = 0; qi < q.count && q.count < 20000; qi++) {
                 UIView *v = q[qi];
                 [q addObjectsFromArray:v.subviews];
-                if ([NSStringFromClass(v.class) isEqualToString:@"WINGroupMapWidget"]) {
-                    // 确认是承载天气行的那个（宽 200~320、高 <40）
+                if (IsWeatherRowClass(NSStringFromClass(v.class))) {
                     CGRect r = [v convertRect:v.bounds toView:win];
                     if (r.size.width > 150 && r.size.width < 360 && r.size.height < 40) {
-                        CachedRow = v; break;
+                        if (!CachedRow || [NSStringFromClass(v.class) isEqualToString:@"WINGroupMapWidget"]
+                            || v.bounds.size.width > CachedRow.bounds.size.width) CachedRow = v;
+                        if ([NSStringFromClass(v.class) isEqualToString:@"WINGroupMapWidget"]) break;
                     }
                 }
             }
@@ -1186,6 +1230,37 @@ static void AlignOneWidget(UIView *bar, UIView *w, CGFloat barTop) {
     HomeSettled = YES;
 }
 
+
+// 0.6.3：冷启动后天气行停在 app 原生位置（{{10,411}}），要切一次页才归位。
+// 原因：天气行的对齐寄生在 LayoutMinimalHome 里，而它有一串早退条件
+// （sheet 未就绪 / parent 无 window / tabBar 不是 UIView）—— 冷启动期间就直接 return 了，
+// 后面那段天气行代码永远跑不到；而这一行之后是静态的，layoutSubviews 也不再触发。
+// 修法：把它移出来，并入周期 tick（与车机钮同一条路径），并在冷启动头 2 秒加 8ms 快窗。
+static void AlignWeatherRowTick(UIWindow *win) {
+    if (!win) return;
+    static __weak UIView *Row = nil;
+    BOOL stale = (!Row || !Row.window);
+    if (!stale) {
+        CGRect r0 = [Row convertRect:Row.bounds toView:win];
+        if (r0.size.width < 150 || r0.size.width > 360 || r0.size.height >= 40) stale = YES;
+    }
+    if (stale) {
+        NSMutableArray *q = [NSMutableArray arrayWithObject:win];
+        for (NSUInteger i = 0; i < q.count && q.count < 20000; i++) {
+            UIView *v = q[i];
+            [q addObjectsFromArray:v.subviews];
+            if (IsWeatherRowClass(NSStringFromClass(v.class)) && IsWeatherRowView(v)) {
+                // 优先外层容器（WINGroupMapWidget 存在时它就是整行）；
+                // 否则取最宽的那个候选（冷启动时是 WINScaleLineLogoMapWidget，188pt）
+                if (!Row || [NSStringFromClass(v.class) isEqualToString:@"WINGroupMapWidget"]
+                    || v.bounds.size.width > Row.bounds.size.width) Row = v;
+                if ([NSStringFromClass(v.class) isEqualToString:@"WINGroupMapWidget"]) break;
+            }
+        }
+    }
+    if (!Row || !IsWeatherRowView(Row) || Row.hidden) return;
+    AlignWeatherRow(Row);
+}
 
 static void AlignCornerWidgets(UIView *bar) {
     if (!bar.window) return;
