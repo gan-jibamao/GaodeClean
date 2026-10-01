@@ -28,6 +28,8 @@ static void Schedule(void);
 static void LayoutMinimalHome(id handler);
 static void AlignCornerWidgets(UIView *bar);
 static void AlignWeatherRowTick(UIWindow *win);
+static void AlignSearchBarTick(id handler);
+static BOOL IsWeatherRowView(UIView *v);
 static void AlignOneWidget(UIView *bar, UIView *w, CGFloat barTop);
 
 @class GCCState;
@@ -594,6 +596,7 @@ static void Schedule(void) {
                 AlignCornerWidgets(bar);
                 AlignWeatherRowTick(bar.window);
             }
+            AlignSearchBarTick(handler);
         }
 #if GCC_DEVICE_TEST
         RunDeviceCheck();
@@ -982,6 +985,17 @@ static BOOL IsInputLike(UIView *v) {
 // - 行容器收起 + 内容上移各带一次性守卫（0.4.31 无守卫 = 历史列表飞出屏幕）；
 // - 任何输入相关视图先被 IsInputLike 拦下。
 
+// ===== 0.6.14d 诊断：记录「谁」在改天气行的位置 =====
+// 0.6.13d 的链式 dump 已给出结论：L1..L9 祖先全部 m==p、transform 恒等、无动画；
+// 只有 L0 自己分叉，且**所有渲染点精确落在 (10,352)↔(62,603) 这条直线上**
+// （8 个采样点代入 y = 352 + 4.827(x-10)，误差全在 ±0.3pt）。
+//   (10,352) 子视图坐标 = (10,411) 窗口坐标 = app 原生位置（与冷启动日志一致）
+//   (62,603) 子视图坐标 = (62,662) 窗口坐标 = 我的对齐位置
+// 即：这一行正在两点之间做直线位移动画。
+// 现在必须确定：**是哪一方发起的写入**。所以直接 hook 二传手本身。
+// 0.6.18 定版：诊断输出已摘除（RDLog/g_rdbuf/WinY/KeysOf）。
+static int g_inMine = 0;                     // >0 表示我方正在写入（防递归）
+
 static void AlignWeatherRow(UIView *row) {
     // 0.5.33：把「天气+LOGO」行对齐到车机钮右边。用坐标转换 + center 写入
     // （transform 安全、幂等，不累积误差）。
@@ -1005,11 +1019,13 @@ static void AlignWeatherRow(UIView *row) {
         // 两处修正：① 禁掉隐式动画，否则修正本身会走动画 = 掉下去再弹回来；
         //           ② 偏差 >2pt 时清掉 layer 上正在跑的动画，让修正瞬时落到当前帧。
         BOOL big = (fabs(row.center.y - wantCenter.y) > 2.0 || fabs(row.center.x - wantCenter.x) > 2.0);
+        g_inMine++;
         [CATransaction begin];
         [CATransaction setDisableActions:YES];
         if (big) [row.layer removeAllAnimations];
         row.center = wantCenter;
         [CATransaction commit];
+        g_inMine--;
     }
     inAlign = NO;
 }
@@ -1034,6 +1050,161 @@ static BOOL IsWeatherRowView(UIView *v) {
     if (r.size.width < 150 || r.size.width > 360 || r.size.height >= 40) return NO;
     if (r.origin.y < 60 || r.origin.y > v.window.bounds.size.height - 40) return NO;
     return YES;
+}
+
+// 0.6.8-①：顶部运营横幅「来领十一出行补贴啦」—— AUPopFloatView
+// （有 initWithLeftIcon:text: / initWithStyle:leftIcon:text: / dismiss:，就是「左图标 + 文字 + ✕」那条）。
+// 按特征识别后隐藏：宽 ≥ 70% 窗口、位于屏幕上半部、高度 20–100pt。
+// 不用类名一刀切 —— AUPopFloatView 可能是通用组件，别的地方也在用。
+static BOOL IsTopSubsidyBanner(UIView *v) {
+    if (!v || !v.window) return NO;
+    CGRect r = [v convertRect:v.bounds toView:v.window];
+    CGFloat W = v.window.bounds.size.width;
+    return (r.size.width >= W * 0.7 && r.origin.y < 200
+            && r.size.height > 20 && r.size.height < 100);
+}
+
+static void HookSubsidyBanner(void) {
+    if (!NSClassFromString(@"AUPopFloatView")) return;
+    void (^hide)(UIView *) = ^(UIView *v) {
+        if (IsTopSubsidyBanner(v) && !v.hidden) v.hidden = YES;
+    };
+    HookVoid(@"AUPopFloatView", @"didMoveToWindow", hide);
+    HookVoid(@"AUPopFloatView", @"layoutSubviews", hide);
+    // 拒绝被重新显示
+    {
+        Class c = NSClassFromString(@"AUPopFloatView");
+        Method m = c ? class_getInstanceMethod(c, @selector(setHidden:)) : NULL;
+        if (m) {
+            IMP o = method_getImplementation(m);
+            const char *t = method_getTypeEncoding(m);
+            Replace(c, @selector(setHidden:), imp_implementationWithBlock(^(UIView *self, BOOL h) {
+                if (h == NO && IsTopSubsidyBanner(self)) h = YES;
+                ((void (*)(id, SEL, BOOL))o)(self, @selector(setHidden:), h);
+            }), t);
+        }
+    }
+}
+
+// 0.6.8-②：切 2D/3D 时天气行会**整个消失约 100ms**（逐帧：f356 在 → f366/f376 无 → f386 回来，
+// 位置始终 pt 88–150 不变）。若 app 是「隐藏」它就拒绝隐藏；若是移除实例则保不住，靠诊断确认。
+// 0.6.9：**决定性的做法**。
+// 前面所有版本都是「事后纠正」：app 动完，我在下一次 tick（或 layout）时修正。
+// 但切 2D/3D 时这一行会被**整个移除**（不只 hidden），移除与重挂之间的那段空档
+// 任何事后修正都够不着 —— 这就是「始终有问题」的原因。
+// 换成搜索栏当初的成功模式（0.4.50）：**在 didMoveToSuperview 里同一帧挂回**。
+//   · superview != nil → 新实例/重挂，立刻对齐并记住
+//   · superview == nil → 被摘掉，若是首页且冷启动已结束，立刻挂回原父视图
+// 因为发生在 didMoveToSuperview 内（主线程、渲染前），那一帧就不会显示空档。
+static __weak UIView *KeepRow;
+static __weak UIView *KeepRowParent;
+
+static void HookWeatherRowKeep(void) {
+    for (NSString *n in @[@"WINGroupMapWidget", @"WINScaleLineLogoMapWidget"]) {
+        Class c = NSClassFromString(n);
+        if (!c) continue;
+        HookVoid(n, @"didMoveToWindow", ^(UIView *v) {
+            if (IsWeatherRowView(v)) { KeepRow = v; KeepRowParent = v.superview; AlignWeatherRow(v); }
+        });
+        HookVoid(n, @"didMoveToSuperview", ^(UIView *v) {
+            if (v.superview != nil) {
+                if (IsWeatherRowView(v)) { KeepRow = v; KeepRowParent = v.superview; AlignWeatherRow(v); }
+                return;
+            }
+            // ---- 被摘掉：同一帧挂回 ----
+            if (v != KeepRow) return;
+            if (ColdTicks < 15) return;                       // 冷启动交给原逻辑
+            if (CachedTabs) {                                  // 只在首页管
+                id sel = ObjectGetter(CachedTabs, @"selectedViewControl");
+                if (sel && ![NSStringFromClass([sel class]) isEqualToString:@"WINAmapHomeControl"]) return;
+            }
+            UIView *par = KeepRowParent;
+            if (!par || !par.window) return;
+            [par addSubview:v];
+            AlignWeatherRow(v);
+        });
+    }
+}
+
+static void HookWeatherRowHideGuard(void) {
+    for (NSString *n in @[@"WINGroupMapWidget", @"WINScaleLineLogoMapWidget"]) {
+        Class c = NSClassFromString(n);
+        Method m = c ? class_getInstanceMethod(c, @selector(setHidden:)) : NULL;
+        if (!m) continue;
+        IMP o = method_getImplementation(m);
+        const char *t = method_getTypeEncoding(m);
+        Replace(c, @selector(setHidden:), imp_implementationWithBlock(^(UIView *self, BOOL h) {
+            if (h && IsWeatherRowView(self)) h = NO;
+            ((void (*)(id, SEL, BOOL))o)(self, @selector(setHidden:), h);
+        }), t);
+    }
+}
+
+
+// ===== 0.6.15：在源头拦截，不让 app 把行写回原生位 =====
+//
+// 0.6.14d 抓包给出完整因果链（19 次完全一致）：
+//   1790821924.468 APP setFrame (10.0,352.0,188.0,20.0) 父系winY=411.0 keys=无
+//   1790821924.469 APP LAYER+anim CABasicAnimation key=position dur=0.20   ← ①的隐式动画
+//   1790821924.652 ALIGN 修正 center(104.0,362.0)→(156.0,613.0) keys前置=position
+//   1790821924.658 MY  setCenter (156.0,613.0) ... keys=无
+// 即：**app 在切 2D/3D 时于 UIView 动画块内把行 setFrame 回原生位 (10,352)，
+//      UIKit 自动生成 0.20s 的 position 动画；我的 tick 最快也要 100ms 后才拉回。**
+// 我方每一笔写入 keys 都是「无」，全程没有一条 MY LAYER+anim —— 动画不是我们加的。
+// 9 版没修好，是因为一直在「事后拉回」，而正确做法是「不让它写进去」。
+//
+// 本版：hook setFrame:/setCenter: —— 在调用发生的**那一瞬间**把入参换成正确坐标，
+// 并在禁动画事务内写入（外加 removeAllAnimations 兜底）。app 从此写不进原生位，
+// 0 帧位移、0 条动画。
+static CGPoint WeatherRowDesiredCenter(UIView *row) {
+    UIView *car = CachedCar;
+    if (!row || !row.window || !row.superview || !car || !car.window) return CGPointMake(NAN, NAN);
+    if (row.bounds.size.width <= 0 || row.bounds.size.height <= 0) return CGPointMake(NAN, NAN);
+    CGRect carRect = [car convertRect:car.bounds toView:row.window];
+    CGPoint wantWin = CGPointMake(CGRectGetMaxX(carRect) + 8,
+                                  CGRectGetMidY(carRect) - row.bounds.size.height * 0.5);
+    CGPoint p = [row.superview convertPoint:wantWin fromView:row.window];
+    return CGPointMake(p.x + row.bounds.size.width * 0.5, p.y + row.bounds.size.height * 0.5);
+}
+
+static void HookRowSetters(void) {
+    // ===== 0.6.18：唯一正确的形态 ——「原样调用 + 同回合覆盖」=====
+    // 教训链（三版才走对）：
+    //  0.6.15 吞掉 app 的写入、换成自己的坐标 → **天气控件消失**。
+    //         机制：在布局流程中间改写子件坐标，app 量到异常值，布局循环没走完，
+    //         容器 WINGroupMapWidget 就没被建出来（天气控件是它的子件）。
+    //  0.6.16d 改成「先原样、再立刻覆盖」→ 拦截生效但对象判据仍偏窄。
+    //  0.6.18 关键修正：**挂到三个类上**。日志证明 app 写的是子件
+    //         WINScaleLineLogoMapWidget，而 0.6.2 那段老钩子只挂了 WINGroupMapWidget。
+    // 另注：HookWeatherRow 开头的历史注释写着 0.5.39 因同样原因撤掉过 setFrame 拦截
+    //      （「在 app 每一次写入时重排布局 → 地图背板被截成空白」）。这次不再重蹈：
+    //      **不吞写入、不重排，只在其后覆盖一个坐标**。
+    NSArray *names = @[@"WINGroupMapWidget", @"WINScaleLineLogoMapWidget", @"WINWeatherLimitView"];
+    for (NSString *n in names) {
+        Class cls = NSClassFromString(n);
+        if (!cls) continue;
+        {   // ---- setFrame: ----
+            Method m = class_getInstanceMethod(cls, @selector(setFrame:));
+            if (m) {
+                IMP o = method_getImplementation(m); const char *te = method_getTypeEncoding(m);
+                Replace(cls, @selector(setFrame:), imp_implementationWithBlock(^(UIView *self, CGRect r) {
+                    ((void (*)(id, SEL, CGRect))o)(self, @selector(setFrame:), r);       // ① 原样
+                    if (g_inMine <= 0 && IsWeatherRowView(self))
+                        AlignWeatherRow(self);                                          // ② 同回合覆盖
+                }), te);
+            }
+        }
+        {   // ---- setCenter: ----
+            Method m = class_getInstanceMethod(cls, @selector(setCenter:));
+            if (m) {
+                IMP o = method_getImplementation(m); const char *te = method_getTypeEncoding(m);
+                Replace(cls, @selector(setCenter:), imp_implementationWithBlock(^(UIView *self, CGPoint p2) {
+                    ((void (*)(id, SEL, CGPoint))o)(self, @selector(setCenter:), p2);    // ① 原样
+                    if (g_inMine <= 0 && IsWeatherRowView(self)) AlignWeatherRow(self);  // ② 覆盖
+                }), te);
+            }
+        }
+    }
 }
 
 static void HookWeatherRow(void) {
@@ -1191,6 +1362,36 @@ static void LayoutMinimalHome(id handler) {
 // 640ms 内以 60Hz 反复跑 LayoutMinimalHome，把缺席从「最多 100ms」压到「最多 1 帧」。
 static dispatch_source_t BarFixTimer;
 static int BarFixTicks;
+// 0.6.7：**搜索栏缺席 267ms/150ms 的真因** —— 和 0.6.6 的天气行同源。
+// LayoutMinimalHome 开头有一串早退：
+//     if (![bar isKindOfClass:UIView.class] || ![sheet isKindOfClass:UIView.class]
+//         || !sheet.superview) return;
+// 切页转场期间 sheet.superview 为 nil → 整个函数早退 → **里面所有搜索栏归位代码都不执行**。
+// 而 KickBarFix 快修窗口也只是反复调 LayoutMinimalHome，跟着一起早退，所以 8ms 快修也没用。
+// （tick 本身没断 —— ScheduleTimer 200ms 兜底在跑，代码里查得到。）
+// 修法：把搜索栏的「挂回 + 显示 + 定位」从 LayoutMinimalHome 里独立出来，
+// 与车机钮/天气行同一条 tick 路径，不再受那串早退连累。
+static void AlignSearchBarTick(id handler) {
+    if (!SearchBarSettled || ColdTicks < 15) return;
+    UIView *bar = ObjectGetter(handler, @"searchBar");
+    if (![bar isKindOfClass:UIView.class] || !bar.window) return;
+    id tabs = ObjectGetter(handler, @"tabBarControl");
+    id sel = tabs ? ObjectGetter(tabs, @"selectedViewControl") : nil;
+    if (sel && ![NSStringFromClass([sel class]) isEqualToString:@"WINAmapHomeControl"]) return;   // 只在首页管
+    if (!BarParent || !BarParent.window) return;
+    if (bar.superview != BarParent) [BarParent addSubview:bar];
+    if (bar.hidden) bar.hidden = NO;
+    CGRect f = bar.frame;
+    if (fabs(f.origin.y - SearchBarSettledY) > 1.0) {
+        f.origin.y = SearchBarSettledY;
+        [CATransaction begin];
+        [CATransaction setDisableActions:YES];
+        bar.frame = f;
+        [CATransaction commit];
+    }
+    [BarParent bringSubviewToFront:bar];
+}
+
 static void KickBarFix(void) {
     BarFixTicks = 80;                       // 80 × 8ms ≈ 640ms
     if (BarFixTimer) return;
@@ -1200,7 +1401,10 @@ static void KickBarFix(void) {
     dispatch_source_set_event_handler(BarFixTimer, ^{
         if (BarFixTicks <= 0) { dispatch_source_cancel(BarFixTimer); BarFixTimer = nil; return; }
         BarFixTicks--;
-        for (id h in HomeHandlers.allObjects) LayoutMinimalHome(h);
+        for (id h in HomeHandlers.allObjects) {
+            LayoutMinimalHome(h);
+            AlignSearchBarTick(h);          // 0.6.7：不依赖 LayoutMinimalHome 是否早退
+        }
     });
     dispatch_resume(BarFixTimer);
 }
@@ -1259,6 +1463,8 @@ static void AlignWeatherRowTick(UIWindow *win) {
         }
     }
     if (!Row || !IsWeatherRowView(Row) || Row.hidden) return;
+    KeepRow = Row;                          // 0.6.9：记住有效实例与父视图
+    KeepRowParent = Row.superview;
     AlignWeatherRow(Row);
 }
 
@@ -1560,6 +1766,10 @@ static void InstallMinimalHome(void) {
         }
     }
     HookWeatherRow();
+    HookRowSetters();
+    HookSubsidyBanner();
+    HookWeatherRowHideGuard();
+    HookWeatherRowKeep();
     HookVoid(@"AMapUIWaterFallContentSlidableView", @"didMoveToWindow", ^(UIView *v) {
         v.userInteractionEnabled = NO;
         v.hidden = YES;
