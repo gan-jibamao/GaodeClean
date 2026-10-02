@@ -1,7 +1,37 @@
+// ============================================================================
+//  GaodeClean —— 高德地图 UI 精简
+//
+//      Author  : jibamao
+//      Repo    : https://gan-jibamao.github.io/
+//      Section : jibamao-Tweaks
+//      Target  : AMap / 高德地图  com.autonavi.amap  17.00.2
+//
+//  This tweak changes UI only. No network interception or modification of the IPA.
+// ============================================================================
+
 #import <UIKit/UIKit.h>
 #import <objc/runtime.h>
 #import <objc/message.h>
 #import "GCCGeometry.h"
+
+// ---- jibamao 个人标识（编译进 dylib，可用 strings 核对）----
+static NSString *const kGCAuthor      = @"jibamao";
+static NSString *const kGCRepo        = @"https://gan-jibamao.github.io/";
+static NSString *const kGCSection     = @"jibamao-Tweaks";
+static NSString *const kGCVersion     = @"0.6.6";
+static NSString *const kGCSignature   = @"GaodeClean by jibamao";
+
+// 对外签名（供 log / 诊断 / 二次核对使用）
+const char *GaodeCleanSignature(void) {
+    static char buf[160];
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        snprintf(buf, sizeof(buf), "%s v%s | %s | %s",
+                 "GaodeClean", kGCVersion.UTF8String,
+                 kGCAuthor.UTF8String, kGCRepo.UTF8String);
+    });
+    return buf;
+}
 
 // This tweak changes UI only. No network interception or modification of the IPA.
 static char TextKey, StateKey, LimitKey, ForcedKindKey, ForcedPathKey;
@@ -1838,6 +1868,12 @@ static void InstallMinimalHome(void) {
 
 __attribute__((constructor)) static void Initialize(void) {
     @autoreleasepool {
+        // ---- jibamao 个人标识：启动即打标（可在 Console / 崩溃日志中核对）----
+        NSLog(@"[GaodeClean] %@", kGCSignature);
+        NSLog(@"[GaodeClean] author=%@ section=%@ repo=%@ version=%@",
+              kGCAuthor, kGCSection, kGCRepo, kGCVersion);
+        NSLog(@"[GaodeClean] signature=%s", GaodeCleanSignature());
+
         if (![NSBundle.mainBundle.bundleIdentifier isEqualToString:@"com.autonavi.amap"]) return;
         if (![[NSBundle.mainBundle objectForInfoDictionaryKey:@"CFBundleShortVersionString"] isEqual:@"17.00.2"]) {
             NSLog(@"[GaodeClean] unsupported app version; disabled");

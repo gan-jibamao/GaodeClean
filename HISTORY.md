@@ -1,5 +1,7 @@
 # GaodeClean 0.6.6 — 源码与构建说明
 
+**Author: jibamao** · Repo: https://gan-jibamao.github.io/ · Section: `jibamao-Tweaks`
+
 高德地图 17.00.2 (com.autonavi.amap) UI 清理 tweak。纯 ObjC runtime hook，
 不依赖 substrate/frida，不碰网络与 IPA，仅视图层。
 
@@ -181,9 +183,16 @@ SDK：theos patched iPhoneOS16.5.sdk（https://github.com/theos/sdks）
   **输出路径必须传绝对路径**，脚本会 cd 到临时目录）
 
 ## 本包产物
-- `dist/GaodeClean.dylib` — 0.6.6 构建件（194,728 B，ldid 签名）
-- `dist/local.gaode.clean_0.6.6_iphoneos-arm64.deb` — rootless
-- `dist/local.gaode.clean_0.6.6_iphoneos-arm64-roothide.deb` — RootHide
+- `dist/GaodeClean.dylib` — 0.6.6 构建件（197,168 B，带 jibamao 标识，ldid 签名）
+- `dist/com.jibamao.gaodeclean_0.6.6_iphoneos-arm64.deb` — rootless
+- `dist/com.jibamao.gaodeclean_0.6.6_iphoneos-arm64-roothide.deb` — RootHide
+
+## 标识
+源码与产物均带 `jibamao` 标识，`strings` 可核对：
+```
+jibamao / gan-jibamao.github.io / jibamao-Tweaks / GaodeClean by jibamao
+```
+启动输出：`[GaodeClean] GaodeClean v0.6.6 | jibamao | https://gan-jibamao.github.io/`
 
 ## 0.6.6 验证记录
 - 冷启动：f301 起天气行出现在车机钮正右边（pt 85-215），左边缘 pt 85（期望 86）→ **通过**
