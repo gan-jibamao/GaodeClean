@@ -5,7 +5,7 @@
 
 | | |
 |:--|:--|
-| **当前版本** | `0.7.1` |
+| **当前版本** | `0.7.2` |
 | **Author** | **jibamao** — <https://gan-jibamao.github.io/> · Section `jibamao-Tweaks` |
 | **目标** | 高德地图 / AMap `com.autonavi.amap` **17.00.2** |
 | **架构** | `arm64` 单切片（rootless + RootHide 两种包） |
@@ -49,6 +49,7 @@
 | 切「我的 → 首页」不再慢一拍 | 0.6.8 / 0.6.9 |
 | 正式包**零诊断埋点**，源文件**零磁盘 I/O** | 0.6.0 / 0.6.8 |
 | 启动屏广告移除 | 0.7.1 |
+| 常驻开销收敛（3 定时器 → 2，全树遍历 -80%） | 0.7.2 |
 
 ---
 
@@ -387,6 +388,35 @@ re.findall(r'HookVoid\("([^"]+)",\s*@"([^"]+)"', src)
 启动 10 次看广告是否 0 次出现，并看 Console 里
 `[GaodeClean] splash guard hooked N: …` 有没有命中。
 
+### J. 常驻开销收敛（0.7.2）
+
+**审计（每秒，源码逐行核对）**
+
+| 源 | 频率 | 每次做什么 |
+|:--|--:|:--|
+| Schedule | 5.0 | `CleanPage × Pages`：全树 `Flatten` ≤2000 + 每节点 2–6 次 msgSend ← **最重** |
+| actionTimer | 3.3 | 白雾全窗 BFS ≤6000 + 每节点 `convertRect`；手势剥离全窗 BFS ≤6000 |
+| gt | 2.5 | 全窗 BFS ≤6000（剥手势） |
+
+合计 **≈10.8 次唤醒 + 5.8 次全树遍历**。
+
+**修法（不改变任何清理行为，只改「何时跑」和「跑多远」）**
+
+1. **`CleanPage` 改事件驱动 + 5 拍兜底** —— 加 `full` 参数：非全量拍且已匹配时
+   跳过 `Flatten` 锚点匹配段（全树扫描 5/s → 事件时 + 1/s）。事件源：
+   `AJX3View -layoutSubviews` / `-didMoveToWindow`（app 动内容必触发）、
+   `WatchHomeTransition`（切页）、`Capture`（AJX 元素重建）—— 置 `CleanForce`。
+2. **两个常驻定时器并入主 tick** —— `actionTimer`(300ms) 与 `gt`(400ms) 删除，
+   白雾扫描每拍跑（节点上限 6000 → **600**，白雾是顶层覆盖物浅层就能找到），
+   手势剥离每 2 拍（6000 → **1200** / **400**）。唤醒 10.8/s → **5/s**。
+3. **`NodeText` 按类缓存** —— AJX 判定每类只做一次（原来每节点都要
+   `NSStringFromClass` + `hasPrefix`），CleanPage 每拍上千节点的 msgSend 直接减半。
+4. **天气行查找 ×2 的窗口 BFS 上限 20000 → 2000**（都在地图控件浅层）。
+5. **`SweepLog` 纯泄漏删除** —— 它只增不减，而写文件的代码 0.6.0 就删了。
+
+**待真机确认** —— 白雾/手势扫描降频到 400ms 后，若切页时白雾回归
+（地图区 Δ 掉到 1–5），把白雾扫描改回每拍；其余项无此风险。
+
 ## 三、跨版本验证汇总
 
 | 版本 | 项目 | 结果 |
@@ -496,10 +526,10 @@ deb 打包用 `scripts/mkdeb-local.py`（Python 写 `ar` 归档，不需要 `dpk
 
 | 文件 | 说明 |
 |:--|:--|
-| `dist/GaodeClean-arm64.dylib` | 181,328 B · arm64 · chained fixups + adhoc 签名 |
-| `dist/GaodeClean-arm64e.dylib` | 182,672 B · arm64e · dyld_info 绑定 + adhoc 签名 |
-| `dist/com.jibamao.gaodeclean_0.7.1_iphoneos-arm64.deb` | rootless |
-| `dist/com.jibamao.gaodeclean_0.7.1_iphoneos-arm64e-roothide.deb`（arm64e） | RootHide |
+| `dist/GaodeClean-arm64.dylib` | 181,088 B · arm64 · chained fixups + adhoc 签名 |
+| `dist/GaodeClean-arm64e.dylib` | 182,416 B · arm64e · dyld_info 绑定 + adhoc 签名 |
+| `dist/com.jibamao.gaodeclean_0.7.2_iphoneos-arm64.deb` | rootless |
+| `dist/com.jibamao.gaodeclean_0.7.2_iphoneos-arm64e-roothide.deb`（arm64e） | RootHide |
 
 ### 每次发版自检清单
 
@@ -546,7 +576,8 @@ cmp <(ar p dist/*.deb data.tar.gz | tar xzO ./var/jb/.../GaodeClean.dylib) dist/
 0.6.7b  重写：只作用底栏子树
 0.6.8   切页响应 · 清除残留文件 I/O
 0.6.9   快修窗不再空转
-0.7.1   开屏广告移除                    ← 当前
+0.7.1   开屏广告移除
+0.7.2   常驻开销收敛                      ← 当前
 ```
 
 ---

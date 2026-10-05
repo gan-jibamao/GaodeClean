@@ -18,7 +18,7 @@
 static NSString *const kGCAuthor      = @"jibamao";
 static NSString *const kGCRepo        = @"https://gan-jibamao.github.io/";
 static NSString *const kGCSection     = @"jibamao-Tweaks";
-static NSString *const kGCVersion     = @"0.7.1";
+static NSString *const kGCVersion     = @"0.7.2";
 static NSString *const kGCSignature   = @"GaodeClean by jibamao";
 
 // 对外签名（供 log / 诊断 / 二次核对使用）
@@ -63,6 +63,9 @@ static int BarFixStalls;      // 0.6.8：早退续窗次数上限，防止 8ms �
 static int BarFixIdle;        // 0.6.9：连续「无改动」拍数，够了就立刻收窗
 static void AlignWeatherRowTick(UIWindow *win);
 static void SweepTabBarHints(UIView *bar);
+static void SweepFogOverlay(void);
+static void StripSlidablePan(void);
+static void StripTabBarGestures(void);
 static void KickBarFix(void);
 static void KickBarFixFor(NSTimeInterval seconds);
 static void WatchHomeTransition(id tabs);
@@ -70,6 +73,9 @@ static __weak UIWindow *GCCMainWindow;
 static __weak UIWindow *GCCSplashWindow;      // 已识别的广告窗口，之后拒绝其可见
 static __weak UIView   *GCCSplashView;        // 已识别的广告视图
 static NSInteger GCCSplashTicks;              // 兜底扫描剩余拍数（有界）
+static int TickCount;         // 0.7.2：主 tick 计数（降频兜底用）
+static BOOL CleanForce;       // 0.7.2：下一拍强制跑一次全量 CleanPage
+static NSMutableDictionary<NSString *, NSNumber *> *AjxCache;  // 0.7.2：类名→是否 AJX
 static BOOL GCCSplashDone;
 static void InstallSplashAdGuard(void);
 static void SplashAdTick(void);
@@ -194,11 +200,22 @@ static BOOL Visible(UIView *v) {
     return YES;
 }
 
+// 0.7.2：AJX 判定按类缓存。CleanPage 每拍对上千节点调 NodeText，
+// 原来每个节点都要 NSStringFromClass + hasPrefix —— 缓存后只剩一次字典查找。
+static BOOL NodeIsAjx(UIView *v) {
+    NSString *cn = NSStringFromClass(v.class);
+    NSNumber *cached = AjxCache[cn];
+    if (cached) return cached.boolValue;
+    BOOL is = [cn hasPrefix:@"AJX"];
+    AjxCache[cn] = @(is);
+    return is;
+}
+
 static NSString *NodeText(UIView *v) {
     NSMutableString *s = [NSMutableString string];
     if ([v isKindOfClass:UILabel.class]) [s appendString:((UILabel *)v).text ?: @""];
     // AJX uses custom CoreText labels, not just UIKit UILabel.
-    if ([NSStringFromClass(v.class) hasPrefix:@"AJX"]) {
+    if (NodeIsAjx(v)) {
         for (NSString *getter in @[@"attributedString", @"attributedText", @"text"]) {
             id value = ObjectGetter(v, getter);
             if ([value isKindOfClass:NSAttributedString.class]) value = [value string];
@@ -341,7 +358,7 @@ static void BindBoundary(UIView *page, UIView *anchor, UIView *peer, CGFloat bou
     ApplyLimits(state);
 }
 
-static void CleanPage(UIView *page) {
+static void CleanPage(UIView *page, BOOL full) {
     NSString *path = PagePath(page);
     GCCState *state = objc_getAssociatedObject(page, &StateKey);
     if (!state) {
@@ -368,6 +385,12 @@ static void CleanPage(UIView *page) {
         return;
     }
     if (state.matched && fabs(state.width - page.bounds.size.width) > 1) Restore(state);
+    // 0.7.2：非全量拍且已匹配 → 跳过全树扫描。
+    // 原来每拍对每页 Flatten ≤2000 节点 + 每节点 2–6 次 msgSend（5 次/秒），
+    // 是整个 tweak 最重的一条常驻路径。app 改内容会触发 AJX3View 的
+    // layoutSubviews / didMoveToWindow 钩子，那里置 CleanForce —— 事件不会漏。
+    // 兜底降到每 5 拍（1 秒）一次。
+    if (!full && state.matched) { ApplyLimits(state); return; }
     NSArray<UIView *> *nodes = Flatten(page);
     if (!nodes) { ApplyLimits(state); return; }
     state.attempts++;
@@ -555,6 +578,7 @@ static void Schedule(void) {
                            dispatch_get_main_queue(), ^{ Schedule(); });
             return;
         }
+        TickCount++;
         for (id tabs in TabControllers.allObjects) {
             id selected = ObjectGetter(tabs, @"selectedViewControl");
             id params = ObjectGetter(tabs, @"viewControlParams");
@@ -570,7 +594,16 @@ static void Schedule(void) {
         }
         for (id tabs in TabControllers.allObjects) WatchHomeTransition(tabs);
         for (id controller in NearbyControllers.allObjects) RegisterNearby(controller);
-        for (UIView *page in Pages.allObjects) CleanPage(page);
+        // 0.7.2：全量 CleanPage 只在「事件 + 每 5 拍兜底」时跑；
+        // 非全量拍走轻路径（Restore / 宽度检查 / ApplyLimits），不碰页面树。
+        BOOL fullClean = CleanForce || (TickCount % 5 == 0);
+        for (UIView *page in Pages.allObjects) CleanPage(page, fullClean);
+        // 0.7.2：合并进来的两个周期扫描（原 300ms / 400ms 独立定时器）
+        SweepFogOverlay();                       // 每拍，节点上限 600
+        if (TickCount % 2 == 0) {
+            StripSlidablePan();                  // 每 2 拍，节点上限 1200
+            StripTabBarGestures();               // 每 2 拍，节点上限 400
+        }
         // 0.4.41 冷启动兜底：定位超时(约 2.4s)仍未完成则强制显示，避免卡在隐藏态
         ColdTicks++;
         if (!HomeSettled && ColdTicks > 12) {
@@ -638,7 +671,7 @@ static void Capture(id element) {
         }
         objc_setAssociatedObject(view, &TextKey, text, OBJC_ASSOCIATION_COPY_NONATOMIC);
     }
-    if (Kind(page) == 3 && !Cleaning) { Cleaning = YES; CleanPage(page); Cleaning = NO; }
+    CleanForce = YES;
     Schedule();
 }
 
@@ -731,7 +764,6 @@ static BOOL GCCIsWhiteVeil(UIView *v, CGFloat *outA) {
     return r > 0.72 && g > 0.72 && b > 0.72 && a > 0.30 && a < 0.995;
 }
 
-static NSMutableArray *SweepLog = nil;
 
 // 每 300ms 扫一次：找出「覆盖 ≥70% 窗口的半透明白色视图」并压掉。
 
@@ -745,7 +777,7 @@ static void StripSlidablePan(void) {
     for (UIWindow *w in UIApplication.sharedApplication.windows) {
         if (w.hidden) continue;
         NSMutableArray *q = [NSMutableArray arrayWithObject:w];
-        for (NSUInteger i = 0; i < q.count && q.count < 6000; i++) {
+        for (NSUInteger i = 0; i < q.count && q.count < 1200; i++) {
             UIView *v = q[i];
             for (UIView *sub in v.subviews) [q addObject:sub];
             if (![v isKindOfClass:sv]) continue;
@@ -766,7 +798,7 @@ static void SweepFogOverlay(void) {
         if (w.hidden || w.alpha < 0.02) continue;
         CGRect wb = w.bounds;
         NSMutableArray *q = [NSMutableArray arrayWithObject:w];
-        for (NSUInteger i = 0; i < q.count && q.count < 6000; i++) {
+        for (NSUInteger i = 0; i < q.count && q.count < 600; i++) {
             UIView *v = q[i];
             for (UIView *sub in v.subviews) [q addObject:sub];
             if (v == w || v.hidden || v.alpha < 0.02) continue;
@@ -774,13 +806,29 @@ static void SweepFogOverlay(void) {
             if (f.size.width < wb.size.width * 0.50 || f.size.height < wb.size.height * 0.50) continue;
             CGFloat a = 0;
             if (!GCCIsWhiteVeil(v, &a)) continue;
-            if (SweepLog) {
-                [SweepLog addObject:[NSString stringWithFormat:@"%@ {{%.0f,%.0f},{%.0f,%.0f}} a=%.2f 父=%@",
-                    NSStringFromClass(v.class), f.origin.x, f.origin.y, f.size.width, f.size.height, a,
-                    NSStringFromClass(v.superview.class)]];
-            }
             NSLog(@"[GaodeClean] fog sweep hides %@ a=%.2f", NSStringFromClass(v.class), a);
             v.hidden = YES;
+        }
+    }
+}
+
+
+// 0.7.2：从 400ms 定时器抽出来，由主 tick 每 2 拍调一次。节点上限 400
+// （WINTabBar / WINMultiStyleRootView 都在浅层，够用）。
+static void StripTabBarGestures(void) {
+    for (UIWindow *w in UIApplication.sharedApplication.windows) {
+        if (w.hidden) continue;
+        NSMutableArray *q = [NSMutableArray arrayWithObject:w];
+        for (NSUInteger i = 0; i < q.count && q.count < 400; i++) {
+            UIView *v = q[i];
+            for (UIView *sub in v.subviews) [q addObject:sub];
+            NSString *cn = NSStringFromClass(v.class);
+            if (![cn isEqualToString:@"WINTabBar"] &&
+                ![cn isEqualToString:@"WINMultiStyleRootView"]) continue;
+            for (UIGestureRecognizer *g in [v.gestureRecognizers copy])
+                if ([g isKindOfClass:UIPanGestureRecognizer.class] ||
+                    [g isKindOfClass:UISwipeGestureRecognizer.class])
+                    [v removeGestureRecognizer:g];
         }
     }
 }
@@ -842,18 +890,11 @@ static void SealBlurOverlay(void) {
     //   StripSlidablePan() 维护上拉手势的摘除结果（0.5.46 起）
     // 诊断部分（每 1.5s 全窗口树 BFS + 写 Documents/GaodeClean-blur.txt）整段删除：
     // 正式包不再产生任何日志文件，也没有每分钟 40 次的全树遍历。
-    static dispatch_source_t actionTimer = nil;
-    if (!actionTimer) {
-        actionTimer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, dispatch_get_main_queue());
-        dispatch_source_set_timer(actionTimer, dispatch_time(DISPATCH_TIME_NOW, 300 * NSEC_PER_MSEC),
-                                  300 * NSEC_PER_MSEC, 100 * NSEC_PER_MSEC);
-        dispatch_source_set_event_handler(actionTimer, ^{
-            if (!SweepLog) SweepLog = [NSMutableArray array];
-            SweepFogOverlay();
-            StripSlidablePan();
-        });
-        dispatch_resume(actionTimer);
-    }
+    // 0.7.2：这里的 300ms 定时器已并入主 tick（Schedule，200ms）——
+    //   SweepFogOverlay 每拍跑一次，节点上限 6000 → 600（白雾是顶层覆盖物，浅层就能找到）
+    //   StripSlidablePan 每 2 拍跑一次，节点上限 6000 → 1200
+    // 唤醒次数 10.8/s → 5/s，且不再有独立的 300ms 唤醒源。
+    // 顺带删掉 SweepLog —— 它只增不减，而写文件的代码 0.6.0 就删了，纯泄漏。
 }
 
 static CGPoint LimitedOffset(UIScrollView *scroll, CGPoint point) {
@@ -1194,7 +1235,7 @@ static void LayoutMinimalHome(id handler) {
         }
         if (win && rowStale) {
             NSMutableArray *q = [NSMutableArray arrayWithObject:win];
-            for (NSUInteger qi = 0; qi < q.count && q.count < 20000; qi++) {
+            for (NSUInteger qi = 0; qi < q.count && q.count < 2000; qi++) {
                 UIView *v = q[qi];
                 [q addObjectsFromArray:v.subviews];
                 if (IsWeatherRowClass(NSStringFromClass(v.class))) {
@@ -1309,7 +1350,7 @@ static void AlignWeatherRowTick(UIWindow *win) {
     }
     if (stale) {
         NSMutableArray *q = [NSMutableArray arrayWithObject:win];
-        for (NSUInteger i = 0; i < q.count && q.count < 20000; i++) {
+        for (NSUInteger i = 0; i < q.count && q.count < 2000; i++) {
             UIView *v = q[i];
             [q addObjectsFromArray:v.subviews];
             if (IsWeatherRowClass(NSStringFromClass(v.class)) && IsWeatherRowView(v)) {
@@ -1337,7 +1378,7 @@ static void AlignCornerWidgets(UIView *bar) {
     if (!CachedRoute || !CachedRoute.window) CachedRoute = nil;
     if (!CachedCar || !CachedRight || !CachedRoute) {
         NSMutableArray<UIView *> *queue = [NSMutableArray arrayWithObject:win];
-        for (NSUInteger i = 0; i < queue.count && queue.count < 20000; i++) {
+        for (NSUInteger i = 0; i < queue.count && queue.count < 2000; i++) {
             UIView *v = queue[i];
             [queue addObjectsFromArray:v.subviews];
             NSString *cn = NSStringFromClass(v.class);
@@ -1525,6 +1566,8 @@ static void WatchHomeTransition(id tabs) {
     if (!prev || prev == selected) return;          // 第一次见到 / 没变
     BOOL prevHome = [NSStringFromClass([prev class]) isEqualToString:@"WINAmapHomeControl"];
     if (home && !prevHome && ColdTicks >= 15) KickBarFixFor(0.32);
+    // 0.7.2：切页 = 内容必然重排 → 强制全量 CleanPage
+    if (prevHome != home) CleanForce = YES;
 }
 
 // 只走底栏子树：节点数 20-40，无 convertRect:，无窗口遍历。200ms 一次也无所谓。
@@ -2022,32 +2065,8 @@ static void InstallMinimalHome(void) {
     }
     // 0.5.50：上拉手势的另一个宿主 —— 只对这两个类的【本体】摘 pan/swipe，
     // 绝不碰子树（搜索栏是 WINMultiStyleRootView 的子视图）。
-    {
-        static dispatch_source_t gt = nil;
-        if (!gt) {
-            gt = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, dispatch_get_main_queue());
-            dispatch_source_set_timer(gt, dispatch_time(DISPATCH_TIME_NOW, 400 * NSEC_PER_MSEC),
-                                      400 * NSEC_PER_MSEC, 150 * NSEC_PER_MSEC);
-            dispatch_source_set_event_handler(gt, ^{
-                for (UIWindow *w in UIApplication.sharedApplication.windows) {
-                    if (w.hidden) continue;
-                    NSMutableArray *q = [NSMutableArray arrayWithObject:w];
-                    for (NSUInteger i = 0; i < q.count && q.count < 6000; i++) {
-                        UIView *v = q[i];
-                        for (UIView *sub in v.subviews) [q addObject:sub];
-                        NSString *cn = NSStringFromClass(v.class);
-                        if (![cn isEqualToString:@"WINTabBar"] &&
-                            ![cn isEqualToString:@"WINMultiStyleRootView"]) continue;
-                        for (UIGestureRecognizer *g in [v.gestureRecognizers copy])
-                            if ([g isKindOfClass:UIPanGestureRecognizer.class] ||
-                                [g isKindOfClass:UISwipeGestureRecognizer.class])
-                                [v removeGestureRecognizer:g];
-                    }
-                }
-            });
-            dispatch_resume(gt);
-        }
-    }
+    // 0.7.2：这里的 400ms 定时器已并入主 tick（StripTabBarGestures，每 2 拍一次，
+    // 节点上限 6000 → 400）。WINTabBar / WINMultiStyleRootView 都在浅层，够用。
     HookWeatherRow();
     HookVoid(@"AMapUIWaterFallContentSlidableView", @"didMoveToWindow", ^(UIView *v) {
         v.userInteractionEnabled = NO;
@@ -2344,6 +2363,7 @@ __attribute__((constructor)) static void Initialize(void) {
             NSLog(@"[GaodeClean] unsupported app version; disabled");
             return;
         }
+        AjxCache = [NSMutableDictionary dictionary];
         Pages = [NSHashTable weakObjectsHashTable];
         NearbyControllers = [NSHashTable weakObjectsHashTable];
         TabControllers = [NSHashTable weakObjectsHashTable];
@@ -2383,8 +2403,9 @@ __attribute__((constructor)) static void Initialize(void) {
         HookVoid(@"AJXBaseElement", @"reloadView", ^(id e) { Capture(e); });
         HookVoid(@"AJXBaseElement", @"layoutSubViews", ^(id e) { Capture(e); });
         HookVoid(@"AJXBaseElement", @"updateVoiceOverIDAndLabel", ^(id e) { Capture(e); });
-        HookVoid(@"AJX3View", @"layoutSubviews", ^(id page) { [Pages addObject:page]; if (!Cleaning) { Cleaning = YES; CleanPage(page); Cleaning = NO; } Schedule(); });
-        HookVoid(@"AJX3View", @"didMoveToWindow", ^(id page) { [Pages addObject:page]; CleanPage(page); Schedule(); });
+        // 0.7.2：app 动了 AJX 页面内容 → 下一拍强制全量 CleanPage
+        HookVoid(@"AJX3View", @"layoutSubviews", ^(id page) { [Pages addObject:page]; CleanForce = YES; Schedule(); });
+        HookVoid(@"AJX3View", @"didMoveToWindow", ^(id page) { [Pages addObject:page]; CleanForce = YES; Schedule(); });
         HookVoid(@"AJXWINNearbyViewControl", @"viewDidLoad", ^(id controller) { [NearbyControllers addObject:controller]; Schedule(); });
         HookVoid(@"WINTabBarControl", @"viewDidLoad", ^(id tabs) { [TabControllers addObject:tabs]; Schedule(); });
         // Recheck after asynchronous cards and cell reuse; only attached target pages are scanned.
@@ -2396,6 +2417,6 @@ __attribute__((constructor)) static void Initialize(void) {
             dispatch_source_set_event_handler(ScheduleTimer, ^{ Schedule(); });
             dispatch_resume(ScheduleTimer);
         });
-        NSLog(@"[GaodeClean] loaded 0.7.1 (17.00.2 only)");
+        NSLog(@"[GaodeClean] loaded 0.7.2 (17.00.2 only)");
     }
 }
