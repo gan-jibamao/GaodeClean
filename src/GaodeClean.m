@@ -18,7 +18,7 @@
 static NSString *const kGCAuthor      = @"jibamao";
 static NSString *const kGCRepo        = @"https://gan-jibamao.github.io/";
 static NSString *const kGCSection     = @"jibamao-Tweaks";
-static NSString *const kGCVersion     = @"0.6.8";
+static NSString *const kGCVersion     = @"0.6.9";
 static NSString *const kGCSignature   = @"GaodeClean by jibamao";
 
 // 对外签名（供 log / 诊断 / 二次核对使用）
@@ -60,6 +60,7 @@ static void AlignCornerWidgets(UIView *bar);
 static BOOL FixingHintText;
 static __weak UIView *CachedTabBar;
 static int BarFixStalls;      // 0.6.8：早退续窗次数上限，防止 8ms 自旋
+static int BarFixIdle;        // 0.6.9：连续「无改动」拍数，够了就立刻收窗
 static void AlignWeatherRowTick(UIWindow *win);
 static void SweepTabBarHints(UIView *bar);
 static void KickBarFix(void);
@@ -1118,7 +1119,7 @@ static void LayoutMinimalHome(id handler) {
     id selected = ObjectGetter(tabs, @"selectedViewControl");
     if (![bar isKindOfClass:UIView.class] || ![sheet isKindOfClass:UIView.class] || !sheet.superview) return;
     BOOL home = [NSStringFromClass([selected class]) isEqualToString:@"WINAmapHomeControl"];
-    if (!home) { bar.hidden = YES; return; }
+    if (!home) { if (!bar.hidden) { bar.hidden = YES; BarFixIdle = 0; } return; }
     UIView *tabBar = ObjectGetter(tabs, @"tabBar");
     UIView *parent = sheet.superview;
     // 0.6.8：首页容器还没上屏（切页转场中间态）时，**开快修窗**而不是直接退出。
@@ -1133,20 +1134,35 @@ static void LayoutMinimalHome(id handler) {
     BarFixStalls = 0;
     BarParent = parent;
     LayingOutHome = YES;
+    // 0.6.9：先算期望 frame，只有**真的不一样**才写。
+    // 0.6.8 的写法是无条件 bar.frame = ... + bringSubviewToFront:，而快修窗每 8ms
+    // 跑一次 —— 等于切页后几百毫秒里每 8ms 给搜索栏设一次 frame 并重排兄弟层级。
+    // 逐帧实测：mine→home 之后地图区 Δ≈0.41 持续 ~880ms（静止首页只有 0.02-0.06，
+    // 是噪声的 10-20 倍），home→mine 只有 0.00 —— 差异就来自这个不对称。
+    // 反向（!home）只走一句 bar.hidden = YES 就 return，根本不碰这些。
     if (bar.superview != parent) [parent addSubview:bar];
     // 0.5.9：恢复隐藏「上拉发现」容器（sheet）与其遮罩。
     // 0.5.1 曾移除这三行，结果面板的白底永久露出（跨版本实测：0.5.0 无白块，
     // 0.5.7/0.5.8 每帧都在 544-682pt 出现纯白块）。搜索栏已挂到 parent
     // 并在 sheet 之外，隐藏 sheet 不会影响它（0.5.0 即如此工作）。
-    sheet.hidden = YES;
+    if (!sheet.hidden) { sheet.hidden = YES; BarFixIdle = 0; }
     UIView *mask = ObjectGetter(handler, @"maskView");
-    if ([mask isKindOfClass:UIView.class]) mask.hidden = YES;
+    if ([mask isKindOfClass:UIView.class] && !mask.hidden) { mask.hidden = YES; BarFixIdle = 0; }
     CALayer *bottomMask = ObjectGetter(handler, @"bottomMaskLayer");
-    if ([bottomMask isKindOfClass:CALayer.class]) bottomMask.hidden = YES;
+    if ([bottomMask isKindOfClass:CALayer.class] && !bottomMask.hidden) { bottomMask.hidden = YES; BarFixIdle = 0; }
     CGRect tabFrame = [tabBar convertRect:tabBar.bounds toView:parent];
     CGFloat height = MAX(50, MIN(64, bar.bounds.size.height));
-    bar.frame = CGRectMake(0, MAX(0, tabFrame.origin.y - height - 12), parent.bounds.size.width, height);
-    [parent bringSubviewToFront:bar];
+    CGRect want = CGRectMake(0, MAX(0, tabFrame.origin.y - height - 12),
+                             parent.bounds.size.width, height);
+    BOOL moved = !CGRectEqualToRect(bar.frame, want);
+    if (moved) { bar.frame = want; BarFixIdle = 0; }
+    // 层级单独判：app 可能不动 frame 却把兄弟视图插到搜索栏之上。
+    // 只在「确实被压下去」时才 bringSubviewToFront（它比设 frame 重，会让父视图重排）。
+    if (bar.superview == parent && parent.subviews.lastObject != bar) {
+        [parent bringSubviewToFront:bar];
+        BarFixIdle = 0;
+    }
+    if (bar.hidden) { bar.hidden = NO; BarFixIdle = 0; }
     // 0.5.27：移除全部天气行实验代码（含导致闪退的诊断块）。
     // 结论：415pt 那行「☀温度+高德地图+比例尺」不是 WINScaleLineLogoMapWidget
     // （该类只有 logoView+scaleLineView，实测在 1073pt 屏幕外）。待确认真身。
@@ -1221,6 +1237,7 @@ static void KickBarFixFor(NSTimeInterval seconds) {
     if (ticks < BarFixTicks) ticks = BarFixTicks;    // 已在跑的窗口只延长、不缩短
     if (ticks < 1) ticks = 1;
     BarFixTicks = ticks;
+    BarFixIdle = 0;
     if (BarFixTimer) return;
     BarFixTimer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, dispatch_get_main_queue());
     dispatch_source_set_timer(BarFixTimer, dispatch_time(DISPATCH_TIME_NOW, 0),
@@ -1229,6 +1246,13 @@ static void KickBarFixFor(NSTimeInterval seconds) {
         if (BarFixTicks <= 0) { dispatch_source_cancel(BarFixTimer); BarFixTimer = nil; return; }
         BarFixTicks--;
         for (id h in HomeHandlers.allObjects) LayoutMinimalHome(h);
+        // 0.6.9：这一拍什么都没改（BarFixIdle 被 LayoutMinimalHome 清零过），
+        // 连续 6 拍（≈48ms）即收敛 → 立刻收窗，不再空转满 640ms。
+        if (++BarFixIdle >= 6) {
+            BarFixTicks = 0;
+            dispatch_source_cancel(BarFixTimer);
+            dispatch_async(dispatch_get_main_queue(), ^{ BarFixTimer = nil; });
+        }
     });
     dispatch_resume(BarFixTimer);
 }
@@ -2047,6 +2071,6 @@ __attribute__((constructor)) static void Initialize(void) {
             dispatch_source_set_event_handler(ScheduleTimer, ^{ Schedule(); });
             dispatch_resume(ScheduleTimer);
         });
-        NSLog(@"[GaodeClean] loaded 0.6.8 (17.00.2 only)");
+        NSLog(@"[GaodeClean] loaded 0.6.9 (17.00.2 only)");
     }
 }
