@@ -4,7 +4,7 @@
 
 | | |
 |:--|:--|
-| **版本** | `0.6.9` |
+| **版本** | `0.7.1` |
 | **Author** | **jibamao** |
 | **Repo** | <https://gan-jibamao.github.io/> · Section `jibamao-Tweaks` |
 | **目标** | 高德地图 / AMap `com.autonavi.amap` **17.00.2** |
@@ -27,6 +27,7 @@
 | 冷启动天气行不归位 | 0.6.6 | ✅ |
 | 底栏偶发「上拉发现」提示 | 0.6.7 | ✅ |
 | 「我的 → 首页」比反向慢 | 0.6.9 | ✅ |
+| 启动屏广告（偶发填充） | 0.7.1 | ✅ |
 
 正式包**零诊断埋点** —— 不再写 `Documents/GaodeClean-*.txt`，源文件零磁盘 I/O。
 
@@ -124,7 +125,8 @@ python3 scripts/mkdeb-local.py
 0.6.7   底栏「上拉发现」根除
 0.6.7b  重写（0.6.7a 卡死已回滚）
 0.6.8   切页响应 · 清除残留文件 I/O
-0.6.9   快修窗不再空转            ← 当前
+0.6.9   快修窗不再空转
+0.7.1   开屏广告移除            ← 当前
 ```
 
 ---
@@ -141,4 +143,4 @@ strings GaodeClean.dylib | grep -i jibamao
 # GaodeClean by jibamao
 ```
 
-启动输出：`[GaodeClean] GaodeClean v0.6.9 | jibamao | https://gan-jibamao.github.io/`
+启动输出：`[GaodeClean] GaodeClean v0.7.1 | jibamao | https://gan-jibamao.github.io/`

@@ -18,7 +18,7 @@
 static NSString *const kGCAuthor      = @"jibamao";
 static NSString *const kGCRepo        = @"https://gan-jibamao.github.io/";
 static NSString *const kGCSection     = @"jibamao-Tweaks";
-static NSString *const kGCVersion     = @"0.6.9";
+static NSString *const kGCVersion     = @"0.7.1";
 static NSString *const kGCSignature   = @"GaodeClean by jibamao";
 
 // 对外签名（供 log / 诊断 / 二次核对使用）
@@ -66,6 +66,13 @@ static void SweepTabBarHints(UIView *bar);
 static void KickBarFix(void);
 static void KickBarFixFor(NSTimeInterval seconds);
 static void WatchHomeTransition(id tabs);
+static __weak UIWindow *GCCMainWindow;
+static __weak UIWindow *GCCSplashWindow;      // 已识别的广告窗口，之后拒绝其可见
+static __weak UIView   *GCCSplashView;        // 已识别的广告视图
+static NSInteger GCCSplashTicks;              // 兜底扫描剩余拍数（有界）
+static BOOL GCCSplashDone;
+static void InstallSplashAdGuard(void);
+static void SplashAdTick(void);
 static void AlignOneWidget(UIView *bar, UIView *w, CGFloat barTop);
 
 @class GCCState;
@@ -600,6 +607,8 @@ static void Schedule(void) {
                 AlignWeatherRowTick(bar.window);
             }
         }
+        // 0.7.0：开屏广告兜底（有界窗口内）
+        SplashAdTick();
         // 0.6.7：底栏「上拉发现」提示的周期通道 —— 引导态常常晚于最后一次布局才落地，
         // 只挂 layout 就是这个 bug 偶发的根因。扫描范围只有底栏子树，开销可忽略。
         if (CachedTabBar) SweepTabBarHints(CachedTabBar);
@@ -1585,6 +1594,9 @@ static void ConfineLegacyChrome(UIView *bar) {
 }
 
 static void CenterTabButtons(UIView *bar) {
+    // 0.7.0：能承载底栏的窗口就是 App 主窗口 —— 后面屏蔽开屏广告时，
+    // 这个窗口永远不在可隐藏名单里，避免误伤。
+    if (bar.window && !GCCMainWindow) GCCMainWindow = bar.window;
     static BOOL adjusting;
     if (adjusting) return;
     NSArray *items = ObjectGetter(bar, @"tabBarItems");
@@ -1627,7 +1639,320 @@ static void CenterTabButtons(UIView *bar) {
     // 全窗口遍历 + 文件写入，切页时正是底栏密集重排的时刻。整段删除。
 }
 
+
+// ===========================================================================
+//  0.7.0 —— 启动屏广告移除
+//
+//  现象：开屏广告「偶发」出现，不是每次冷启动都有。这是广告 SDK 的**填充率**
+//  决定的 —— 有素材才展示，没有就直接进 App。所以**不能只在某个固定时机扫一次**
+//  （这正是 0.6.7「上拉发现」踩过的坑：只挂在 layoutSubviews 上，晚到的引导态就漏了）。
+//
+//  三条通道一起覆盖，全部限定在有界范围内：
+//    ① UIWindow -addSubview:                        广告视图被塞进窗口的瞬间
+//    ② UIViewController -presentViewController:...  模态全屏广告
+//    ③ 启动 / 每次回到前台后 15s 内，由已有的 200ms tick 兜底扫描
+//
+//  安全边界（避免误伤 App 本体）：
+//    · 只认类名含广告 SDK 关键词的视图 / 窗口 —— **不认裸「ad」**，
+//      否则 header / download / shadow 全都会中
+//    · 必须覆盖所在窗口 ≥60% 面积
+//    · 绝不隐藏 App 主窗口（GCCMainWindow = 承载底栏的那个窗口）
+//    · 自己创建的视图（GCC 前缀）一律跳过
+// ===========================================================================
+
+static BOOL GCCHasAdKeyword(NSString *name) {
+    if (!name.length) return NO;
+    static NSArray<NSString *> *kw;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        // 只列**明确属于广告 SDK** 的词。注意不能放裸 "ad"：
+        // header / download / shadow / badge 都会误伤。
+        kw = @[@"splash", @"launchad", @"launchimageview", @"adview", @"advert",
+               @"csj", @"buad", @"busplash", @"pangle",
+               @"gdtsplash", @"gdtad", @"gdtnative", @"gdtuni",
+               @"kssplash", @"ksad", @"mtgsplash", @"mtgad",
+               @"baidumob", @"beacon", @"splashad", @"adskip",
+               @"winsplash", @"amapsplash", @"autosplash"];
+    });
+    NSString *low = name.lowercaseString;
+    for (NSString *k in kw) if ([low containsString:k]) return YES;
+    return NO;
+}
+
+// 覆盖所在窗口 ≥60% 面积才算开屏广告
+static BOOL GCCIsFullScreen(UIView *v) {
+    UIWindow *w = v.window;
+    if (!w || ![w isKindOfClass:UIWindow.class]) return NO;
+    if (w.bounds.size.width < 1 || w.bounds.size.height < 1) return NO;
+    CGRect r = [v convertRect:v.bounds toView:w];
+    return CGRectGetWidth(r)  >= w.bounds.size.width  * 0.6
+        && CGRectGetHeight(r) >= w.bounds.size.height * 0.6;
+}
+
+static BOOL GCCIsSplashAd(UIView *v, UIWindow *win) {
+    if (!v || v.hidden) return NO;
+    NSString *cn = NSStringFromClass(v.class);
+    if ([cn hasPrefix:@"GCC"]) return NO;                    // 自己的视图
+    if (!GCCHasAdKeyword(cn) && !GCCHasAdKeyword(NSStringFromClass(win.class))) return NO;
+    return GCCIsFullScreen(v);
+}
+
+// 处理命中：隐藏广告视图；若它住在一个**独立广告窗口**里（且不是主窗口），连窗口一起收掉。
+static void GCCHideSplashAd(UIView *v, NSString *why) {
+    if (!v) return;
+    UIWindow *w = v.window;
+    GCCSplashView = v;
+    v.hidden = YES;
+    NSLog(@"[GaodeClean] splash ad hidden [%@] view=%@ win=%@",
+          why, NSStringFromClass(v.class), NSStringFromClass(w.class));
+
+    if (w && w != GCCMainWindow) {
+        // 该窗口里除了广告没有别的可交互内容 → 直接收掉
+        GCCSplashWindow = w;
+        w.hidden = YES;
+    }
+    GCCSplashDone = YES;
+    GCCSplashTicks = 0;
+}
+
+// 主窗口之外的、类名像广告的窗口 —— 也是强信号
+static void GCCHideAdWindows(void) {
+    for (UIWindow *w in UIApplication.sharedApplication.windows) {
+        if (w == GCCMainWindow || w.hidden) continue;
+        if (!GCCHasAdKeyword(NSStringFromClass(w.class))) continue;
+        GCCSplashWindow = w;
+        w.hidden = YES;
+        GCCSplashDone = YES;
+        NSLog(@"[GaodeClean] splash ad window hidden: %@", NSStringFromClass(w.class));
+    }
+}
+
+// 通道 ③：兜底扫描。只在启动 / 回前台后的有界窗口内跑，且有节点上限。
+static void SplashAdTick(void) {
+    GCCHideAdWindows();
+    if (GCCSplashTicks <= 0) return;
+    GCCSplashTicks--;
+    for (UIWindow *w in UIApplication.sharedApplication.windows) {
+        if (w == GCCMainWindow || w.hidden) continue;
+        // 只下潜两层、上限 200 个节点 —— 不做全树 BFS（0.6.7a 的教训）
+        NSMutableArray *q = [NSMutableArray arrayWithObject:w];
+        for (NSUInteger i = 0; i < q.count && q.count < 200; i++) {
+            UIView *v = q[i];
+            if (v != w) {
+                UIWindow *owner = v.window ?: w;
+                if (GCCIsSplashAd(v, owner)) { GCCHideSplashAd(v, @"tick"); return; }
+            }
+            [q addObjectsFromArray:v.subviews];
+        }
+    }
+    // 主窗口里也可能直接盖了一层全屏广告（不走独立窗口）
+    if (GCCMainWindow) {
+        NSArray *subs = [GCCMainWindow.subviews copy];
+        for (UIView *v in subs) {
+            if (GCCIsSplashAd(v, GCCMainWindow)) { GCCHideSplashAd(v, @"tick-main"); return; }
+        }
+    }
+}
+
+static void ReArmSplashGuard(void) {
+    GCCSplashTicks = 75;          // 75 × 200ms ≈ 15s
+    GCCSplashDone = NO;
+    SplashAdTick();
+}
+
+// ---------------------------------------------------------------------------
+//  ❖ 决定性一层：从高德 17.00.2 的字符串表里抄出来的**真类名与真 selector**
+//
+//  高德的广告走阿里聚合 SDK，命名空间是 CNG（另有 CNB / CNGLaunchSplash*、
+//  CNGSplashAds*、CNGDoubleSplashCoordinator …），配置键为
+//  `ad_splash_enable` / `_ad_splash_enable` / `ignore_splash_ads`。
+//  这些都不是猜的 —— 由二进制字符串表逐个核对：
+//      CNGLaunchSplashView / CNGLaunchSplashImageView / CNGLaunchSplashPrefetchAds
+//      CNGSplashAds* / CNBSplash / CNGDoubleSplashCoordinator
+//      isSplashAd / hasSplash / isShowSplash / showSplashAdInWindow
+//
+//  做法：用 objc_getClassList() 把这些类找出来，再按**真实 selector** 挂钩：
+//    · 「显示」类方法 → 空实现
+//    · 「判定」类方法 → 返回 NO（先校验返回类型是 BOOL/char，不匹配就不动）
+//  比猜类名可靠，也不会像 0.6.7a 那样把钩子挂到框架基类上。
+// ---------------------------------------------------------------------------
+static BOOL GCCIsAdNamespace(NSString *name) {
+    if (!name.length) return NO;
+    static NSArray<NSString *> *prefixes;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        prefixes = @[@"CNGLaunchSplash", @"CNGSplashAds", @"CNGSplash", @"CNBSplash",
+                     @"CNGBaseThirdPartySDKSplashAds", @"CNGDoubleSplash",
+                     @"CNGMSBaseSplashAd", @"CNGMSDirectSplashAd", @"CNGMSS2SBiddingSplashAd",
+                     @"CNGMSSplashAdsManager", @"CNGCSJ", @"CNGAdSplash"];
+    });
+    for (NSString *p in prefixes) if ([name hasPrefix:p]) return YES;
+    return NO;
+}
+
+// 该方法是否由**这个类自己**实现（而非继承）
+static BOOL GCCClassImplements(Class cls, SEL sel) {
+    unsigned int n = 0;
+    Method *list = class_copyMethodList(cls, &n);
+    BOOL found = NO;
+    for (unsigned int i = 0; i < n; i++) {
+        if (method_getName(list[i]) == sel) { found = YES; break; }
+    }
+    if (list) free(list);
+    return found;
+}
+
+static void GCCHookAdClasses(void) {
+    int count = objc_getClassList(NULL, 0);
+    if (count <= 0) return;
+    Class *all = (Class *)malloc(sizeof(Class) * (size_t)count);
+    if (!all) return;
+    count = objc_getClassList(all, count);
+
+    // 「显示」——空实现即可。只接受无参或至多两参的、返回 void 的方法。
+    NSArray<NSString *> *showSels = @[@"showSplash", @"showSplashAd", @"showSplashAdInWindow",
+                                      @"showSplashViewInRootViewController", @"showSplashWithConfigEntry",
+                                      @"showSplashPlaceholderView", @"showSplashCardInRootVC",
+                                      @"beginToShowNativeSplashAd"];
+    // 「判定」——返回 NO。只接受返回 BOOL/char 的。
+    NSArray<NSString *> *boolSels = @[@"isSplashAd", @"hasSplash", @"isShowSplash", @"isSplash",
+                                      @"isSplashExist", @"isSplashAdDidLoad", @"isSplashImageAd"];
+    NSMutableArray<NSString *> *hooked = [NSMutableArray array];
+
+    for (int i = 0; i < count; i++) {
+        Class cls = all[i];
+        if (!cls) continue;
+        NSString *cn = NSStringFromClass(cls);
+        if (!GCCIsAdNamespace(cn)) continue;
+
+        for (NSString *name in showSels) {
+            SEL sel = NSSelectorFromString(name);
+            Method m = class_getInstanceMethod(cls, sel);
+            if (!m) continue;
+            // 只钩「这个类自己实现」的方法。否则 Replace() 会退化成
+            // method_setImplementation → 改到父类，波及所有子类（过宽）。
+            if (!GCCClassImplements(cls, sel)) continue;
+            const char *t = method_getTypeEncoding(m);
+            NSMethodSignature *sig = [NSMethodSignature signatureWithObjCTypes:t];
+            if (sig.methodReturnType[0] != 'v') continue;           // 只换 void
+            // ★ block 的参数个数必须与真实方法**一致**，否则调用约定不匹配
+            //   （0.6.7a 的教训：钩子签名不对会直接崩 / 卡死）。
+            //   numberOfArguments 含 self 与 _cmd，所以 2 → 无参，3 → 一参，4 → 两参。
+            NSUInteger na = sig.numberOfArguments;
+            IMP empty = nil;
+            if (na == 2)      empty = imp_implementationWithBlock(^(__unused id self) {});
+            else if (na == 3) empty = imp_implementationWithBlock(^(__unused id self, __unused id a1) {});
+            else if (na == 4) empty = imp_implementationWithBlock(^(__unused id self, __unused id a1, __unused id a2) {});
+            if (!empty) continue;                                   // 参数更多就不动
+            Replace(cls, sel, empty, t);
+            [hooked addObject:[NSString stringWithFormat:@"%@-%@", cn, name]];
+        }
+        for (NSString *name in boolSels) {
+            SEL sel = NSSelectorFromString(name);
+            Method m = class_getInstanceMethod(cls, sel);
+            if (!m) continue;
+            if (!GCCClassImplements(cls, sel)) continue;
+            const char *t = method_getTypeEncoding(m);
+            NSMethodSignature *sig = [NSMethodSignature signatureWithObjCTypes:t];
+            char r = sig.methodReturnType[0];
+            if (r != 'B' && r != 'c') continue;                     // 必须返回 BOOL/char
+            if (sig.numberOfArguments != 2) continue;               // 必须无参
+            Replace(cls, sel, imp_implementationWithBlock(^(__unused id self) { return (BOOL)NO; }), t);
+            [hooked addObject:[NSString stringWithFormat:@"%@-%@", cn, name]];
+        }
+    }
+    free(all);
+    if (hooked.count) NSLog(@"[GaodeClean] splash guard hooked %lu: %@",
+                            (unsigned long)hooked.count, [hooked componentsJoinedByString:@", "]);
+}
+
+static void InstallSplashAdGuard(void) {
+    GCCHookAdClasses();
+    ReArmSplashGuard();
+
+    // 通道 ①：广告视图被加进窗口的瞬间。钩 UIWindow 而不是 UIView ——
+    // UIWindow 是具体类，addSubview: 调用频率低，不会像钩基类那样拖死主线程。
+    {
+        SEL sel = @selector(addSubview:);
+        Method m = class_getInstanceMethod(UIWindow.class, sel);
+        if (m) {
+            IMP o = method_getImplementation(m);
+            const char *t = method_getTypeEncoding(m);
+            Replace(UIWindow.class, sel, imp_implementationWithBlock(^(UIWindow *self, UIView *sub) {
+                ((void (*)(id, SEL, id))o)(self, sel, sub);
+                if (GCCIsSplashAd(sub, self)) GCCHideSplashAd(sub, @"addSubview");
+            }), t);
+        }
+    }
+
+    // 通道 ②：模态全屏广告。presentViewController 一次会话只调用几次，
+    // 不是热路径；且只在「呈现出来的确实是广告」时才动手。
+    {
+        SEL sel = @selector(presentViewController:animated:completion:);
+        Method m = class_getInstanceMethod(UIViewController.class, sel);
+        if (m) {
+            IMP o = method_getImplementation(m);
+            const char *t = method_getTypeEncoding(m);
+            Replace(UIViewController.class, sel,
+                imp_implementationWithBlock(^(UIViewController *self, UIViewController *vc,
+                                              BOOL animated, void (^done)(void)) {
+                    ((void (*)(id, SEL, id, BOOL, id))o)(self, sel, vc, animated, done);
+                    UIView *pv = vc.view;
+                    if (pv && GCCIsSplashAd(pv, pv.window)) {
+                        GCCHideSplashAd(pv, @"present");
+                        if (vc.presentingViewController) {
+                            [vc dismissViewControllerAnimated:NO completion:nil];
+                        }
+                    }
+                }), t);
+        }
+    }
+
+    // 已识别的广告窗口：之后 app 再想让它可见 / 变 key，一律拒绝
+    {
+        SEL sel = @selector(setHidden:);
+        Method m = class_getInstanceMethod(UIWindow.class, sel);
+        if (m) {
+            IMP o = method_getImplementation(m);
+            const char *t = method_getTypeEncoding(m);
+            Replace(UIWindow.class, sel, imp_implementationWithBlock(^(UIWindow *self, BOOL hidden) {
+                if (!hidden && self == GCCSplashWindow) hidden = YES;
+                ((void (*)(id, SEL, BOOL))o)(self, sel, hidden);
+            }), t);
+        }
+        SEL mk = NSSelectorFromString(@"makeKeyAndVisible");
+        Method m2 = class_getInstanceMethod(UIWindow.class, mk);
+        if (m2) {
+            IMP o2 = method_getImplementation(m2);
+            const char *t2 = method_getTypeEncoding(m2);
+            Replace(UIWindow.class, mk, imp_implementationWithBlock(^(UIWindow *self) {
+                if (self == GCCSplashWindow) return;          // 广告窗口不许成为 key
+                ((void (*)(id, SEL))o2)(self, mk);
+            }), t2);
+        }
+    }
+
+    // 每次回到前台重新武装（用户可能切出去再回来，广告会重新拉）
+    [NSNotificationCenter.defaultCenter addObserverForName:UIApplicationDidBecomeActiveNotification
+                                                    object:nil queue:NSOperationQueue.mainQueue
+                                                usingBlock:^(__unused NSNotification *n) {
+        GCCHookAdClasses();          // 懒加载的广告 SDK 这时可能才注册类
+        ReArmSplashGuard();
+    }];
+    // 广告 SDK 常是懒加载：启动后 1s / 3s 各再发现一次（一次性，非周期）
+    for (NSNumber *delay in @[@1.0, @3.0]) {
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
+                                     (int64_t)(delay.doubleValue * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^{
+            GCCHookAdClasses();
+            ReArmSplashGuard();
+        });
+    }
+}
+
 static void InstallMinimalHome(void) {
+    // 0.7.0：开屏广告移除
+    InstallSplashAdGuard();
     HookVoid(@"WINTabBar", @"layoutSubviews", ^(UIView *bar) { CachedTabBar = bar; CenterTabButtons(bar); SweepTabBarHints(bar); });
     InstallTabBarHintHooks();
 
@@ -2071,6 +2396,6 @@ __attribute__((constructor)) static void Initialize(void) {
             dispatch_source_set_event_handler(ScheduleTimer, ^{ Schedule(); });
             dispatch_resume(ScheduleTimer);
         });
-        NSLog(@"[GaodeClean] loaded 0.6.9 (17.00.2 only)");
+        NSLog(@"[GaodeClean] loaded 0.7.1 (17.00.2 only)");
     }
 }

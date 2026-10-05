@@ -5,7 +5,7 @@
 
 | | |
 |:--|:--|
-| **当前版本** | `0.6.9` |
+| **当前版本** | `0.7.1` |
 | **Author** | **jibamao** — <https://gan-jibamao.github.io/> · Section `jibamao-Tweaks` |
 | **目标** | 高德地图 / AMap `com.autonavi.amap` **17.00.2** |
 | **架构** | `arm64` 单切片（rootless + RootHide 两种包） |
@@ -48,6 +48,7 @@
 | 切页 8 ms 快修（搜索栏归位提速） | 0.5.57 / 0.5.58 |
 | 切「我的 → 首页」不再慢一拍 | 0.6.8 / 0.6.9 |
 | 正式包**零诊断埋点**，源文件**零磁盘 I/O** | 0.6.0 / 0.6.8 |
+| 启动屏广告移除 | 0.7.1 |
 
 ---
 
@@ -337,6 +338,55 @@ re.findall(r'HookVoid\("([^"]+)",\s*@"([^"]+)"', src)
 
 ---
 
+### I. 启动屏广告「偶发」出现（0.7.1）
+
+**现象** — 开屏广告不是每次冷启动都出现。
+
+**为什么偶发** — 广告 SDK 按**填充率**决定是否展示：有素材才弹，没有就直接进 App。
+所以**不能只在某个固定时机扫一次** —— 这正是 0.6.7「上拉发现」踩过的同一个坑
+（只挂 `layoutSubviews`，晚到的内容就漏了）。
+
+**先查真名，再动手（关键方法论）**
+
+不去猜类名，而是回到**高德 17.00.2 的二进制字符串表**里核对。结论非常干净：
+
+- 高德广告走**阿里广告聚合 SDK**，命名空间是 **CNG**（另有 `CNBSplash`）：
+  `CNGLaunchSplashView` / `CNGLaunchSplashImageView` / `CNGLaunchSplashPrefetchAdsCache` /
+  `CNGSplashAdsConfigManager` / `CNGDoubleSplashCoordinator` / `CNGCSJ*SplashAd` /
+  `CNGMSBaseSplashAd` / `CNGMSDirectSplashAd` …
+- 方法层：`isSplashAd` / `hasSplash` / `isShowSplash` / `isSplash` /
+  `showSplashAd` / `showSplashAdInWindow` / `showSplashViewInRootViewController`
+- **远端配置键**：`ad_splash_enable` / `_ad_splash_enable` / `ignore_splash_ads` /
+  `ft_ad_splash_enable_key`
+
+**修法（四层，全部有界）**
+
+1. **运行时发现真类** —— `objc_getClassList()` 遍历所有已注册类，
+   取类名前缀属于广告命名空间（`CNGLaunchSplash` / `CNGSplashAds` / `CNBSplash` …）的类，
+   再按**真实 selector** 挂钩：
+   - 方法名以 `showSplash` / `beginToShow*SplashAd` 开头 → 换空实现
+   - 方法名是 `isSplash*` / `hasSplash` / `isShowSplash` → 返回 `NO`
+2. **签名严格校验** — 换空实现前核对：返回类型必须是 `v`、参数个数与 block
+   **逐一对应**（`numberOfArguments` 含 self/_cmd，2→无参、3→一参、4→两参）。
+   **只钩「这个类自己实现」的方法**（`class_copyMethodList` 判定），
+   否则 `Replace()` 会退化成 `method_setImplementation` 改到**父类**，波及全部子类。
+3. **窗口/视图兜底** — `UIWindow -addSubview:`（窗口加视图的瞬间）、
+   `UIViewController -presentViewController:`（模态广告）、
+   以及启动 / 回前台后 15s 内由已有 200ms tick 兜底扫描。命中判据：
+   类名含广告 SDK 词 + 覆盖窗口 ≥60% 面积；**绝不隐藏 App 主窗口**
+   （主窗口 = 承载底栏的那个窗口，`CenterTabButtons` 里记下）。
+   裸 `ad` 不进关键词表 —— `header` / `download` / `shadow` 全会误伤。
+4. **懒加载补扫** — 启动后 1s / 3s 各再发现一次（一次性，非周期），
+   回前台时也重扫；广告 SDK 常是懒注册的。
+
+**成本** — 不新增任何定时器（仍是 0.6.9 的 4 个）；`UIWindow -addSubview:` 调用频率极低，
+不是热路径；类发现只在启动 / 回前台 / 两个延迟点各跑一次，有 200 节点上限。
+
+**待真机确认** — 类名与 selector 全部来自二进制字符串表核对，但
+**「哪个 selector 是运行时真正被调用的那个」必须装机验证**：
+启动 10 次看广告是否 0 次出现，并看 Console 里
+`[GaodeClean] splash guard hooked N: …` 有没有命中。
+
 ## 三、跨版本验证汇总
 
 | 版本 | 项目 | 结果 |
@@ -348,6 +398,7 @@ re.findall(r'HookVoid\("([^"]+)",\s*@"([^"]+)"', src)
 | 0.6.6 | 冷启动天气行归位 | 左边缘 pt 85（期望 86）**通过** |
 | 0.6.7 | 底栏「上拉发现」 | 整段录屏未见提示态 **通过** |
 | 0.6.9 | 切页后地图区残差 | 0 帧超阈（原 50 帧）**通过** |
+| 0.7.1 | 开屏广告 | 待真机确认 |
 
 ---
 
@@ -423,13 +474,13 @@ deb 打包用 `scripts/mkdeb-local.py`（Python 写 `ar` 归档，不需要 `dpk
 
 装完 `sbreload` 或重启用户空间。
 
-### 本包产物（0.6.9）
+### 本包产物（0.7.1）
 
 | 文件 | 说明 |
 |:--|:--|
-| `dist/GaodeClean.dylib` | 161,632 B · arm64 · chained fixups + adhoc 签名 · 带 jibamao 标识 |
-| `dist/com.jibamao.gaodeclean_0.6.9_iphoneos-arm64.deb` | rootless |
-| `dist/com.jibamao.gaodeclean_0.6.9_iphoneos-arm64-roothide.deb` | RootHide |
+| `dist/GaodeClean.dylib` | 181,328 B · arm64 · chained fixups + adhoc 签名 · 带 jibamao 标识 |
+| `dist/com.jibamao.gaodeclean_0.7.1_iphoneos-arm64.deb` | rootless |
+| `dist/com.jibamao.gaodeclean_0.7.1_iphoneos-arm64-roothide.deb` | RootHide |
 
 ### 每次发版自检清单
 
@@ -475,7 +526,8 @@ cmp <(ar p dist/*.deb data.tar.gz | tar xzO ./var/jb/.../GaodeClean.dylib) dist/
 0.6.7a  ✗ 卡死事故（已回滚）
 0.6.7b  重写：只作用底栏子树
 0.6.8   切页响应 · 清除残留文件 I/O
-0.6.9   快修窗不再空转                ← 当前
+0.6.9   快修窗不再空转
+0.7.1   开屏广告移除                    ← 当前
 ```
 
 ---
@@ -495,5 +547,5 @@ strings GaodeClean.dylib | grep -i jibamao
 启动输出：
 
 ```
-[GaodeClean] GaodeClean v0.6.9 | jibamao | https://gan-jibamao.github.io/
+[GaodeClean] GaodeClean v0.7.1 | jibamao | https://gan-jibamao.github.io/
 ```
