@@ -18,7 +18,7 @@
 static NSString *const kGCAuthor      = @"jibamao";
 static NSString *const kGCRepo        = @"https://gan-jibamao.github.io/";
 static NSString *const kGCSection     = @"jibamao-Tweaks";
-static NSString *const kGCVersion     = @"0.6.7";
+static NSString *const kGCVersion     = @"0.6.8";
 static NSString *const kGCSignature   = @"GaodeClean by jibamao";
 
 // 对外签名（供 log / 诊断 / 二次核对使用）
@@ -59,8 +59,12 @@ static void LayoutMinimalHome(id handler);
 static void AlignCornerWidgets(UIView *bar);
 static BOOL FixingHintText;
 static __weak UIView *CachedTabBar;
+static int BarFixStalls;      // 0.6.8：早退续窗次数上限，防止 8ms 自旋
 static void AlignWeatherRowTick(UIWindow *win);
 static void SweepTabBarHints(UIView *bar);
+static void KickBarFix(void);
+static void KickBarFixFor(NSTimeInterval seconds);
+static void WatchHomeTransition(id tabs);
 static void AlignOneWidget(UIView *bar, UIView *w, CGFloat barTop);
 
 @class GCCState;
@@ -329,31 +333,6 @@ static void BindBoundary(UIView *page, UIView *anchor, UIView *peer, CGFloat bou
     ApplyLimits(state);
 }
 
-static void SaveDiagnostics(UIView *page, GCCState *state, NSArray<UIView *> *nodes) {
-    // No arbitrary label text, addresses, account details or network payloads are exported.
-    static NSMutableDictionary *records;
-    if (!records) records = [NSMutableDictionary dictionary];
-    NSMutableArray *tree = [NSMutableArray array];
-    NSArray *known = @[@"常去地点", @"回家", @"去单位", @"编辑", @"停车", @"美食", @"酒店", @"旅游", @"加油", @"家人地图", @"地图共建", @"车辆服务", @"高德运动", @"店铺入驻"];
-    for (UIView *v in nodes) {
-        NSMutableArray *matches = [NSMutableArray array];
-        NSString *text = NodeText(v);
-        for (NSString *word in known) if ([text containsString:word]) [matches addObject:word];
-        if (tree.count > 250 && !matches.count) continue;
-        NSMutableDictionary *node = [@{@"class": NSStringFromClass(v.class), @"frame": NSStringFromCGRect([v convertRect:v.bounds toView:page]), @"markers": matches} mutableCopy];
-        if ([v isKindOfClass:UIScrollView.class]) node[@"contentSize"] = NSStringFromCGSize(((UIScrollView *)v).contentSize);
-        [tree addObject:node];
-    }
-    records[[NSString stringWithFormat:@"%ld", (long)Kind(page)]] = @{
-        @"rootClass": NSStringFromClass(page.class), @"page": [PagePath(page) componentsSeparatedByString:@"?"].firstObject ?: @"",
-        @"matched": @(state.matched), @"scrollContainers": @(state.scrolls.count),
-        @"opaqueBlankArea": @(state.blankArea != nil && state.blankArea.superview == page),
-        @"blankAreaFrame": NSStringFromCGRect(state.blankArea.frame), @"tree": tree};
-    NSData *data = [NSJSONSerialization dataWithJSONObject:@{@"version": @"0.5.1", @"pages": records} options:NSJSONWritingPrettyPrinted error:nil];
-    NSURL *documents = [NSFileManager.defaultManager URLsForDirectory:NSDocumentDirectory inDomains:NSUserDomainMask].firstObject;
-    if (data && documents) [data writeToURL:[documents URLByAppendingPathComponent:@"GaodeClean-diagnostics.json"] options:NSDataWritingAtomic error:nil];
-}
-
 static void CleanPage(UIView *page) {
     NSString *path = PagePath(page);
     GCCState *state = objc_getAssociatedObject(page, &StateKey);
@@ -424,17 +403,10 @@ static void CleanPage(UIView *page) {
         // Reuse only a previously measured boundary for the same viewport width.
         // Covering the entire pending page would blank the account header during loading.
         if (kind == 3 && !state.matched) {
+            // 0.6.8：这里原本会去读 Documents/GaodeClean-diagnostics.json（0.5.1 时代的诊断产物）。
+            // 「正式包零诊断」之后那个文件永远不会再生成，这段读取只剩一次无意义的磁盘探测，
+            // 而且它只在从「我的」页取不到 anchor 时触发 —— 正好是切页路径上。整段删除。
             NSDictionary *cached = [NSUserDefaults.standardUserDefaults dictionaryForKey:@"GaodeClean.MineBoundary.17.00.2"];
-            if (!cached) {
-                NSString *dir = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES).firstObject;
-                NSData *data = [NSData dataWithContentsOfFile:[dir stringByAppendingPathComponent:@"GaodeClean-diagnostics.json"]];
-                NSDictionary *report = data ? [NSJSONSerialization JSONObjectWithData:data options:0 error:nil] : nil;
-                NSDictionary *mine = report[@"pages"][@"3"];
-                if ([@[@"0.3.0", @"0.3.1", @"0.4.0", @"0.4.32", @"0.4.33", @"0.4.34", @"0.4.35", @"0.4.36", @"0.4.37", @"0.4.38", @"0.4.39", @"0.4.40", @"0.4.41", @"0.4.42", @"0.4.43", @"0.4.44", @"0.4.45", @"0.4.46", @"0.4.47", @"0.4.48", @"0.4.49", @"0.4.50", @"0.5.0", @"0.5.1"] containsObject:report[@"version"] ?: @""] && [mine[@"matched"] boolValue]) {
-                    CGRect blank = CGRectFromString(mine[@"blankAreaFrame"] ?: @"");
-                    if (blank.origin.y > 100) cached = @{@"width":@(blank.size.width), @"bottom":@(blank.origin.y)};
-                }
-            }
             CGFloat bottom = [cached[@"bottom"] doubleValue];
             if (fabs([cached[@"width"] doubleValue] - page.bounds.size.width) < 1 && bottom > 100 && bottom < page.bounds.size.height) {
                 state.reference = page;
@@ -450,7 +422,6 @@ static void CleanPage(UIView *page) {
             NSLog(@"[GaodeClean] page=%ld anchor=pending", (long)kind);
             state.reportedMiss = YES;
         }
-        if (state.attempts == 10) SaveDiagnostics(page, state, nodes);
         return;
     }
     if (kind == 2) {
@@ -474,7 +445,6 @@ static void CleanPage(UIView *page) {
     if (!state.reportedMatch) {
         NSLog(@"[GaodeClean] page=%ld anchor=matched limitedScrolls=%lu", (long)kind, (unsigned long)state.scrolls.count);
         state.reportedMatch = YES;
-        SaveDiagnostics(page, state, nodes);
     }
 }
 
@@ -590,6 +560,7 @@ static void Schedule(void) {
                 }
             }
         }
+        for (id tabs in TabControllers.allObjects) WatchHomeTransition(tabs);
         for (id controller in NearbyControllers.allObjects) RegisterNearby(controller);
         for (UIView *page in Pages.allObjects) CleanPage(page);
         // 0.4.41 冷启动兜底：定位超时(约 2.4s)仍未完成则强制显示，避免卡在隐藏态
@@ -1150,7 +1121,16 @@ static void LayoutMinimalHome(id handler) {
     if (!home) { bar.hidden = YES; return; }
     UIView *tabBar = ObjectGetter(tabs, @"tabBar");
     UIView *parent = sheet.superview;
-    if (!parent.window || ![tabBar isKindOfClass:UIView.class]) return;
+    // 0.6.8：首页容器还没上屏（切页转场中间态）时，**开快修窗**而不是直接退出。
+    // 原来这里 `return` 等于把这一拍丢掉，只能等下一次 100ms tick —— 这正是
+    // 「我的切首页」比反向慢的主因之一：反向只需要隐藏搜索栏，不经过这条早退。
+    if (!parent.window || ![tabBar isKindOfClass:UIView.class]) {
+        // 封顶：最多续 60 段窗口（≈9.6s）。否则一旦 parent.window 始终不为真，
+        // 这个 8ms 的循环会无限自旋下去 —— 比原来多等一个 tick 糟糕得多。
+        if (BarFixStalls < 60) { BarFixStalls++; KickBarFixFor(0.16); }
+        return;
+    }
+    BarFixStalls = 0;
     BarParent = parent;
     LayingOutHome = YES;
     if (bar.superview != parent) [parent addSubview:bar];
@@ -1227,8 +1207,20 @@ static void LayoutMinimalHome(id handler) {
 // 640ms 内以 60Hz 反复跑 LayoutMinimalHome，把缺席从「最多 100ms」压到「最多 1 帧」。
 static dispatch_source_t BarFixTimer;
 static int BarFixTicks;
-static void KickBarFix(void) {
-    BarFixTicks = 80;                       // 80 × 8ms ≈ 640ms
+
+// 0.6.8：切页快修窗口的时长改成参数。
+// 「我的 → 首页」与「首页 → 我的」本来就不对称：
+//   我的 → 首页：首页那棵树要重新挂搜索栏 + 对齐圆钮 + 复位 sheet/mask，
+//                 而 app 在切页期间 parent.window 还是 nil，LayoutMinimalHome 第一道
+//                 早退就把它挡在门外 —— 只能干等下一次 100ms tick。多个 tick 叠加起来
+//                 就是你感觉到的「慢」。
+//   首页 → 我的：LayoutMinimalHome 的 !home 分支只有一条 bar.hidden = YES，一次就完事。
+// 所以切成【首页】时主动开窗，而不是被动等 app 去动搜索栏。
+static void KickBarFixFor(NSTimeInterval seconds) {
+    int ticks = (int)ceil(seconds / 0.008);
+    if (ticks < BarFixTicks) ticks = BarFixTicks;    // 已在跑的窗口只延长、不缩短
+    if (ticks < 1) ticks = 1;
+    BarFixTicks = ticks;
     if (BarFixTimer) return;
     BarFixTimer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, dispatch_get_main_queue());
     dispatch_source_set_timer(BarFixTimer, dispatch_time(DISPATCH_TIME_NOW, 0),
@@ -1240,6 +1232,8 @@ static void KickBarFix(void) {
     });
     dispatch_resume(BarFixTimer);
 }
+
+static void KickBarFix(void) { KickBarFixFor(0.64); }
 
 static BOOL IsRightBottomWidget(UIView *v) {
     if (![NSStringFromClass(v.class) isEqualToString:@"WINAJXCombinedWidgetView"]) return NO;
@@ -1483,6 +1477,23 @@ static void FixTabBarHint(UIView *hint, UIView *bar) {
     FixingHintText = NO;
 }
 
+// 0.6.8：切页的主动通道。
+// tick 每拍读一次 selectedViewControl（本来就在读，零额外开销），
+// 一旦从别的页翻到【首页】，立即开一段 320ms 快修窗 —— 不等 app 去动搜索栏。
+// 这样无论 app 走哪条路径切页（setter / 状态机 / 内部重排），都能覆盖到。
+static __weak id LastSelected;
+static void WatchHomeTransition(id tabs) {
+    if (!tabs) return;
+    id selected = ObjectGetter(tabs, @"selectedViewControl");
+    if (!selected) return;
+    BOOL home = [NSStringFromClass([selected class]) isEqualToString:@"WINAmapHomeControl"];
+    id prev = LastSelected;
+    LastSelected = selected;
+    if (!prev || prev == selected) return;          // 第一次见到 / 没变
+    BOOL prevHome = [NSStringFromClass([prev class]) isEqualToString:@"WINAmapHomeControl"];
+    if (home && !prevHome && ColdTicks >= 15) KickBarFixFor(0.32);
+}
+
 // 只走底栏子树：节点数 20-40，无 convertRect:，无窗口遍历。200ms 一次也无所谓。
 static void SweepTabBarHints(UIView *bar) {
     if (![bar isKindOfClass:UIView.class]) return;
@@ -1504,6 +1515,23 @@ static void SweepTabBarHints(UIView *bar) {
 // item 级触发：item 一布局 / 一上树就查一次它自己。范围只有一棵小树。
 static void InstallTabBarHintHooks(void) {
     TextGetterCache = [NSMutableDictionary dictionary];
+    // 0.6.8：切到【首页】的那一瞬间就开快修窗（tick 检测最坏要等 200ms）。
+    // 方法名拿不到就静默跳过 —— 上面 tick 里那条通道照样兜得住。
+    {
+        Class tbc = NSClassFromString(@"WINTabBarControl");
+        SEL ss = NSSelectorFromString(@"setSelectedViewControl:");
+        Method m = tbc ? class_getInstanceMethod(tbc, ss) : NULL;
+        if (m) {
+            IMP o = method_getImplementation(m);
+            const char *t = method_getTypeEncoding(m);
+            Replace(tbc, ss, imp_implementationWithBlock(^(id self, id vc) {
+                ((void (*)(id, SEL, id))o)(self, ss, vc);
+                if ([NSStringFromClass([vc class]) isEqualToString:@"WINAmapHomeControl"]
+                    && ColdTicks >= 15)
+                    KickBarFixFor(0.32);
+            }), t);
+        }
+    }
     HookVoid(@"WINTabBarItem", @"didMoveToWindow", ^(UIView *item) {
         for (UIView *p = item.superview; p; p = p.superview)
             if ([NSStringFromClass(p.class) isEqualToString:@"WINTabBar"]) { SweepTabBarHints(p); break; }
@@ -1530,54 +1558,6 @@ static void ConfineLegacyChrome(UIView *bar) {
         v.frame = target;
         [CATransaction commit];
     }
-}
-
-// 只写文件：完整 dump 窗口中「比 300x200 还大」的视图（含底栏内部子视图），
-// 用来定位产生模糊/压暗的那个视图。不 hook 任何显示 API，不改任何状态。
-static void LogCoveringViews(UIView *bar) {
-    UIWindow *win = bar.window;
-    if (!win) return;
-    static NSUInteger written;
-    if (written >= 400) return;
-    NSMutableArray<NSString *> *lines = [NSMutableArray array];
-    [lines addObject:@"--- BAR.PARENT CHAIN ---"];
-    for (UIView *v = bar; v; v = v.superview) {
-        [lines addObject:[NSString stringWithFormat:@"  %@ %.0f,%.0f %.0fx%.0f hid=%d a=%.2f",
-                          NSStringFromClass(v.class), v.frame.origin.x, v.frame.origin.y,
-                          v.frame.size.width, v.frame.size.height, v.hidden, v.alpha]];
-    }
-    [lines addObject:@"--- BAR SUBVIEWS ---"];
-    for (UIView *v in Flatten(bar)) {
-        CGRect f = v.frame;
-        if (f.size.width < 100 || f.size.height < 40) continue;
-        NSString *cn = NSStringFromClass(v.class);
-        UIColor *bg = v.backgroundColor;
-        CGFloat a = 0;
-        BOOL hasBG = [bg getRed:NULL green:NULL blue:NULL alpha:&a] && a > 0.05;
-        [lines addObject:[NSString stringWithFormat:@"  %@ %.0f,%.0f %.0fx%.0f hid=%d a=%.2f bg=%d",
-                          cn, f.origin.x, f.origin.y, f.size.width, f.size.height,
-                          v.hidden, v.alpha, hasBG]];
-        if (lines.count > 60) break;
-    }
-    [lines addObject:@"--- WINDOW BIG VIEWS ---"];
-    for (UIView *v in Flatten(win)) {
-        CGRect f = v.frame;
-        if (f.size.width < 300 || f.size.height < 200) continue;
-        NSString *cn = NSStringFromClass(v.class);
-        [lines addObject:[NSString stringWithFormat:@"  %@ %.0f,%.0f %.0fx%.0f hid=%d a=%.2f inBar=%d",
-                          cn, f.origin.x, f.origin.y, f.size.width, f.size.height,
-                          v.hidden, v.alpha, (int)[v isDescendantOfView:bar]]];
-        if (lines.count > 130) break;
-    }
-    if (lines.count < 4) return;
-    written += lines.count;
-    NSURL *doc = [NSFileManager.defaultManager URLsForDirectory:NSDocumentDirectory inDomains:NSUserDomainMask].firstObject;
-    if (!doc) return;
-    NSURL *url = [doc URLByAppendingPathComponent:@"GaodeClean-cover.txt"];
-    NSString *text = [[lines componentsJoinedByString:@"\n"] stringByAppendingString:@"\n=====\n"];
-    NSFileHandle *fh = [NSFileHandle fileHandleForWritingAtPath:url.path];
-    if (!fh) [text writeToURL:url atomically:YES encoding:NSUTF8StringEncoding error:nil];
-    else { [fh seekToEndOfFile]; [fh writeData:[text dataUsingEncoding:NSUTF8StringEncoding]]; [fh closeFile]; }
 }
 
 static void CenterTabButtons(UIView *bar) {
@@ -1617,7 +1597,10 @@ static void CenterTabButtons(UIView *bar) {
         }
     }
     adjusting = NO;
-    LogCoveringViews(bar);
+    // 0.6.8：这里原本调 LogCoveringViews(bar) —— 它会 Flatten(win) 一整棵窗口树、
+    // 再拼最多 130 行文本写进 Documents/GaodeClean-cover.txt。0.6.0 宣布「正式包零诊断」
+    // 时漏掉了这一处，它一直挂在 WINTabBar 的 layoutSubviews 上：每次底栏布局都做一次
+    // 全窗口遍历 + 文件写入，切页时正是底栏密集重排的时刻。整段删除。
 }
 
 static void InstallMinimalHome(void) {
@@ -2064,6 +2047,6 @@ __attribute__((constructor)) static void Initialize(void) {
             dispatch_source_set_event_handler(ScheduleTimer, ^{ Schedule(); });
             dispatch_resume(ScheduleTimer);
         });
-        NSLog(@"[GaodeClean] loaded 0.6.7 (17.00.2 only)");
+        NSLog(@"[GaodeClean] loaded 0.6.8 (17.00.2 only)");
     }
 }

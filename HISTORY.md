@@ -5,7 +5,7 @@
 高德地图 17.00.2 (com.autonavi.amap) UI 清理 tweak。纯 ObjC runtime hook，
 不依赖 substrate/frida，不碰网络与 IPA，仅视图层。
 
-## 当前终态 0.6.7 的功能清单
+## 当前终态 0.6.8 的功能清单
 - 底栏两钮居中 + 胶囊(选中视图)跟随选中按钮 (0.3.1 + 0.4.13-0.4.17)
 - 左侧车机圆钮、右下组合钮(定位+回正)对齐到搜索框上方 8pt (0.4.3/0.4.4/0.4.40)
 - 首页搜索栏下沉 + 首帧锁定 + setFrame/setCenter 钳位 + didMoveToSuperview 重挂自愈
@@ -17,7 +17,8 @@
 - **顶部「沉浸高斯」模糊带根除 (0.5.8, EmptyImmersiveState 改派)**
 - **首页白块根除 (0.5.9, 恢复 sheet/mask/bottomMask hidden)**
 - **底栏「上拉发现」提示根除 (0.6.7：周期通道 + 底栏子树扫描 + 标题写回)**
-- **正式包零诊断**：不再写 Documents/GaodeClean-blur.txt (0.6.0)
+- **切页响应提速：切「我的→首页」不再慢一拍 (0.6.8)**
+- **正式包零诊断**：0.6.8 补齐 —— 收掉了残留的 Flatten(win)+写文件、以及读取已不存在的 diagnostics.json
 
 ## 本轮（0.5.1 → 0.6.0）主线：两场闪光的追查
 
@@ -183,6 +184,37 @@
   `CachedTabBar = bar` + `CenterTabButtons` + `SweepTabBarHints`，谁后装都不丢功能。
   加钩子前先查重复对：`re.findall(r'HookVoid\("([^"]+)",\s*@"([^"]+)"')`。
 
+### G. 「我的 → 首页」比反向慢一拍（0.6.8）
+- 用户报告：「在我的页面切换到首页好像有延迟，不如在首页切换到我的速度快。」
+- **这个不对称是结构性的，三个原因叠在一起**：
+  1. **首页方向会被早退挡在门外**。`LayoutMinimalHome` 里 `if (!parent.window || !tabBar) return;`
+     —— 切页转场中间态 `parent.window` 还是 nil，这一拍整个丢掉，只能等下一次 100ms tick。
+     多个 tick 叠加就是你感觉到的延迟。而**反向（首页→我的）只走 `!home` 分支的一条
+     `bar.hidden = YES`，一次就完事**，根本不经过这道早退 —— 慢快之差就在这里。
+  2. **快修窗是被动的**。0.5.57 的 `KickBarFix()` 只挂在
+     `WINQuickSearchBarV2 -didMoveToSuperview` / `-setHidden:` 上 —— 要等 app 先动搜索栏
+     才启动。切成首页时 app 未必立刻动它，于是又退回等 tick。
+  3. **底栏布局路径上挂着残留文件 I/O**。`CenterTabButtons` 末尾调 `LogCoveringViews(bar)`：
+     `Flatten(win)` 遍历整棵窗口树 + 拼最多 130 行文本写
+     `Documents/GaodeClean-cover.txt`。0.6.0 宣布「正式包零诊断」时**漏掉了这一处**，
+     它一直挂在 `WINTabBar -layoutSubviews` 上 —— 而切页正是底栏密集重排的时刻。
+     顺带还有一处：从「我的」页取不到 anchor 时会去读 `GaodeClean-diagnostics.json`，
+     那个文件在 0.6.0 之后永远不会再生成，只剩一次无意义的磁盘探测。
+- **0.6.8 修法**：
+  - `KickBarFixFor(seconds)` 参数化窗口时长（原 `KickBarFix()` = 0.64s 保持不变）；
+  - 新增 `WatchHomeTransition(tabs)`：tick 每拍读一次 `selectedViewControl`
+    （本来就在读，零额外开销），一旦从别的页翻到【首页】且冷启动结束，立即开 320ms 快修窗；
+  - 直接钩 `WINTabBarControl -setSelectedViewControl:`（方法名拿不到就静默跳过，
+    tick 那条通道照样兜得住），切到首页的那一瞬间就开窗，最多省下 200ms；
+  - 早退分支改为**开 160ms 快修窗**而不是丢弃这一拍，并用 `BarFixStalls` 封顶
+    60 段（≈9.6s）—— 否则一旦 `parent.window` 始终不为真，8ms 循环会无限自旋；
+  - **删除底栏布局路径上的全部文件 I/O**：`LogCoveringViews` 整段移除，
+    `SaveDiagnostics` 与两个调用点移除，读取已不存在的 diagnostics.json 那段移除。
+    现在整个源文件零磁盘 I/O。
+- **方法论**：用户报的是「方向不对称」，不是「慢」。先问哪个方向慢 ——
+  慢的那条一定多绕了一道闸（这里是早退 + 被动等待 + 文件 I/O），
+  快的那条就是基线。
+
 ## 核心机制（可复用）
 - 冷启动跳动：隐藏→定位→一次性显示 + 逐 widget AlignedKey + 顶边对齐 + setFrame/setCenter 钳位
   + `didMoveToSuperview` 同步重挂（**注意：守卫不能写成 `b.superview &&`，否则会漏掉「被摘掉」这条**）
@@ -204,7 +236,7 @@
 0.4.40 右下钮跟随 → 0.4.41-50 冷启动跳动根除 → 0.5.0 优化清理 →
 0.5.1-7 白块/模糊带 → 0.5.8 EmptyImmersiveState → 0.5.9 白块修复 →
 0.5.34-44 白雾追查(6 版空枪) → 0.5.50 上拉定稿 → 0.5.53 装回 →
-0.5.54-58 切页搜索栏闪 → 0.6.0 定版（摘诊断）→ 0.6.1 切 2D/3D 天气行位移 → 0.6.2 瞬时下坠弹回 → 0.6.3/0.6.4 调度链 → 0.6.6 冷启动归位 → **0.6.7 底栏「上拉发现」根除（0.6.7a 卡死已回滚重写）**
+0.5.54-58 切页搜索栏闪 → 0.6.0 定版（摘诊断）→ 0.6.1 切 2D/3D 天气行位移 → 0.6.2 瞬时下坠弹回 → 0.6.3/0.6.4 调度链 → 0.6.6 冷启动归位 → 0.6.7 底栏「上拉发现」根除（0.6.7a 卡死已回滚重写）→ **0.6.8 切页响应**
 
 ## 从源码重建
 SDK：theos patched iPhoneOS16.5.sdk（https://github.com/theos/sdks）
