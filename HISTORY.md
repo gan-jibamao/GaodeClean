@@ -5,7 +5,7 @@
 高德地图 17.00.2 (com.autonavi.amap) UI 清理 tweak。纯 ObjC runtime hook，
 不依赖 substrate/frida，不碰网络与 IPA，仅视图层。
 
-## 当前终态 0.6.6 的功能清单
+## 当前终态 0.6.7 的功能清单
 - 底栏两钮居中 + 胶囊(选中视图)跟随选中按钮 (0.3.1 + 0.4.13-0.4.17)
 - 左侧车机圆钮、右下组合钮(定位+回正)对齐到搜索框上方 8pt (0.4.3/0.4.4/0.4.40)
 - 首页搜索栏下沉 + 首帧锁定 + setFrame/setCenter 钳位 + didMoveToSuperview 重挂自愈
@@ -16,9 +16,8 @@
 - **底栏上拉白雾/闪白根除 (0.5.44/0.5.50/0.5.53)**
 - **顶部「沉浸高斯」模糊带根除 (0.5.8, EmptyImmersiveState 改派)**
 - **首页白块根除 (0.5.9, 恢复 sheet/mask/bottomMask hidden)**
+- **底栏「上拉发现」提示根除 (0.6.7：周期通道 + 底栏子树扫描 + 标题写回)**
 - **正式包零诊断**：不再写 Documents/GaodeClean-blur.txt (0.6.0)
-- **底栏「上拉发现」提示根除 (0.6.7，三条通道 + 标题写回)**
-- **底栏「上拉发现」提示根除 (0.6.7，三条通道 + 标题写回)**
 
 ## 本轮（0.5.1 → 0.6.0）主线：两场闪光的追查
 
@@ -106,43 +105,6 @@
   3. 抽出 `IsWeatherRowView()` 尺寸自识别助手（宽 150–360、高 <40、y 在地图区），
      layoutSubviews 钩子与 setter 拦截共用
 
-### F. 冷启动后底栏首页偶发显示「上拉发现」（0.6.7）
-- 用户报告：「冷启动后底栏首页会出现上拉发现，是偶发的。」—— 截图确认：底栏左钮
-  （首页）在图标位置渲染出黄色「上拉发现」提示，右钮「我的」正常。
-- **真根因（三条通道全漏）**：
-  1. **时机**：0.5.1 的 `HideDiscoverPrompt` 只挂在 `WINTabBar` 的 `layoutSubviews` /
-     `amap_relayoutTabItems` 上。而「上拉发现」是**异步引导态**，常在最后一次布局
-     **之后**才写进 label —— 那一拍扫空，再没有下一次布局触发 → 提示留在屏幕上。
-     冷启动才偶发：引导态与布局的先后顺序取决于启动耗时，不是每次都晚。
-  2. **判据**：`NodeText` 只对 `UILabel` 读 `text`、对 `AJX*` 前缀读
-     `attributedString/attributedText/text`。底栏 item 的标题若是别的自定义 label 类，
-     只能靠 `accessibilityLabel` 撞运气。
-  3. **处置**：即便扫到，也只是 `v.hidden = YES` —— 引导层如果是**复用 item 标题 label**
-     的（不是独立浮层），隐藏它等于把「首页」两个字一起抹掉。
-- **0.6.7 修法**：
-  - **A 文本来源**：`AnyTextOf()` 对**任何类**依次试
-    `text / attributedText / attributedString / title / tipText / hintText`
-    （`ObjectGetter` 保证「返回 @ 且无参」才取，不会误调 setter）。
-  - **B 触发时机**：`WINTabBarItem -layoutSubviews`、`-didAddSubview:` 钩子，
-    以及 **`UILabel -setText:` / `-setAttributedText:`** —— 文本一落地就地处理，
-    不等下一次布局；命中后开 **0.8s / 16ms 快扫窗**兜底复现。
-    另有 200ms tick 常驻兜底，只下潜窗口底部 160pt（子树整段在带外的直接剪掉，
-    所以常驻扫描也很便宜）。
-  - **C 收尾动作**（关键，避免「修好了但按钮空了」）：
-    1. 有历史正常标题 → 写回它（`FixingHintText` 防重入，否则 `setText:` 钩子自递归）；
-    2. 冷启动第一帧就是引导态、没有历史值 → 去 `WINTabBarItem` 的
-       `model.title / text / name / tabTitle / displayName` 取正确文案再写回
-       （底栏只有 首页/我的 两项，model 上就是要显示的字）；
-    3. 以上都拿不到（纯引导浮层）→ 才 `v.hidden = YES`，并向上收掉
-       「类名带 Tip/Guide/Discover/PullUp/Hint」的那层容器，绝不碰光秃秃的普通类。
-  - 判据收窄：文案含「上拉」且长度 ≤24（「发现」单独出现不构成提示，
-    首页/我的页正常内容里也有这个词）。
-- **⚠ 安装时踩到的坑（写进教训）**：`InstallDiscoverHintHooks` 最初把
-  `WINTabBar -layoutSubviews` **又装了一遍**。`Replace()` 对已存在的方法走
-  `method_setImplementation`，重复安装会把先前那次（`CenterTabButtons`）**顶掉** ——
-  底栏居中逻辑会连带失效。现在 `WINTabBar` 只在 `InstallMinimalHome` 里装一次，
-  钩子体里已经带上了 `SweepDiscoverHints(bar)`。
-
 ### E. 冷启动后天气行停在原生位置、切一次页才归位（0.6.6）
 - 用户报告：「删除后台重新进高德，冷启动后天气和 LOGO 的位置不正确，
   点击我的再切回首页位置才正确」。
@@ -179,6 +141,48 @@
   **f301 起出现在车机钮正右边** —— 🔷高德地图 pt 85–145、200米 pt 165–215，
   持续到片尾。左边缘 pt 85（期望 86 = 车机钮右缘 78 + 8pt 间距）→ **通过**。
 
+### F. 冷启动后底栏首页偶发显示「上拉发现」（0.6.7，含 0.6.7a 卡死回滚）
+- 用户报告：「冷启动后底栏首页会出现上拉发现，是偶发的。」截图确认：底栏左钮（首页）
+  在图标位置渲染出黄色「上拉发现」提示，右钮「我的」正常。
+- **真根因（三条通道全漏，所以偶发）**：
+  1. **时机** —— 0.5.1 的 `HideDiscoverPrompt` 只挂在 `WINTabBar -layoutSubviews` /
+     `-amap_relayoutTabItems` 上。而「上拉发现」是**异步引导态**，常在最后一次布局
+     **之后**才写进 label —— 那一拍扫空，再没有下一次布局触发 → 提示留在屏幕上。
+     冷启动才偶发，正是因为引导态与布局的先后顺序取决于启动耗时。
+     **没有周期通道，是这个 bug 存在的根本原因。**
+  2. **判据** —— `NodeText` 只对 `UILabel` 读 `text`、对 `AJX*` 前缀读
+     `attributedString/attributedText/text`；底栏 item 的标题若是别的自定义 label 类，
+     只能靠 `accessibilityLabel` 撞运气。
+  3. **处置** —— 即便扫到也只是 `v.hidden = YES`。引导态复用的就是 item 的标题 label，
+     隐藏它等于把「首页」两个字一起抹掉。
+- **0.6.7 修法（只作用底栏子树，零全局钩子、零新增定时器）**：
+  - **A 时机**：复用**已经在跑的 200ms tick** 调 `SweepTabBarHints(CachedTabBar)`；
+    另挂 `WINTabBarItem -didMoveToWindow`（item 上树即查一次）。
+  - **B 范围**：只走 `WINTabBar` 子树（20–40 个视图，上限 200），**扫描里没有任何
+    `convertRect:` / 窗口遍历**。
+  - **C 判据**：`TabBarTextOf()` 任何类都依次试
+    `text / attributedText / attributedString / title / tipText / hintText`，
+    并用 `TextGetterCache` **按类缓存可用的 getter**，之后每拍只剩几次 msgSend；
+    命中判据 = 含「上拉」且长度 ≤24（「发现」单独出现不算，正常内容里也有这词）。
+  - **D 收尾**：向上找到所属 `WINTabBarItem` → 用之前记下的正常标题写回；
+    没有历史值时取 `item.model.title / text / name / tabTitle / displayName`；
+    都拿不到（纯引导浮层）才隐藏，且只向上收 3 层、遇 `WINTabBar`/`WINTabBarItem` 即止。
+- **★ 0.6.7a 卡死事故（必须记住）**：第一版用了两条「看起来更彻底」的手段，直接把
+  app 拖死 ——
+  1. `Replace(UILabel.class, @selector(setText:))` / `setAttributedText:`
+     → **全 app 每个 label 的每次写文本都要过一次 `imp_implementationWithBlock`**，
+     高德主线程直接打满；
+  2. 每 200ms（外加命中后 0.8s / 16ms 快窗）`SweepAllWindowsForHints`
+     → **全窗口 BFS + 逐节点 `convertRect:`**，一窗几千个视图，地图卡住；
+  3. 构造函数里还开了那个 16ms 定时器 —— 冷启动最重的时候扫全窗口。
+  **教训：给 UIKit 打补丁，钩子必须落在「目标类」上，绝不能落在基类/基框架类上；
+  周期性扫描必须先有范围上界，再谈频率。** 用户实测卡死，随即回滚重写。
+- **同时修掉的既有隐患**：`WINTabBar -amap_relayoutTabItems` 在本文件被 `HookVoid`
+  装了两次，而 `Replace()` 走 `method_setImplementation` —— 后装的那次会把先装的
+  （`CenterTabButtons` / `HideDiscoverPrompt`）**顶掉**。现在两条路径各自带上
+  `CachedTabBar = bar` + `CenterTabButtons` + `SweepTabBarHints`，谁后装都不丢功能。
+  加钩子前先查重复对：`re.findall(r'HookVoid\("([^"]+)",\s*@"([^"]+)"')`。
+
 ## 核心机制（可复用）
 - 冷启动跳动：隐藏→定位→一次性显示 + 逐 widget AlignedKey + 顶边对齐 + setFrame/setCenter 钳位
   + `didMoveToSuperview` 同步重挂（**注意：守卫不能写成 `b.superview &&`，否则会漏掉「被摘掉」这条**）
@@ -200,7 +204,7 @@
 0.4.40 右下钮跟随 → 0.4.41-50 冷启动跳动根除 → 0.5.0 优化清理 →
 0.5.1-7 白块/模糊带 → 0.5.8 EmptyImmersiveState → 0.5.9 白块修复 →
 0.5.34-44 白雾追查(6 版空枪) → 0.5.50 上拉定稿 → 0.5.53 装回 →
-0.5.54-58 切页搜索栏闪 → 0.6.0 定版（摘诊断）→ 0.6.1 切 2D/3D 天气行位移 → 0.6.2 瞬时下坠弹回 → 0.6.3/0.6.4 调度链 → **0.6.6 冷启动归位**
+0.5.54-58 切页搜索栏闪 → 0.6.0 定版（摘诊断）→ 0.6.1 切 2D/3D 天气行位移 → 0.6.2 瞬时下坠弹回 → 0.6.3/0.6.4 调度链 → 0.6.6 冷启动归位 → **0.6.7 底栏「上拉发现」根除（0.6.7a 卡死已回滚重写）**
 
 ## 从源码重建
 SDK：theos patched iPhoneOS16.5.sdk（https://github.com/theos/sdks）
@@ -222,9 +226,22 @@ SDK：theos patched iPhoneOS16.5.sdk（https://github.com/theos/sdks）
   **输出路径必须传绝对路径**，脚本会 cd 到临时目录）
 
 ## 本包产物
-- `dist/GaodeClean.dylib` — 0.6.6 构建件（197,168 B，带 jibamao 标识，ldid 签名）
-- `dist/com.jibamao.gaodeclean_0.6.6_iphoneos-arm64.deb` — rootless
-- `dist/com.jibamao.gaodeclean_0.6.6_iphoneos-arm64-roothide.deb` — RootHide
+- `dist/GaodeClean.dylib` — 0.6.7 构建件（179,568 B，chained fixups + adhoc 签名，带 jibamao 标识）
+- `dist/com.jibamao.gaodeclean_0.6.7_iphoneos-arm64.deb` — rootless（载荷 `var/jb/...`）
+- `dist/com.jibamao.gaodeclean_0.6.7_iphoneos-arm64-roothide.deb` — RootHide（载荷无 `/var/jb` 前缀，Depends 补 oldabi）
+
+### 本机（iSH / Alpine aarch64）直接构建
+`clang 19` + theos `iPhoneOS16.5.sdk`，不依赖 theos 本体与 macOS：
+
+    clang -target arm64-apple-ios15.0 -isysroot $SDK -fobjc-arc -fblocks \
+      -fobjc-runtime=ios-15 -O2 -dynamiclib -fuse-ld=lld -Wl,-fixup_chains \
+      -Wl,-install_name,@rpath/GaodeClean.dylib -Wl,-adhoc_codesign \
+      -framework UIKit -framework Foundation -framework CoreGraphics -framework QuartzCore \
+      src/GaodeClean.m -o GaodeClean.dylib
+
+deb 打包用 `scripts/mkdeb-local.py`（Python 写 `ar` 归档，不需要 dpkg-deb）。
+**arm64e 不可用**：`ld64.lld: error: -fixup_chains is only supported on x86_64 and arm64 targets`
+→ 只出 arm64 单切片；RootHide 包沿用官方兼容包做法（载荷去 `/var/jb` 前缀 + Depends 补 `oldabi`）。
 
 ## 标识
 源码与产物均带 `jibamao` 标识，`strings` 可核对：

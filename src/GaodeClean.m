@@ -57,10 +57,10 @@ static void UpdateMask(UIView *page);
 static void Schedule(void);
 static void LayoutMinimalHome(id handler);
 static void AlignCornerWidgets(UIView *bar);
+static BOOL FixingHintText;
+static __weak UIView *CachedTabBar;
 static void AlignWeatherRowTick(UIWindow *win);
-static void SweepDiscoverHints(UIView *root);
-static void SweepAllWindowsForHints(void);
-static void KickHintFix(void);
+static void SweepTabBarHints(UIView *bar);
 static void AlignOneWidget(UIView *bar, UIView *w, CGFloat barTop);
 
 @class GCCState;
@@ -628,8 +628,9 @@ static void Schedule(void) {
                 AlignWeatherRowTick(bar.window);
             }
         }
-        // 0.6.7：底栏「上拉发现」提示的常驻兜底（只扫窗口底部 160pt 带）
-        SweepAllWindowsForHints();
+        // 0.6.7：底栏「上拉发现」提示的周期通道 —— 引导态常常晚于最后一次布局才落地，
+        // 只挂 layout 就是这个 bug 偶发的根因。扫描范围只有底栏子树，开销可忽略。
+        if (CachedTabBar) SweepTabBarHints(CachedTabBar);
 #if GCC_DEVICE_TEST
         RunDeviceCheck();
 #endif
@@ -1376,57 +1377,51 @@ static void HookWidgetSetFrame(NSString *className) {
 }
 
 // ===========================================================================
-// 0.6.7 —— 底栏首页「上拉发现」提示根除
+// 0.6.7 —— 底栏「上拉发现」提示根除
 //
-// 0.5.1 那版只挂在 WINTabBar 的 layoutSubviews / amap_relayoutTabItems 上，
-// 判据也只有一条：那一刻 NodeText 里读得到「上拉」或「发现」。两处都不牢：
-//   ① 提示是异步引导态，冷启动时常常**晚于最后一次布局**才写进标签 —— 那一拍
-//      扫空，之后布局不再触发，提示就留在屏幕上。这就是「偶发」的来源。
-//   ② NodeText 只在 UILabel / AJX* 上读 text，其它自定义 label 类只能靠
-//      accessibilityLabel 撞运气。
-// 现在三条通道一起封死：
-//   A 文本来源：任何类都试 text / attributedText / attributedString / title /
-//     tipText / hintText —— ObjectGetter 校验「返回 @ 且无参」，不会误调 setter
-//   B 触发时机：WINTabBar / WINTabBarItem 的 layoutSubviews、didAddSubview:，
-//     以及 UILabel 的 setText: / setAttributedText: —— 文本一落地就地处理，
-//     不等下一次布局；命中后再开 0.8s / 16ms 快扫窗兜底
-//   C 收尾动作：底栏 item 里那个「本来是标题、被引导态换成上拉发现」的 label，
-//     写回上一次的正常标题（底栏照常显示「首页」而不是空一块）；
-//     本来就没有正常文本的纯引导层 → 直接隐藏
+// 0.5.1 只把这件事挂在 WINTabBar 的 layoutSubviews / amap_relayoutTabItems 上，
+// 而「上拉发现」是**异步引导态**，常在最后一次布局**之后**才写进 label ——
+// 那一拍扫空，之后布局不再触发，提示就留在屏幕上。冷启动才偶发，正是因为
+// 引导态与布局的先后顺序取决于启动耗时。三条通道全漏：
+//   ① 时机：没有周期性通道（本版复用已经在跑的 200ms tick 兜住）
+//   ② 判据：NodeText 只认 UILabel / AJX*，其它自定义 label 只能靠 accessibilityLabel
+//   ③ 处置：扫到也只是 hidden=YES；引导态复用的就是 item 标题 label，
+//           隐藏它等于把「首页」两个字一起抹掉
+//
+// 本版原则：**只作用在底栏子树**。不装任何全局钩子（上一版 Replace(UILabel,setText:)
+// 把全 app 每个 label 的写文本都套了一层 block，直接卡死主线程），
+// 不新增定时器，不做几何换算。扫描范围就 WINTabBar 那 20-40 个视图。
 // ===========================================================================
-static char LastGoodTextKey;
-static BOOL FixingHintText;
-static dispatch_source_t HintTimer;
-static CFAbsoluteTime HintUntil;
+static char LastTitleKey;
 
 static BOOL IsDiscoverHintText(NSString *text) {
     if (!text.length || text.length > 24) return NO;
     return [text containsString:@"上拉"];
 }
 
-// 提示只可能出现在底栏带：要么本身在 WINTabBar / WINTabBarItem 里，
-// 要么落在窗口底部 160pt 以内（浮层提示）。
-static BOOL InBottomZone(UIView *v, BOOL inBar) {
-    if (inBar) return YES;
-    UIWindow *win = v.window;
-    if (!win) return NO;                       // 未上树：交给 layout / didAddSubview 通道
-    CGRect r = [v convertRect:v.bounds toView:win];
-    return CGRectGetMaxY(r) > win.bounds.size.height - 160;
-}
+// 底栏子树专用的取文本：任何类都依次试常见的取文本方法。
+// ObjectGetter 先校验「返回 @ 且无参」，所以不会误调 setter。
+// 每个类第一次探完就把可用的 getter 名缓存下来 —— 之后每拍只是几次 msgSend，
+// methodSignatureForSelector 不再重复调用（200ms 一拍也几乎零成本）。
+static NSMutableDictionary<NSString *, NSArray<NSString *> *> *TextGetterCache;
 
-static BOOL IsInsideTabBar(UIView *v) {
-    for (UIView *p = v; p; p = p.superview) {
-        NSString *cn = NSStringFromClass(p.class);
-        if ([cn isEqualToString:@"WINTabBar"] || [cn isEqualToString:@"WINTabBarItem"]) return YES;
+static NSString *TabBarTextOf(UIView *v) {
+    NSString *cls = NSStringFromClass(v.class);
+    NSArray<NSString *> *getters = TextGetterCache[cls];
+    if (!getters) {
+        NSMutableArray *ok = [NSMutableArray array];
+        for (NSString *getter in @[@"text", @"attributedText", @"attributedString",
+                                   @"title", @"tipText", @"hintText"]) {
+            SEL sel = NSSelectorFromString(getter);
+            if (![v respondsToSelector:sel]) continue;
+            NSMethodSignature *sig = [v methodSignatureForSelector:sel];
+            if (sig.numberOfArguments == 2 && sig.methodReturnType[0] == '@') [ok addObject:getter];
+        }
+        getters = ok.count ? ok : @[];
+        TextGetterCache[cls] = getters;
     }
-    return NO;
-}
-
-// 文本来源补全：不再只认 UILabel / AJX*，任何类都试一遍已知的取文本方法。
-static NSString *AnyTextOf(UIView *v) {
-    for (NSString *getter in @[@"text", @"attributedText", @"attributedString",
-                               @"title", @"tipText", @"hintText"]) {
-        id value = ObjectGetter(v, getter);
+    for (NSString *getter in getters) {
+        id value = ((id (*)(id, SEL))objc_msgSend)(v, NSSelectorFromString(getter));
         if ([value isKindOfClass:NSAttributedString.class]) value = [value string];
         if ([value isKindOfClass:NSString.class] && [(NSString *)value length] < 200) return value;
     }
@@ -1434,143 +1429,85 @@ static NSString *AnyTextOf(UIView *v) {
     return label.length < 200 ? label : nil;
 }
 
-static void FixDiscoverHint(UIView *v, BOOL inBar) {
-    if (!v || FixingHintText) return;
-    if (!InBottomZone(v, inBar)) return;
-    NSString *text = AnyTextOf(v);
-    if (!IsDiscoverHintText(text)) {
-        // 记下正常标题，供下一次引导态写回
-        if (text.length && text.length <= 8 && ![text containsString:@"发现"])
-            objc_setAssociatedObject(v, &LastGoodTextKey, text, OBJC_ASSOCIATION_COPY_NONATOMIC);
-        return;
+// item 的 model 上就写着该显示什么（底栏只有 首页 / 我的 两项）。
+// 冷启动第一帧就是引导态、没来得及记下正常标题时，这是唯一的正确来源。
+static NSString *TabItemModelTitle(UIView *item) {
+    id model = ObjectGetter(item, @"model");
+    for (NSString *getter in @[@"title", @"text", @"name", @"tabTitle", @"displayName"]) {
+        id value = ObjectGetter(model, getter);
+        if ([value isKindOfClass:NSString.class] && [(NSString *)value length]
+            && [(NSString *)value length] <= 8 && !IsDiscoverHintText(value))
+            return value;
     }
-    NSString *good = objc_getAssociatedObject(v, &LastGoodTextKey);
-    if (inBar && [good isKindOfClass:NSString.class] && good.length
-        && [v respondsToSelector:@selector(setText:)]) {
-        FixingHintText = YES;                  // 防重入：写回会再次经过 setText: 钩子
-        ((void (*)(id, SEL, id))objc_msgSend)(v, @selector(setText:), good);
-        FixingHintText = NO;
-        return;
-    }
-    // 冷启动第一帧就是引导态时没有「上一次的正常标题」，就去 item 的 model 里取。
-    // 底栏只有 首页 / 我的 两项，model 上的 title 就是正确文案。
-    NSString *fromModel = nil;
-    UIView *item = v;
-    for (int depth = 0; item && depth < 4; depth++, item = item.superview) {
-        if ([NSStringFromClass(item.class) isEqualToString:@"WINTabBarItem"]) break;
-        if ([NSStringFromClass(item.class) isEqualToString:@"WINTabBar"]) { item = nil; break; }
-    }
-    if (item) {
-        id model = ObjectGetter(item, @"model");
-        for (NSString *getter in @[@"title", @"text", @"name", @"tabTitle", @"displayName"]) {
-            id value = ObjectGetter(model, getter);
-            if ([value isKindOfClass:NSString.class] && [(NSString *)value length]
-                && [(NSString *)value length] <= 8 && !IsDiscoverHintText(value)) { fromModel = value; break; }
-        }
-        if (!fromModel) {
-            fromModel = AnyTextOf(item);
-            if (IsDiscoverHintText(fromModel) || fromModel.length > 8) fromModel = nil;
-        }
-    }
-    if (fromModel && [v respondsToSelector:@selector(setText:)]) {
-        FixingHintText = YES;
-        ((void (*)(id, SEL, id))objc_msgSend)(v, @selector(setText:), fromModel);
-        FixingHintText = NO;
-        return;
-    }
-    v.hidden = YES;
-    // 有些版本把提示做成独立容器（图标/底板 + 文案）：只收掉「名字一看就是提示」的那层
-    UIView *host = v.superview;
-    for (int depth = 0; host && depth < 2; depth++, host = host.superview) {
-        NSString *cn = NSStringFromClass(host.class);
-        if ([cn isEqualToString:@"WINTabBar"] || [cn isEqualToString:@"WINTabBarItem"]) break;
-        if (![cn containsString:@"Tip"] && ![cn containsString:@"Guide"] &&
-            ![cn containsString:@"Discover"] && ![cn containsString:@"PullUp"] &&
-            ![cn containsString:@"Hint"]) break;
-        host.hidden = YES;
-    }
+    return nil;
 }
 
-// 只下潜「底栏带」：子树整段在带外的直接剪掉，所以 200ms 一次的常驻扫描也很便宜。
-static void SweepDiscoverHints(UIView *root) {
-    if (!root) return;
-    UIWindow *win = [root isKindOfClass:UIWindow.class] ? (UIWindow *)root : root.window;
-    CGFloat zoneTop = win ? win.bounds.size.height - 160 : 0;
-    NSMutableArray *q = [NSMutableArray arrayWithObject:root];
-    for (NSUInteger i = 0; i < q.count && q.count < 4000; i++) {
+static void FixTabBarHint(UIView *hint, UIView *bar) {
+    if (FixingHintText) return;
+    if (![hint respondsToSelector:@selector(setText:)]) { hint.hidden = YES; return; }
+
+    // 往上找它属于哪个 item
+    UIView *item = hint.superview;
+    while (item && item != bar) {
+        if ([NSStringFromClass(item.class) isEqualToString:@"WINTabBarItem"]) break;
+        item = item.superview;
+    }
+    if (item == bar) item = nil;
+
+    // 正确文案：先看之前记下的，再从 model 取
+    NSString *good = nil;
+    if (item) {
+        good = objc_getAssociatedObject(item, &LastTitleKey);
+        if (![good isKindOfClass:NSString.class] || !good.length) good = TabItemModelTitle(item);
+    }
+
+    FixingHintText = YES;
+    if (good.length) {
+        ((void (*)(id, SEL, id))objc_msgSend)(hint, @selector(setText:), good);
+        if (item) objc_setAssociatedObject(item, &LastTitleKey, good, OBJC_ASSOCIATION_COPY_NONATOMIC);
+    } else {
+        // 纯引导浮层（不是标题 label）：只收掉「类名一看就是提示」的那层，
+        // 到 item 为止绝不越界。
+        UIView *host = hint;
+        for (int depth = 0; host && host != bar && depth < 3; depth++, host = host.superview) {
+            host.hidden = YES;
+            UIView *up = host.superview;
+            if (!up) break;
+            NSString *cn = NSStringFromClass(up.class);
+            if ([cn isEqualToString:@"WINTabBar"] || [cn isEqualToString:@"WINTabBarItem"]) break;
+            if (![cn containsString:@"Tip"] && ![cn containsString:@"Guide"] &&
+                ![cn containsString:@"Discover"] && ![cn containsString:@"PullUp"] &&
+                ![cn containsString:@"Hint"]) break;
+        }
+    }
+    FixingHintText = NO;
+}
+
+// 只走底栏子树：节点数 20-40，无 convertRect:，无窗口遍历。200ms 一次也无所谓。
+static void SweepTabBarHints(UIView *bar) {
+    if (![bar isKindOfClass:UIView.class]) return;
+    NSMutableArray *q = [NSMutableArray arrayWithObject:bar];
+    for (NSUInteger i = 0; i < q.count && q.count < 200; i++) {
         UIView *v = q[i];
-        if (v != root) {
-            if (v.hidden) continue;
-            BOOL inBar = IsInsideTabBar(v);
-            if (!inBar && win) {
-                CGRect r = [v convertRect:v.bounds toView:win];
-                if (CGRectGetMaxY(r) <= zoneTop) continue;
-            }
-            FixDiscoverHint(v, inBar);
+        if (v != bar) {
+            if (v.hidden) { [q addObjectsFromArray:v.subviews]; continue; }
+            NSString *text = TabBarTextOf(v);
+            if (IsDiscoverHintText(text)) FixTabBarHint(v, bar);
+            else if (text.length && text.length <= 8)
+                // 记下正常标题，供引导态覆盖时写回
+                objc_setAssociatedObject(v, &LastTitleKey, text, OBJC_ASSOCIATION_COPY_NONATOMIC);
         }
         [q addObjectsFromArray:v.subviews];
     }
 }
 
-static void SweepAllWindowsForHints(void) {
-    for (UIWindow *w in UIApplication.sharedApplication.windows)
-        if (!w.hidden) SweepDiscoverHints(w);
-}
-
-// 命中提示后开 16ms 快扫窗：提示的出现/复现都在 1 帧内收掉，不等 200ms 的 tick。
-static void KickHintFix(void) {
-    HintUntil = CFAbsoluteTimeGetCurrent() + 0.8;
-    if (HintTimer) return;
-    HintTimer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, dispatch_get_main_queue());
-    dispatch_source_set_timer(HintTimer, dispatch_time(DISPATCH_TIME_NOW, 16 * NSEC_PER_MSEC),
-                              16 * NSEC_PER_MSEC, 4 * NSEC_PER_MSEC);
-    dispatch_source_set_event_handler(HintTimer, ^{
-        if (CFAbsoluteTimeGetCurrent() > HintUntil) {
-            dispatch_source_cancel(HintTimer);   // 不在自己的 handler 里释放 source
-            dispatch_async(dispatch_get_main_queue(), ^{ HintTimer = nil; });
-            return;
-        }
-        SweepAllWindowsForHints();
+// item 级触发：item 一布局 / 一上树就查一次它自己。范围只有一棵小树。
+static void InstallTabBarHintHooks(void) {
+    TextGetterCache = [NSMutableDictionary dictionary];
+    HookVoid(@"WINTabBarItem", @"didMoveToWindow", ^(UIView *item) {
+        for (UIView *p = item.superview; p; p = p.superview)
+            if ([NSStringFromClass(p.class) isEqualToString:@"WINTabBar"]) { SweepTabBarHints(p); break; }
     });
-    dispatch_resume(HintTimer);
-}
-
-// 通道 B：文本一落地就处理，不等下一次布局。
-static void InstallDiscoverHintHooks(void) {
-    // 注意：WINTabBar 的 layoutSubviews 已经在 InstallMinimalHome 里装过
-    // （CenterTabButtons + SweepDiscoverHints），这里**不能**再装一次 ——
-    // Replace() 对已存在的方法走 method_setImplementation，重复安装会把前一个顶掉，
-    // 底栏居中逻辑会连带失效。这里只补 item 侧。
-    for (NSString *cn in @[@"WINTabBarItem"]) {
-        Class cls = NSClassFromString(cn);
-        if (!cls) continue;
-        HookVoid(cn, @"layoutSubviews", ^(UIView *v) { SweepDiscoverHints(v); });
-        SEL sel = @selector(didAddSubview:);
-        Method m = class_getInstanceMethod(cls, sel);
-        if (m) {
-            IMP o = method_getImplementation(m);
-            const char *t = method_getTypeEncoding(m);
-            Replace(cls, sel, imp_implementationWithBlock(^(UIView *self, UIView *sub) {
-                ((void (*)(id, SEL, id))o)(self, sel, sub);
-                SweepDiscoverHints(self);
-            }), t);
-        }
-    }
-    for (NSString *name in @[@"setText:", @"setAttributedText:"]) {
-        SEL sel = NSSelectorFromString(name);
-        Method m = class_getInstanceMethod(UILabel.class, sel);
-        if (!m) continue;
-        IMP o = method_getImplementation(m);
-        const char *t = method_getTypeEncoding(m);
-        Replace(UILabel.class, sel, imp_implementationWithBlock(^(UILabel *self, id value) {
-            ((void (*)(id, SEL, id))o)(self, sel, value);
-            NSString *plain = [value isKindOfClass:NSAttributedString.class] ? [(NSAttributedString *)value string] : value;
-            if (IsDiscoverHintText(plain)) {
-                FixDiscoverHint(self, IsInsideTabBar(self));
-                KickHintFix();
-            }
-        }), t);
-    }
 }
 
 // 底栏的 legacy 玻璃（模糊/backdrop/chrome/shadow）被 app 在按下时放大到覆盖地图区，
@@ -1684,9 +1621,8 @@ static void CenterTabButtons(UIView *bar) {
 }
 
 static void InstallMinimalHome(void) {
-    HookVoid(@"WINTabBar", @"layoutSubviews", ^(UIView *bar) { CenterTabButtons(bar); SweepDiscoverHints(bar); });
-    // 0.6.7：文本落地通道（item 布局 / 晚到子视图 / UILabel 写文本）
-    InstallDiscoverHintHooks();
+    HookVoid(@"WINTabBar", @"layoutSubviews", ^(UIView *bar) { CachedTabBar = bar; CenterTabButtons(bar); SweepTabBarHints(bar); });
+    InstallTabBarHintHooks();
 
     HookVoid(@"GDAmapHomeHandler", @"viewDidLoad", ^(id handler) {
         [HomeHandlers addObject:handler];
@@ -2047,11 +1983,12 @@ static void InstallMinimalHome(void) {
         }
     });
     HookVoid(@"WINTabBar", @"amap_relayoutTabItems", ^(UIView *bar) {
-        // 0.6.7：这个类上的 amap_relayoutTabItems 在本文件里被装了两次，而 Replace()
-        // 走 method_setImplementation —— 后装的那次会把先装的（CenterTabButtons /
-        // SweepDiscoverHints）顶掉。这里补回来，两条路径都不丢。
+        // 0.6.7：这个 selector 在本文件被装了两次，而 Replace() 走
+        // method_setImplementation —— 后装的那次会把先装的顶掉（CenterTabButtons 失效）。
+        // 两条路径各自带上，谁后装都不丢功能。
+        CachedTabBar = bar;
         CenterTabButtons(bar);
-        SweepDiscoverHints(bar);
+        SweepTabBarHints(bar);
         for (id item in (ObjectGetter(bar, @"tabBarItems") ?: @[])) {
             if (![item isKindOfClass:UIView.class]) continue;
             for (NSString *setter in @[@"setAllowRepeatClick:", @"setAmap_allowRepeatClick:"]) {
@@ -2121,7 +2058,6 @@ __attribute__((constructor)) static void Initialize(void) {
         // Recheck after asynchronous cards and cell reuse; only attached target pages are scanned.
         dispatch_async(dispatch_get_main_queue(), ^{
             Schedule();
-            KickHintFix();     // 0.6.7：冷启动头 0.8s 以 16ms 粒度盯底栏带
             // 0.4.44：GCD 计时器（模式无关，比 NSTimer 更可靠；NSTimer 在 1.4s 后曾停止）
             ScheduleTimer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, dispatch_get_main_queue());
             dispatch_source_set_timer(ScheduleTimer, dispatch_time(DISPATCH_TIME_NOW, 200 * NSEC_PER_MSEC), 200 * NSEC_PER_MSEC, 20 * NSEC_PER_MSEC);
