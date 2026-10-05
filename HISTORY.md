@@ -1,4 +1,4 @@
-# GaodeClean 0.6.6 — 源码与构建说明
+# GaodeClean 0.6.7 — 源码与构建说明
 
 **Author: jibamao** · Repo: https://gan-jibamao.github.io/ · Section: `jibamao-Tweaks`
 
@@ -17,6 +17,8 @@
 - **顶部「沉浸高斯」模糊带根除 (0.5.8, EmptyImmersiveState 改派)**
 - **首页白块根除 (0.5.9, 恢复 sheet/mask/bottomMask hidden)**
 - **正式包零诊断**：不再写 Documents/GaodeClean-blur.txt (0.6.0)
+- **底栏「上拉发现」提示根除 (0.6.7，三条通道 + 标题写回)**
+- **底栏「上拉发现」提示根除 (0.6.7，三条通道 + 标题写回)**
 
 ## 本轮（0.5.1 → 0.6.0）主线：两场闪光的追查
 
@@ -103,6 +105,43 @@
      那一帧不会显示在错误位置
   3. 抽出 `IsWeatherRowView()` 尺寸自识别助手（宽 150–360、高 <40、y 在地图区），
      layoutSubviews 钩子与 setter 拦截共用
+
+### F. 冷启动后底栏首页偶发显示「上拉发现」（0.6.7）
+- 用户报告：「冷启动后底栏首页会出现上拉发现，是偶发的。」—— 截图确认：底栏左钮
+  （首页）在图标位置渲染出黄色「上拉发现」提示，右钮「我的」正常。
+- **真根因（三条通道全漏）**：
+  1. **时机**：0.5.1 的 `HideDiscoverPrompt` 只挂在 `WINTabBar` 的 `layoutSubviews` /
+     `amap_relayoutTabItems` 上。而「上拉发现」是**异步引导态**，常在最后一次布局
+     **之后**才写进 label —— 那一拍扫空，再没有下一次布局触发 → 提示留在屏幕上。
+     冷启动才偶发：引导态与布局的先后顺序取决于启动耗时，不是每次都晚。
+  2. **判据**：`NodeText` 只对 `UILabel` 读 `text`、对 `AJX*` 前缀读
+     `attributedString/attributedText/text`。底栏 item 的标题若是别的自定义 label 类，
+     只能靠 `accessibilityLabel` 撞运气。
+  3. **处置**：即便扫到，也只是 `v.hidden = YES` —— 引导层如果是**复用 item 标题 label**
+     的（不是独立浮层），隐藏它等于把「首页」两个字一起抹掉。
+- **0.6.7 修法**：
+  - **A 文本来源**：`AnyTextOf()` 对**任何类**依次试
+    `text / attributedText / attributedString / title / tipText / hintText`
+    （`ObjectGetter` 保证「返回 @ 且无参」才取，不会误调 setter）。
+  - **B 触发时机**：`WINTabBarItem -layoutSubviews`、`-didAddSubview:` 钩子，
+    以及 **`UILabel -setText:` / `-setAttributedText:`** —— 文本一落地就地处理，
+    不等下一次布局；命中后开 **0.8s / 16ms 快扫窗**兜底复现。
+    另有 200ms tick 常驻兜底，只下潜窗口底部 160pt（子树整段在带外的直接剪掉，
+    所以常驻扫描也很便宜）。
+  - **C 收尾动作**（关键，避免「修好了但按钮空了」）：
+    1. 有历史正常标题 → 写回它（`FixingHintText` 防重入，否则 `setText:` 钩子自递归）；
+    2. 冷启动第一帧就是引导态、没有历史值 → 去 `WINTabBarItem` 的
+       `model.title / text / name / tabTitle / displayName` 取正确文案再写回
+       （底栏只有 首页/我的 两项，model 上就是要显示的字）；
+    3. 以上都拿不到（纯引导浮层）→ 才 `v.hidden = YES`，并向上收掉
+       「类名带 Tip/Guide/Discover/PullUp/Hint」的那层容器，绝不碰光秃秃的普通类。
+  - 判据收窄：文案含「上拉」且长度 ≤24（「发现」单独出现不构成提示，
+    首页/我的页正常内容里也有这个词）。
+- **⚠ 安装时踩到的坑（写进教训）**：`InstallDiscoverHintHooks` 最初把
+  `WINTabBar -layoutSubviews` **又装了一遍**。`Replace()` 对已存在的方法走
+  `method_setImplementation`，重复安装会把先前那次（`CenterTabButtons`）**顶掉** ——
+  底栏居中逻辑会连带失效。现在 `WINTabBar` 只在 `InstallMinimalHome` 里装一次，
+  钩子体里已经带上了 `SweepDiscoverHints(bar)`。
 
 ### E. 冷启动后天气行停在原生位置、切一次页才归位（0.6.6）
 - 用户报告：「删除后台重新进高德，冷启动后天气和 LOGO 的位置不正确，
