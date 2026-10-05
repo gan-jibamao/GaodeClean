@@ -8,7 +8,7 @@
 | **Author** | **jibamao** |
 | **Repo** | <https://gan-jibamao.github.io/> · Section `jibamao-Tweaks` |
 | **目标** | 高德地图 / AMap `com.autonavi.amap` **17.00.2** |
-| **架构** | `arm64` 单切片（rootless + RootHide 两种包） |
+| **架构** | rootless `arm64` · RootHide `arm64e` |
 | **许可** | 私有备份，不对外分发 |
 
 ---
@@ -89,17 +89,19 @@ clang -target arm64-apple-ios15.0 -isysroot $SDK \
 python3 scripts/mkdeb-local.py
 ```
 
-产出 rootless 与 RootHide 两种布局。**arm64e 编不出来** ——
-`ld64.lld: error: -fixup_chains is only supported on x86_64 and arm64 targets`，
-因此 RootHide 包沿用官方兼容包做法：载荷去掉 `/var/jb` 前缀，`control` 的
-`Architecture` 仍写 `iphoneos-arm64`，`Depends` 补 `oldabi`。
+产出 rootless（arm64）与 RootHide（arm64e）两种布局。RootHide 包载荷去掉
+`/var/jb` 前缀，`Architecture` 写 `iphoneos-arm64e`，`Depends` 补 `oldabi`。
+
+arm64e 切片有两个坑：lld 不支持它的 `-fixup_chains`（改走经典 `LC_DYLD_INFO` 绑定），
+且 lld 会把输出头的 **cpusubtype 写成 0**（dyld 靠它判断是否为 arm64e 映像）。
+签名后用 `tools/fixarch.py <dylib> 2` 修正并重算签名页哈希。
 
 ### 安装路径
 
-| 环境 | 路径 |
-|:--|:--|
-| rootless / Dopamine | `/var/jb/Library/MobileSubstrate/DynamicLibraries/` |
-| RootHide | `/Library/MobileSubstrate/DynamicLibraries/`（jbroot 内） |
+| 环境 | 切片 | 路径 |
+|:--|:--|:--|
+| rootless / Dopamine | `arm64` | `/var/jb/Library/MobileSubstrate/DynamicLibraries/` |
+| RootHide | `arm64e` | `/Library/MobileSubstrate/DynamicLibraries/`（jbroot 内） |
 
 装完 `sbreload` 或重启用户空间。
 

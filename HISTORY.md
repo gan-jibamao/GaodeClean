@@ -456,16 +456,34 @@ clang -target arm64-apple-ios15.0 -isysroot $SDK -fobjc-arc -fblocks \
 
 deb 打包用 `scripts/mkdeb-local.py`（Python 写 `ar` 归档，不需要 `dpkg-deb`）。
 
-> **arm64e 不可用** — `ld64.lld: error: -fixup_chains is only supported on x86_64 and arm64 targets`
-> → 只出 arm64 单切片；RootHide 包沿用官方兼容包做法
-> （载荷去 `/var/jb` 前缀，`control` 的 `Architecture` 仍写 `iphoneos-arm64`，`Depends` 补 `oldabi`）。
+> **arm64e 是这样出来的** —— 两件事都要处理：
+> 1. lld 不支持 arm64e 的 `-fixup_chains`（只支持 x86_64 与 arm64），
+>    所以 arm64e 切片走经典 `LC_DYLD_INFO_ONLY` 绑定，**不加** `-Wl,-fixup_chains`。
+> 2. **clang 的 arm64e 后端是对的（`.o` 里 cpusubtype=2），但 lld 写出 Mach-O 时会把
+>    输出头的 cpusubtype 写成 0。** dyld 用
+>    `(cpusubtype & ~CPU_SUBTYPE_MASK) == CPU_SUBTYPE_ARM64E` 判断「是否为 arm64e 映像」，
+>    判错就会把认证指针按普通 arm64 处理 —— 第一次走 `__got` 槽就崩。
+>    所以签名之后必须用 `tools/fixarch.py <dylib> 2` 修正 subtype **并重算签名页哈希**
+>    （cpusubtype 在 header 偏移 8，落在第 0 页里）。
+>
+> ```
+> # arm64e 切片
+> clang -target arm64e-apple-ios15.0 -isysroot $SDK -fobjc-arc -fblocks \
+>   -fobjc-runtime=ios-15 -O2 -dynamiclib -fuse-ld=lld \
+>   -Wl,-install_name,@rpath/GaodeClean.dylib -Wl,-adhoc_codesign \
+>   -framework UIKit -framework Foundation -framework CoreGraphics -framework QuartzCore \
+>   src/GaodeClean.m -o GaodeClean-arm64e.dylib
+> python3 tools/fixarch.py GaodeClean-arm64e.dylib 2
+> ```
+>
+> 校验：`csverify.py` 应报「页哈希 45/45 通过」；头部 cpusubtype=2、cputype=0x100000c。
 
 ### deb 布局
 
-| 包 | data 载荷路径 | Depends |
-|:--|:--|:--|
-| rootless | `var/jb/Library/MobileSubstrate/DynamicLibraries/` | `firmware (>= 15.0), mobilesubstrate` |
-| RootHide | `Library/MobileSubstrate/DynamicLibraries/` | `…, mobilesubstrate, oldabi` |
+| 包 | 切片 | data 载荷路径 | Depends |
+|:--|:--|:--|:--|
+| rootless / Dopamine | **arm64** | `var/jb/Library/MobileSubstrate/DynamicLibraries/` | `firmware (>= 15.0), mobilesubstrate` |
+| RootHide | **arm64e** | `Library/MobileSubstrate/DynamicLibraries/` | `…, mobilesubstrate, oldabi` |
 
 | 环境 | 装机路径 |
 |:--|:--|
@@ -478,9 +496,10 @@ deb 打包用 `scripts/mkdeb-local.py`（Python 写 `ar` 归档，不需要 `dpk
 
 | 文件 | 说明 |
 |:--|:--|
-| `dist/GaodeClean.dylib` | 181,328 B · arm64 · chained fixups + adhoc 签名 · 带 jibamao 标识 |
+| `dist/GaodeClean-arm64.dylib` | 181,328 B · arm64 · chained fixups + adhoc 签名 |
+| `dist/GaodeClean-arm64e.dylib` | 182,672 B · arm64e · dyld_info 绑定 + adhoc 签名 |
 | `dist/com.jibamao.gaodeclean_0.7.1_iphoneos-arm64.deb` | rootless |
-| `dist/com.jibamao.gaodeclean_0.7.1_iphoneos-arm64-roothide.deb` | RootHide |
+| `dist/com.jibamao.gaodeclean_0.7.1_iphoneos-arm64e-roothide.deb`（arm64e） | RootHide |
 
 ### 每次发版自检清单
 
