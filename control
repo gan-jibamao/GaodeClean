@@ -1,6 +1,6 @@
 Package: com.jibamao.gaodeclean
 Name: GaodeClean 高德精简
-Version: 0.7.2
+Version: 0.7.3
 Architecture: iphoneos-arm64
 Description: 高德地图 17.00.2 UI 精简：去底栏上拉白雾/闪白、去顶部高斯模糊带、去首页白块、
  搜索栏与天气行归位、切页与切 2D/3D 不再跳动。纯 UI hook，不抓网络、不改 IPA。
