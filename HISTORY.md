@@ -5,7 +5,7 @@
 
 | | |
 |:--|:--|
-| **当前版本** | `0.7.2` |
+| **当前版本** | `0.7.3` |
 | **Author** | **jibamao** — <https://gan-jibamao.github.io/> · Section `jibamao-Tweaks` |
 | **目标** | 高德地图 / AMap `com.autonavi.amap` **17.00.2** |
 | **架构** | `arm64` 单切片（rootless + RootHide 两种包） |
@@ -50,6 +50,7 @@
 | 正式包**零诊断埋点**，源文件**零磁盘 I/O** | 0.6.0 / 0.6.8 |
 | 启动屏广告移除 | 0.7.1 |
 | 常驻开销收敛（3 定时器 → 2，全树遍历 -80%） | 0.7.2 |
+| 滚动热路径收敛（事件源 + bringSubviewToFront + clip path 缓存） | 0.7.3 |
 
 ---
 
@@ -417,6 +418,41 @@ re.findall(r'HookVoid\("([^"]+)",\s*@"([^"]+)"', src)
 **待真机确认** —— 白雾/手势扫描降频到 400ms 后，若切页时白雾回归
 （地图区 Δ 掉到 1–5），把白雾扫描改回每拍；其余项无此风险。
 
+### K. 0.7.2 的 CleanPage 降频实际上没生效（0.7.3）
+
+**自查发现** — 0.7.2 把 `CleanForce` 挂在 `AJX3View -layoutSubviews` 和 `Capture` 上，
+想做成事件驱动。但这两个钩子在**滚动 / 元素重渲染时每帧都触发**：
+
+- `AJX3View -layoutSubviews`：滚动动画里每帧触发（卡片位移、折叠展开）
+- `AJXBaseElement -reloadView` / `-layoutSubViews`（Capture 的钩子）：
+  元素重渲染，滚动时每帧多次
+
+→ `CleanForce` 几乎每拍都成立，`fullClean` 几乎每拍都是 YES，
+**0.7.2 想要的「CleanPage 降频」实际上被自己的事件源抵消了**。
+
+**另外两处滚动热路径**（逐行审计 UpdateMask 在 `setBounds:` / `setContentOffset:`
+钩子里的调用频率发现）：
+
+| 位置 | 问题 | 频率 |
+|:--|:--|:--|
+| `UpdateMask(kind 2/3)` | 每帧无条件 `bringSubviewToFront:` —— 父视图层级每帧重排 | 60–120 Hz |
+| `UpdateMask(kind 1)` | 每帧重建 `UIBezierPath` + `CGPath`（搜索页滚动时） | 60–120 Hz |
+
+**0.7.3 修法**
+1. **事件源收敛**：`CleanForce` 只保留 `didMoveToWindow`（真页面挂载）+
+   `WatchHomeTransition`（真切页）。`layoutSubviews` / `Capture` 不再置强制位 ——
+   5 拍（1 s）兜底已覆盖。
+2. **`bringSubviewToFront` 加守卫**：只在 `page.subviews.lastObject != blankArea`
+   时才调（blankArea 本来就该在最上层）。
+3. **clip path 缓存**：高度变化 >0.5 pt 才重建 `UIBezierPath + CGPath`
+   （GCCState 加 `clipHeight` 属性）。
+4. **白雾扫描降为每 2 拍（400 ms）** —— 白雾是持续态不是闪现，
+   源头修复（0.5.8 / 0.5.9 / 0.5.50）已掐死它的出现条件，这里只是兜底。
+
+**待真机确认** — 「我的」页滚动时白块是否回归（blankArea 移位依赖
+`bringSubviewToFront`，加了守卫后如果 app 在滚动时把别的视图插到 blankArea 之上，
+白块会露出来）。若有，把守卫换成「先查再调」的逆序判定。
+
 ## 三、跨版本验证汇总
 
 | 版本 | 项目 | 结果 |
@@ -526,10 +562,10 @@ deb 打包用 `scripts/mkdeb-local.py`（Python 写 `ar` 归档，不需要 `dpk
 
 | 文件 | 说明 |
 |:--|:--|
-| `dist/GaodeClean-arm64.dylib` | 181,088 B · arm64 · chained fixups + adhoc 签名 |
-| `dist/GaodeClean-arm64e.dylib` | 182,416 B · arm64e · dyld_info 绑定 + adhoc 签名 |
-| `dist/com.jibamao.gaodeclean_0.7.2_iphoneos-arm64.deb` | rootless |
-| `dist/com.jibamao.gaodeclean_0.7.2_iphoneos-arm64e-roothide.deb`（arm64e） | RootHide |
+| `dist/GaodeClean-arm64.dylib` | 181,312 B · arm64 · chained fixups + adhoc 签名 |
+| `dist/GaodeClean-arm64e.dylib` | 182,640 B · arm64e · dyld_info 绑定 + adhoc 签名 |
+| `dist/com.jibamao.gaodeclean_0.7.3_iphoneos-arm64.deb` | rootless |
+| `dist/com.jibamao.gaodeclean_0.7.3_iphoneos-arm64e-roothide.deb`（arm64e） | RootHide |
 
 ### 每次发版自检清单
 
@@ -577,7 +613,8 @@ cmp <(ar p dist/*.deb data.tar.gz | tar xzO ./var/jb/.../GaodeClean.dylib) dist/
 0.6.8   切页响应 · 清除残留文件 I/O
 0.6.9   快修窗不再空转
 0.7.1   开屏广告移除
-0.7.2   常驻开销收敛                      ← 当前
+0.7.2   常驻开销收敛
+0.7.3   滚动热路径收敛                    ← 当前
 ```
 
 ---
