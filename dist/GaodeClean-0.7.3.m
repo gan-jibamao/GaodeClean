@@ -18,7 +18,7 @@
 static NSString *const kGCAuthor      = @"jibamao";
 static NSString *const kGCRepo        = @"https://gan-jibamao.github.io/";
 static NSString *const kGCSection     = @"jibamao-Tweaks";
-static NSString *const kGCVersion     = @"0.7.2";
+static NSString *const kGCVersion     = @"0.7.3";
 static NSString *const kGCSignature   = @"GaodeClean by jibamao";
 
 // 对外签名（供 log / 诊断 / 二次核对使用）
@@ -120,6 +120,7 @@ static void AlignOneWidget(UIView *bar, UIView *w, CGFloat barTop);
 @property(nonatomic, strong) GCCBlankArea *blankArea;
 @property(nonatomic, weak) UIView *page;
 @property(nonatomic) CGFloat width;
+@property(nonatomic) CGFloat clipHeight;
 @property(nonatomic) BOOL matched;
 @property(nonatomic) BOOL reportedMatch;
 @property(nonatomic) BOOL reportedMiss;
@@ -269,7 +270,9 @@ static void UpdateMask(UIView *page) {
         state.blankArea.backgroundColor = background;
         state.blankArea.frame = CGRectMake(page.bounds.origin.x, page.bounds.origin.y + height,
                                             page.bounds.size.width, MAX(0, page.bounds.size.height - height));
-        [page bringSubviewToFront:state.blankArea];
+        // 0.7.3：原来每帧无条件 bringSubviewToFront —— 父视图层级每帧重排。
+        if (page.subviews.lastObject != state.blankArea)
+            [page bringSubviewToFront:state.blankArea];
         [CATransaction commit];
         return;
     }
@@ -284,7 +287,11 @@ static void UpdateMask(UIView *page) {
         page.layer.mask = state.clip;
     }
     state.clip.frame = page.bounds;
-    state.clip.path = [UIBezierPath bezierPathWithRect:CGRectMake(0, 0, page.bounds.size.width, height)].CGPath;
+    // 0.7.3：滚动时这条路径每帧都在重建（UIBezierPath + CGPath 分配）。
+    if (!state.clip.path || fabs(state.clipHeight - height) > 0.5) {
+        state.clipHeight = height;
+        state.clip.path = [UIBezierPath bezierPathWithRect:CGRectMake(0, 0, page.bounds.size.width, height)].CGPath;
+    }
     [CATransaction commit];
 }
 
@@ -598,9 +605,12 @@ static void Schedule(void) {
         // 非全量拍走轻路径（Restore / 宽度检查 / ApplyLimits），不碰页面树。
         BOOL fullClean = CleanForce || (TickCount % 5 == 0);
         for (UIView *page in Pages.allObjects) CleanPage(page, fullClean);
-        // 0.7.2：合并进来的两个周期扫描（原 300ms / 400ms 独立定时器）
-        SweepFogOverlay();                       // 每拍，节点上限 600
+        // 0.7.3：三个周期扫描降到 400ms（白雾是持续态不是闪现，
+        // 源头修复 0.5.8/0.5.9/0.5.50 已掐死它的出现条件，这里只是兜底）
         if (TickCount % 2 == 0) {
+            SweepFogOverlay();
+            StripSlidablePan();
+            StripTabBarGestures();
             StripSlidablePan();                  // 每 2 拍，节点上限 1200
             StripTabBarGestures();               // 每 2 拍，节点上限 400
         }
@@ -671,7 +681,8 @@ static void Capture(id element) {
         }
         objc_setAssociatedObject(view, &TextKey, text, OBJC_ASSOCIATION_COPY_NONATOMIC);
     }
-    CleanForce = YES;
+    // 0.7.3：Capture 在元素重渲染时也会频繁触发（滚动时每帧多次），
+    // 与 layoutSubviews 同理，不能再当事件源。兜底 5 拍（1s）已覆盖。
     Schedule();
 }
 
@@ -2403,8 +2414,9 @@ __attribute__((constructor)) static void Initialize(void) {
         HookVoid(@"AJXBaseElement", @"reloadView", ^(id e) { Capture(e); });
         HookVoid(@"AJXBaseElement", @"layoutSubViews", ^(id e) { Capture(e); });
         HookVoid(@"AJXBaseElement", @"updateVoiceOverIDAndLabel", ^(id e) { Capture(e); });
-        // 0.7.2：app 动了 AJX 页面内容 → 下一拍强制全量 CleanPage
-        HookVoid(@"AJX3View", @"layoutSubviews", ^(id page) { [Pages addObject:page]; CleanForce = YES; Schedule(); });
+        // 0.7.3：layoutSubviews 在滚动动画里**每帧都触发**，把它当事件源会让
+        // fullClean 几乎每拍成立 —— 0.7.2 的 CleanPage 降频实际上被它抵消了。
+        // 只保留 didMoveToWindow（真正的页面挂载）。
         HookVoid(@"AJX3View", @"didMoveToWindow", ^(id page) { [Pages addObject:page]; CleanForce = YES; Schedule(); });
         HookVoid(@"AJXWINNearbyViewControl", @"viewDidLoad", ^(id controller) { [NearbyControllers addObject:controller]; Schedule(); });
         HookVoid(@"WINTabBarControl", @"viewDidLoad", ^(id tabs) { [TabControllers addObject:tabs]; Schedule(); });
@@ -2417,6 +2429,6 @@ __attribute__((constructor)) static void Initialize(void) {
             dispatch_source_set_event_handler(ScheduleTimer, ^{ Schedule(); });
             dispatch_resume(ScheduleTimer);
         });
-        NSLog(@"[GaodeClean] loaded 0.7.2 (17.00.2 only)");
+        NSLog(@"[GaodeClean] loaded 0.7.3 (17.00.2 only)");
     }
 }
