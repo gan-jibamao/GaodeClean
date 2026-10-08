@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-GaodeClean 0.7.1 打包 —— 两种架构分别对应：
+GaodeClean 打包 —— 两种架构分别对应：
   rootless / Dopamine  → arm64  切片 + Architecture: iphoneos-arm64
   RootHide             → arm64e 切片 + Architecture: iphoneos-arm64e
 
@@ -18,7 +18,7 @@ OUT = '/tmp/gcbuild/dist'
 PLIST = '/tmp/gclean/GaodeClean.plist'
 CTRL = '/tmp/gcbuild/control'
 LIBSUB = 'Library/MobileSubstrate/DynamicLibraries'
-VERSION = '0.7.4'
+VERSION = '0.7.3'
 
 # (dylib 路径, deb 架构名, 是否 RootHide)
 TARGETS = [
