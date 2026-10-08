@@ -4,7 +4,7 @@
 
 | | |
 |:--|:--|
-| **版本** | `0.7.3` |
+| **版本** | `0.7.4` |
 | **Author** | **jibamao** |
 | **Repo** | <https://gan-jibamao.github.io/> · Section `jibamao-Tweaks` |
 | **目标** | 高德地图 / AMap `com.autonavi.amap` **17.00.2** |
@@ -30,6 +30,7 @@
 | 启动屏广告（偶发填充） | 0.7.1 | ✅ |
 | 常驻开销收敛（3 定时器 → 2） | 0.7.2 | ✅ |
 | 滚动热路径收敛 | 0.7.3 | ✅ |
+| 后台/非活跃停摆 · 静默期扫描门控 | 0.7.4 | ✅ |
 
 正式包**零诊断埋点** —— 不再写 `Documents/GaodeClean-*.txt`，源文件零磁盘 I/O。
 
@@ -55,7 +56,7 @@
 ## 目录
 
 ```
-src/GaodeClean.m          当前源码（0.6.9）
+src/GaodeClean.m          当前源码（0.7.4）
 src/GCCGeometry.h         几何辅助头
 scripts/make-roothide.sh  rootless deb → RootHide deb 转换
 scripts/mkdeb-local.py    不依赖 dpkg-deb 的打包脚本
@@ -132,7 +133,8 @@ arm64e 切片有两个坑：lld 不支持它的 `-fixup_chains`（改走经典 `
 0.6.9   快修窗不再空转
 0.7.1   开屏广告移除
 0.7.2   常驻开销收敛
-0.7.3   滚动热路径收敛            ← 当前
+0.7.3   滚动热路径收敛
+0.7.4   后台与静默期收敛          ← 当前
 ```
 
 ---
