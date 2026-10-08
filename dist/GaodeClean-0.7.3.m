@@ -18,7 +18,7 @@
 static NSString *const kGCAuthor      = @"jibamao";
 static NSString *const kGCRepo        = @"https://gan-jibamao.github.io/";
 static NSString *const kGCSection     = @"jibamao-Tweaks";
-static NSString *const kGCVersion     = @"0.7.4";
+static NSString *const kGCVersion     = @"0.7.3";
 static NSString *const kGCSignature   = @"GaodeClean by jibamao";
 
 // 对外签名（供 log / 诊断 / 二次核对使用）
@@ -75,8 +75,6 @@ static __weak UIView   *GCCSplashView;        // 已识别的广告视图
 static NSInteger GCCSplashTicks;              // 兜底扫描剩余拍数（有界）
 static int TickCount;         // 0.7.2：主 tick 计数（降频兜底用）
 static BOOL CleanForce;       // 0.7.2：下一拍强制跑一次全量 CleanPage
-static int GCCActiveUntil;    // 0.7.4(A4)：活跃窗截止拍号（切页/新页面挂载后 TickCount+8）
-static void GCCArmTick(void); // 0.7.4(A3)：按前台/后台动态整备 tick 节拍
 static NSMutableDictionary<NSString *, NSNumber *> *AjxCache;  // 0.7.2：类名→是否 AJX
 static BOOL GCCSplashDone;
 static void InstallSplashAdGuard(void);
@@ -582,10 +580,11 @@ static void Schedule(void) {
         // （历史记录里那条「NSTimer/GCD timer 都在 ~1.35s 停跑」是同一个坑。）
         // 修法：不 return，而是「不活跃时不干活、但照样续链」；并用 dispatch_after 兜底续链，
         // 即使某一拍真的返回了，1 秒后也会重新接上。
-        // 0.7.4(A2)：删掉 100ms 自持重试链。它是 NSTimer 时代的补丁（当年 tick 自己续链，
-        // 一旦 return 就永久停跑），而 0.6.4 起链已由 200ms 的 GCD ScheduleTimer 驱动，
-        // 不会因提前返回而断。重试链只剩副作用：非活跃时额外 10 次/秒空转唤醒。
-        if (UIApplication.sharedApplication.applicationState != UIApplicationStateActive) return;
+        if (UIApplication.sharedApplication.applicationState != UIApplicationStateActive) {
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 100 * NSEC_PER_MSEC),
+                           dispatch_get_main_queue(), ^{ Schedule(); });
+            return;
+        }
         TickCount++;
         for (id tabs in TabControllers.allObjects) {
             id selected = ObjectGetter(tabs, @"selectedViewControl");
@@ -608,14 +607,12 @@ static void Schedule(void) {
         for (UIView *page in Pages.allObjects) CleanPage(page, fullClean);
         // 0.7.3：三个周期扫描降到 400ms（白雾是持续态不是闪现，
         // 源头修复 0.5.8/0.5.9/0.5.50 已掐死它的出现条件，这里只是兜底）
-        // 0.7.4(A1)：0.7.3 用「注释行 + SweepFogOverlay 行」做锚点替换新块时，
-        // 旧的两行调用（带对齐注释）没被一并删掉 -> 同一个 400ms 窗口内各跑两遍。
-        // 0.7.4(A4)：白雾/可滑手势都是「切页、新页面挂载」那一瞬间的产物，
-        // 加活跃窗门控 —— 事件后 8 拍（1.6s）内每 2 拍扫，静默期降到每 6 拍（1.2s）。
-        if (TickCount % (TickCount < GCCActiveUntil ? 2 : 6) == 0) {
+        if (TickCount % 2 == 0) {
             SweepFogOverlay();
             StripSlidablePan();
             StripTabBarGestures();
+            StripSlidablePan();                  // 每 2 拍，节点上限 1200
+            StripTabBarGestures();               // 每 2 拍，节点上限 400
         }
         // 0.4.41 冷启动兜底：定位超时(约 2.4s)仍未完成则强制显示，避免卡在隐藏态
         ColdTicks++;
@@ -657,27 +654,11 @@ static void Schedule(void) {
         SplashAdTick();
         // 0.6.7：底栏「上拉发现」提示的周期通道 —— 引导态常常晚于最后一次布局才落地，
         // 只挂 layout 就是这个 bug 偶发的根因。扫描范围只有底栏子树，开销可忽略。
-        // 0.7.4(A6)：「上拉发现」是 200ms~1s 级的异步引导态，5Hz 采样过剩，降到 2.5Hz。
-        if (CachedTabBar && TickCount % 2 == 0) SweepTabBarHints(CachedTabBar);
+        if (CachedTabBar) SweepTabBarHints(CachedTabBar);
 #if GCC_DEVICE_TEST
         RunDeviceCheck();
 #endif
     });
-}
-
-// 0.7.4(A3)：按前台/后台动态整备 tick 节拍。
-// 高德带导航后台模式，切后台后主线程仍在跑 —— 原来的 200ms 定时器会 5 次/秒
-// 空转唤醒（每拍都在 applicationState != Active 分支直接 return）。UI 清理在后台
-// 毫无意义，所以后台拉长到 2s（仅作保险），回前台由 DidBecomeActive 立即恢复 200ms。
-static void GCCArmTick(void) {
-    if (!ScheduleTimer) {
-        ScheduleTimer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, dispatch_get_main_queue());
-        dispatch_source_set_event_handler(ScheduleTimer, ^{ Schedule(); });
-        dispatch_resume(ScheduleTimer);
-    }
-    BOOL active = (UIApplication.sharedApplication.applicationState == UIApplicationStateActive);
-    dispatch_source_set_timer(ScheduleTimer, dispatch_time(DISPATCH_TIME_NOW, 0),
-                              (active ? 200 : 2000) * NSEC_PER_MSEC, 20 * NSEC_PER_MSEC);
 }
 
 static void Capture(id element) {
@@ -1373,17 +1354,12 @@ static void AlignOneWidget(UIView *bar, UIView *w, CGFloat barTop) {
 static void AlignWeatherRowTick(UIWindow *win) {
     if (!win) return;
     static __weak UIView *Row = nil;
-    static int RescanTick = -4;   // -4：保证首次调用一定重扫
     BOOL stale = (!Row || !Row.window);
     if (!stale) {
         CGRect r0 = [Row convertRect:Row.bounds toView:win];
         if (r0.size.width < 150 || r0.size.width > 360 || r0.size.height >= 40) stale = YES;
     }
-    // 0.7.4(A6)：缓存失效时原本**每拍**都做一次 ≤2000 节点全窗 BFS（切页后连做几拍）。
-    // 节流到每 4 拍（800ms）最多重扫一次。
-    if (stale && TickCount - RescanTick < 4) return;
     if (stale) {
-        RescanTick = TickCount;
         NSMutableArray *q = [NSMutableArray arrayWithObject:win];
         for (NSUInteger i = 0; i < q.count && q.count < 2000; i++) {
             UIView *v = q[i];
@@ -1602,7 +1578,7 @@ static void WatchHomeTransition(id tabs) {
     BOOL prevHome = [NSStringFromClass([prev class]) isEqualToString:@"WINAmapHomeControl"];
     if (home && !prevHome && ColdTicks >= 15) KickBarFixFor(0.32);
     // 0.7.2：切页 = 内容必然重排 → 强制全量 CleanPage
-    if (prevHome != home) { CleanForce = YES; GCCActiveUntil = TickCount + 8; }
+    if (prevHome != home) CleanForce = YES;
 }
 
 // 只走底栏子树：节点数 20-40，无 convertRect:，无窗口遍历。200ms 一次也无所谓。
@@ -1807,15 +1783,9 @@ static void GCCHideAdWindows(void) {
 
 // 通道 ③：兜底扫描。只在启动 / 回前台后的有界窗口内跑，且有节点上限。
 static void SplashAdTick(void) {
-    // 0.7.4(A5)：15s 有界窗口结束后，窗口兜底降为每 10 拍（2s）。
-    // 后置的广告窗口不靠这条路径 —— CNG 选择器挂钩 + 窗口 addSubview 钩子已覆盖，
-    // 原来即使 GCCSplashTicks 归零也仍每拍遍历所有窗口做类名匹配。
-    if (GCCSplashTicks <= 0) {
-        if (TickCount % 10 != 0) return;
-    } else {
-        GCCSplashTicks--;
-    }
     GCCHideAdWindows();
+    if (GCCSplashTicks <= 0) return;
+    GCCSplashTicks--;
     for (UIWindow *w in UIApplication.sharedApplication.windows) {
         if (w == GCCMainWindow || w.hidden) continue;
         // 只下潜两层、上限 200 个节点 —— 不做全树 BFS（0.6.7a 的教训）
@@ -2447,30 +2417,18 @@ __attribute__((constructor)) static void Initialize(void) {
         // 0.7.3：layoutSubviews 在滚动动画里**每帧都触发**，把它当事件源会让
         // fullClean 几乎每拍成立 —— 0.7.2 的 CleanPage 降频实际上被它抵消了。
         // 只保留 didMoveToWindow（真正的页面挂载）。
-        HookVoid(@"AJX3View", @"didMoveToWindow", ^(id page) {
-            [Pages addObject:page]; CleanForce = YES; GCCActiveUntil = TickCount + 8; Schedule();
-        });
+        HookVoid(@"AJX3View", @"didMoveToWindow", ^(id page) { [Pages addObject:page]; CleanForce = YES; Schedule(); });
         HookVoid(@"AJXWINNearbyViewControl", @"viewDidLoad", ^(id controller) { [NearbyControllers addObject:controller]; Schedule(); });
         HookVoid(@"WINTabBarControl", @"viewDidLoad", ^(id tabs) { [TabControllers addObject:tabs]; Schedule(); });
-        // 0.7.4(A3)：前台立即恢复 200ms 节拍并立刻跑一拍；后台把节拍拉长到 2s。
-        [NSNotificationCenter.defaultCenter addObserverForName:UIApplicationDidBecomeActiveNotification
-                                                        object:nil queue:NSOperationQueue.mainQueue
-                                                    usingBlock:^(__unused NSNotification *note) {
-            GCCArmTick();
-            Schedule();
-        }];
-        [NSNotificationCenter.defaultCenter addObserverForName:UIApplicationDidEnterBackgroundNotification
-                                                        object:nil queue:NSOperationQueue.mainQueue
-                                                    usingBlock:^(__unused NSNotification *note) {
-            GCCArmTick();
-        }];
         // Recheck after asynchronous cards and cell reuse; only attached target pages are scanned.
         dispatch_async(dispatch_get_main_queue(), ^{
             Schedule();
             // 0.4.44：GCD 计时器（模式无关，比 NSTimer 更可靠；NSTimer 在 1.4s 后曾停止）
-            // 0.7.4(A3)：改为 GCCArmTick() 整备，节拍随前台/后台自动切换
-            GCCArmTick();
+            ScheduleTimer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, dispatch_get_main_queue());
+            dispatch_source_set_timer(ScheduleTimer, dispatch_time(DISPATCH_TIME_NOW, 200 * NSEC_PER_MSEC), 200 * NSEC_PER_MSEC, 20 * NSEC_PER_MSEC);
+            dispatch_source_set_event_handler(ScheduleTimer, ^{ Schedule(); });
+            dispatch_resume(ScheduleTimer);
         });
-        NSLog(@"[GaodeClean] loaded 0.7.4 (17.00.2 only)");
+        NSLog(@"[GaodeClean] loaded 0.7.3 (17.00.2 only)");
     }
 }
