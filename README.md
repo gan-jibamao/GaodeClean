@@ -4,11 +4,11 @@
 
 | | |
 |:--|:--|
-| **版本** | `0.7.3`（0.7.4 已回退，见 HISTORY §L） |
+| **版本** | `0.8.0`（适配高德 17.01.0；0.7.4 已回退，见 HISTORY §L） |
 | **Author** | **jibamao** |
 | **Repo** | <https://gan-jibamao.github.io/> · Section `jibamao-Tweaks` |
-| **目标** | 高德地图 / AMap `com.autonavi.amap` **17.00.2** |
-| **架构** | rootless `arm64` · RootHide `arm64e` |
+| **目标** | 高德地图 / AMap `com.autonavi.amap` **17.00.2 / 17.01.0**（版本白名单） |
+| **架构** | rootless `arm64` · RootHide `arm64e` · TrollFools 注入用裸 `arm64` dylib |
 | **许可** | 私有备份，不对外分发 |
 
 ---
@@ -30,6 +30,8 @@
 | 启动屏广告（偶发填充） | 0.7.1 | ✅ |
 | 常驻开销收敛（3 定时器 → 2） | 0.7.2 | ✅ |
 | 滚动热路径收敛 | 0.7.3 | ✅ |
+| 启动黑屏根因修复 | 0.7.5 | ✅ |
+| 适配高德 17.01.0（新开屏体系 + 版本闸门） | 0.8.0 | ✅ |
 
 正式包**零诊断埋点** —— 不再写 `Documents/GaodeClean-*.txt`，源文件零磁盘 I/O。
 
@@ -55,10 +57,11 @@
 ## 目录
 
 ```
-src/GaodeClean.m          当前源码（0.7.3）
+src/GaodeClean.m          当前源码（0.8.0）
 src/GCCGeometry.h         几何辅助头
 scripts/make-roothide.sh  rootless deb → RootHide deb 转换
-scripts/mkdeb-local.py    不依赖 dpkg-deb 的打包脚本
+scripts/mkdeb.py          不依赖 dpkg-deb 的打包脚本
+scripts/fixarch.py          arm64e cpusubtype 修正 + 签名页哈希重算
 dist/                     构建产物
 HISTORY.md                功能清单 / 版本链 / 根因分析 / 构建配方
 ```
@@ -88,7 +91,7 @@ clang -target arm64-apple-ios15.0 -isysroot $SDK \
 ### 打包 deb
 
 ```bash
-python3 scripts/mkdeb-local.py
+python3 scripts/mkdeb.py
 ```
 
 产出 rootless（arm64）与 RootHide（arm64e）两种布局。RootHide 包载荷去掉
@@ -96,7 +99,7 @@ python3 scripts/mkdeb-local.py
 
 arm64e 切片有两个坑：lld 不支持它的 `-fixup_chains`（改走经典 `LC_DYLD_INFO` 绑定），
 且 lld 会把输出头的 **cpusubtype 写成 0**（dyld 靠它判断是否为 arm64e 映像）。
-签名后用 `tools/fixarch.py <dylib> 2` 修正并重算签名页哈希。
+签名后用 `scripts/fixarch.py <dylib> 2` 修正并重算签名页哈希。
 
 ### 安装路径
 
@@ -132,8 +135,10 @@ arm64e 切片有两个坑：lld 不支持它的 `-fixup_chains`（改走经典 `
 0.6.9   快修窗不再空转
 0.7.1   开屏广告移除
 0.7.2   常驻开销收敛
-0.7.3   滚动热路径收敛            ← 当前（采用）
+0.7.3   滚动热路径收敛
 0.7.4   ✗ 后台/静默期收敛（真机有问题，已回退）
+0.7.5   启动黑屏根因修复
+0.8.0   高德 17.01.0 适配（版本白名单 + WINSplashScreen 判定层）   ← 当前（采用）
 ```
 
 ---
@@ -150,4 +155,4 @@ strings GaodeClean.dylib | grep -i jibamao
 # GaodeClean by jibamao
 ```
 
-启动输出：`[GaodeClean] GaodeClean v0.7.1 | jibamao | https://gan-jibamao.github.io/`
+ 启动输出：`[GaodeClean] GaodeClean v0.8.0 | jibamao | https://gan-jibamao.github.io/`

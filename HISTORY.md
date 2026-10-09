@@ -5,10 +5,11 @@
 
 | | |
 |:--|:--|
-| **当前版本** | `0.7.3`（0.7.4 已回退） |
+| **当前版本** | `0.8.0` |
 | **Author** | **jibamao** — <https://gan-jibamao.github.io/> · Section `jibamao-Tweaks` |
-| **目标** | 高德地图 / AMap `com.autonavi.amap` **17.00.2** |
-| **架构** | `arm64` 单切片（rootless + RootHide 两种包） |
+| **目标** | 高德地图 / AMap `com.autonavi.amap` **17.00.2 / 17.01.0**（版本白名单） |
+| **架构** | `arm64`（rootless / TrollFools 注入）· `arm64e`（RootHide） |
+| **未采用** | `0.7.4`（真机有问题，已回退，见 §L） |
 
 ---
 
@@ -455,7 +456,8 @@ re.findall(r'HookVoid\("([^"]+)",\s*@"([^"]+)"', src)
 
 ### L. 0.7.4 回退（未采用）
 
-**结论** — 0.7.4 在真机使用中暴露出问题，**已回退，当前采用版本 = `0.7.3`**。
+**结论** — 0.7.4 在真机使用中暴露出问题，**已回退**（当时采用版本回到 `0.7.3`；
+后续 0.7.5 / 0.8.0 已修复并取代，见 §M）。
 0.7.4 的提交保留在历史中（`5ea5f24` 源码与文档、`020c6d3` 二进制产物），
 但不再作为采用版本；本次回退是**新增提交**（`49312f0`），未改写任何历史。
 
@@ -475,6 +477,109 @@ HEAD 不动）再新增提交。**未使用 `reset --hard` + 强推**，符合�
 
 **下次继续的入口** — 等具体症状（哪个页面、什么表现、是否可复现）后按症状二分：
 先单独回滚 A3 做验证，再逐条加回 A4/A5/A6。
+
+### M. 0.7.5 / 0.8.0 —— 高德 17.01.0 「完全没效果」修复（当前采用）
+
+**症状** — 2026-10-09 高德地图从 `17.00.2` 升级到 `17.01.0` 后，tweak **完全没效果**
+（不是部分失效）。用户提供 17.01.0 解密 IPA 供取证。
+
+#### M1. 根因一（致命）：硬版本闸门把 dylib 自己关掉了
+
+0.7.5 构造函数里有一道闸门：
+
+```objc
+if (![[NSBundle.mainBundle objectForInfoDictionaryKey:@"CFBundleShortVersionString"] isEqual:@"17.00.2"]) {
+    NSLog(@"[GaodeClean] unsupported app version; disabled");
+    return;                                  // ← 一个钩子都不装
+}
+```
+
+版本一变，条件为假 → 构造函数直接 `return` → **零钩子安装**，现场表现就是「完全没效果」。
+
+**铁证** — 用户设备上经 TrollFools 注入的 dylib 内嵌字符串：
+
+```
+CFBundleShortVersionString  17.00.2  [GaodeClean] unsupported app version; disabled
+```
+
+其 `__TEXT.__text` 段 sha256 前缀 `5819eb9ca91fb599` 与本地 0.7.5 构建**逐字节一致**
+（即确实是发布版被加载了，只是被自己的闸门拦下）。
+
+**教训** — 版本护栏必须写成「白名单 + 显式日志」，不能写成 `isEqual:` 硬匹配后静默 return：
+护栏失效时要**看得见**。0.8.0 改为打印实际识别版本 + 支持列表。
+
+#### M2. 根因二：开屏广告换了体系（解闸门也不够）
+
+对两版二进制做 `__objc_classname` / `__objc_methname` 节区全量对比（`lief` 提取）：
+
+| 体系 | 17.00.2 | 17.01.0 |
+|:--|:--|:--|
+| 阿里聚合广告 `CNGLaunchSplash*` | 15 个类 | **0** |
+| `BUAdSDK`(穿山甲) / `GDTMobSDK`(优量汇) / `KSAdSDK`(快手) / `BaiduMobAd`(百度) | 26 / 2 / 5 / 59 处 | **全 0** |
+| 自研 `WINSplashScreen*` | **0** | **60+ 个** |
+
+→ 旧版钩的 CNG 类名在新版**一个都不存在**，钩子永不触发。新版关键 selector：
+
+```
+shouldSplashScreenShow:launchCheck:
+isLocalSplashDataCanExposure
+presentSplashScreenWithData:scene:fromBackground:otherInfo:filteringSuccessBlock:…（8 参）
+presentRealTimeSplashScreen:scene:customFilterBlock:…
+hideSplashView / fetchSplashDataWithScene: / doFetchSplashDataAfterDelay:scene:…
+```
+
+配置键 `splash_last_adgroup_id` / `splash_last_ad_timestamp` 仍在 → 确认仍是广告开屏。
+
+#### M3. 0.8.0 改动（A1–A5）
+
+| 项 | 改动 |
+|:--|:--|
+| A1 | 硬闸门 → `GCSupportedVersions()` 白名单 `{17.00.2, 17.01.0}`；未验证版本打印 `unsupported app version %@ (supported: …) - no hooks installed` 后自禁；放行打印 `app version %@ accepted, installing hooks` |
+| A2 | `kGCVersion` → `0.8.0`；loaded 日志带支持列表；迁移边界缓存键改 `GCBoundaryKey()` 随版本走 |
+| A3-1 | 类名前缀表追加 16 个 `WINSplash*` 前缀（**旧 CNG 词全部保留**，兼容 17.00.2） |
+| A3-2 | 判定表追加 `shouldSplashScreenShow:launchCheck:`、`isLocalSplashDataCanExposure` → 返回 `NO` |
+| A3-3 | 判定层参数上限由「必须无参」放开到 **≤2 参**（新体系判定方法带参），按真实参数个数生成对应 block |
+| A4 | `GCReportSplashClasses()` 只读探针：启动 + 1s/3s 各打印一次运行时 `WINSplash*` 类清单 |
+
+**★ 明确不碰展示层** — `presentSplashScreenWithData:` 带 4 个 completion block
+（filteringSuccess / filteringFailure / playFinish / animationFinish），置空会让启动流程
+永远等不到回调而卡白屏/黑屏。这与 §L 记录的黑屏事故同源，故只在「判定层」返回 NO。
+
+#### M4. 风险面实测（非推测）
+
+对 17.01.0 的 `__objc_methname` 逐条核对：旧的 8 个「展示」selector 与 7 个「判定」selector
+**全部 0 命中** → 新版最多只可能挂上那 **2 个新判定方法**（各自只被一个类实现），
+展示层与主窗口路径完全不会被触及。
+
+若真机日志出现 `splash guard hooked 0` 且广告仍在 → 说明判定方法归属类不在 `WINSplash`
+前缀内，按 A4 探针日志做第二轮（**只动判定层**）。
+
+#### M5. 顺带修掉的打包缺陷
+
+`mkdeb.py` 用 `rstrip('\n')` 生成 control → **控制文件缺末尾换行**，
+`dpkg-deb -f / -c / -e` 报 `end of file during value of field 'Installed-Size'`。
+0.7.3 / 0.7.5 的包同样有此病（此前只用 Python 侧核对字段，未过 `dpkg-deb`）。
+0.8.0 改为 `rstrip('\n') + '\n'`，现在三种核验全部通过。
+
+#### M6. 构建踩坑（务必记住）
+
+`clang … | head -30` 会因 **SIGPIPE** 把 clang 打断 —— **产物没生成，却看不出任何错误**
+（`head` 截断输出后关闭管道，clang 收到 SIGPIPE 死在写文件之前）。
+正确姿势：加 `-w` 抑制警告，并把 stderr 重定向到文件后再检查。
+
+#### M7. 验证门禁（0.8.0 构建后实测）
+
+```
+HookVoid 总数 26 ｜ 重复钩子对 0
+关键 selector 14/14 命中 ｜ 涉及类 16 个
+产物实存：0.8.0 / app version accepted / WINSplash classes at runtime /
+         shouldSplashScreenShow:launchCheck: / isLocalSplashDataCanExposure
+deb：dpkg-deb -f / -c / -e 全通过；载荷路径 rootless=/var/jb/… arm64、RootHide=/Library/… arm64e
+```
+
+**抽类名表的方法（可复用）** — `python3 + lief` 取 `__objc_classname` / `__objc_methname`
+节区，NUL 切分导出 txt，再 `rg` 比对两版差异。比 `strings` 精确，能直接判定
+「某个类 / selector 在新版是否还存在」。
 
 ## 三、跨版本验证汇总
 
@@ -552,7 +657,7 @@ deb 打包用 `scripts/mkdeb-local.py`（Python 写 `ar` 归档，不需要 `dpk
 >    输出头的 cpusubtype 写成 0。** dyld 用
 >    `(cpusubtype & ~CPU_SUBTYPE_MASK) == CPU_SUBTYPE_ARM64E` 判断「是否为 arm64e 映像」，
 >    判错就会把认证指针按普通 arm64 处理 —— 第一次走 `__got` 槽就崩。
->    所以签名之后必须用 `tools/fixarch.py <dylib> 2` 修正 subtype **并重算签名页哈希**
+>    所以签名之后必须用 `scripts/fixarch.py <dylib> 2` 修正 subtype **并重算签名页哈希**
 >    （cpusubtype 在 header 偏移 8，落在第 0 页里）。
 >
 > ```
@@ -562,7 +667,7 @@ deb 打包用 `scripts/mkdeb-local.py`（Python 写 `ar` 归档，不需要 `dpk
 >   -Wl,-install_name,@rpath/GaodeClean.dylib -Wl,-adhoc_codesign \
 >   -framework UIKit -framework Foundation -framework CoreGraphics -framework QuartzCore \
 >   src/GaodeClean.m -o GaodeClean-arm64e.dylib
-> python3 tools/fixarch.py GaodeClean-arm64e.dylib 2
+> python3 scripts/fixarch.py GaodeClean-arm64e.dylib 2
 > ```
 >
 > 校验：`csverify.py` 应报「页哈希 45/45 通过」；头部 cpusubtype=2、cputype=0x100000c。
@@ -581,14 +686,15 @@ deb 打包用 `scripts/mkdeb-local.py`（Python 写 `ar` 归档，不需要 `dpk
 
 装完 `sbreload` 或重启用户空间。
 
-### 本包产物（0.7.1）
+### 本包产物（0.8.0）
 
 | 文件 | 说明 |
 |:--|:--|
-| `dist/GaodeClean-arm64.dylib` | 181,312 B · arm64 · chained fixups + adhoc 签名 |
-| `dist/GaodeClean-arm64e.dylib` | 182,640 B · arm64e · dyld_info 绑定 + adhoc 签名 |
-| `dist/com.jibamao.gaodeclean_0.7.3_iphoneos-arm64.deb` | rootless |
-| `dist/com.jibamao.gaodeclean_0.7.3_iphoneos-arm64e-roothide.deb`（arm64e） | RootHide |
+| `dist/GaodeClean-arm64.dylib` | 182,464 B · arm64 · chained fixups + adhoc 签名（**TrollFools 注入用**） |
+| `dist/GaodeClean-arm64e.dylib` | 183,856 B · arm64e · dyld_info 绑定 + adhoc 签名 |
+| `dist/com.jibamao.gaodeclean_0.8.0_iphoneos-arm64.deb` | rootless（载荷 `/var/jb/Library/MobileSubstrate/…`） |
+| `dist/com.jibamao.gaodeclean_0.8.0_iphoneos-arm64e-roothide.deb` | RootHide（载荷 `/Library/…`，`Depends` 含 `oldabi`） |
+| `dist/GaodeClean-0.8.0-Source.zip` | 完整源码（src + control + scripts + tools） |
 
 ### 每次发版自检清单
 
@@ -637,8 +743,10 @@ cmp <(ar p dist/*.deb data.tar.gz | tar xzO ./var/jb/.../GaodeClean.dylib) dist/
 0.6.9   快修窗不再空转
 0.7.1   开屏广告移除
 0.7.2   常驻开销收敛
-0.7.3   滚动热路径收敛                    ← 当前（采用）
+0.7.3   滚动热路径收敛
 0.7.4   ✗ 后台/静默期收敛（真机有问题，已回退）
+0.7.5   启动黑屏根因修复（窗口拉黑保险丝 + 有界化）
+0.8.0   高德 17.01.0 适配：版本白名单 + WINSplashScreen 判定层    ← 当前（采用）
 ```
 
 ---
