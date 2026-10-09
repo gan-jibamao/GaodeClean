@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-GaodeClean 打包 —— 两种架构分别对应：
+GaodeClean 0.7.1 打包 —— 两种架构分别对应：
   rootless / Dopamine  → arm64  切片 + Architecture: iphoneos-arm64
   RootHide             → arm64e 切片 + Architecture: iphoneos-arm64e
 
@@ -18,7 +18,7 @@ OUT = '/tmp/gcbuild/dist'
 PLIST = '/tmp/gclean/GaodeClean.plist'
 CTRL = '/tmp/gcbuild/control'
 LIBSUB = 'Library/MobileSubstrate/DynamicLibraries'
-VERSION = '0.7.3'
+VERSION = '0.8.0'
 
 # (dylib 路径, deb 架构名, 是否 RootHide)
 TARGETS = [
@@ -52,7 +52,9 @@ def ar_member(name, data, out):
 
 
 def control_text(arch, roothide):
-    txt = open(CTRL, encoding='utf-8').read().rstrip('\n')
+    # 0.8.0 修复：dpkg 严格要求控制文件以换行结尾（rstrip 后不补会让
+    # dpkg-deb/Sileo 报 "end of file during value of field"）。
+    txt = open(CTRL, encoding='utf-8').read().rstrip('\n') + '\n'
     txt = txt.replace('Architecture: iphoneos-arm64', 'Architecture: ' + arch)
     if roothide:
         txt = txt.replace('mobilesubstrate', 'mobilesubstrate, oldabi')

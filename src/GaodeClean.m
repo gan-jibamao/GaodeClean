@@ -4,7 +4,7 @@
 //      Author  : jibamao
 //      Repo    : https://gan-jibamao.github.io/
 //      Section : jibamao-Tweaks
-//      Target  : AMap / 高德地图  com.autonavi.amap  17.00.2
+//      Target  : AMap / 高德地图  com.autonavi.amap  17.00.2 / 17.01.0
 //
 //  This tweak changes UI only. No network interception or modification of the IPA.
 // ============================================================================
@@ -18,7 +18,7 @@
 static NSString *const kGCAuthor      = @"jibamao";
 static NSString *const kGCRepo        = @"https://gan-jibamao.github.io/";
 static NSString *const kGCSection     = @"jibamao-Tweaks";
-static NSString *const kGCVersion     = @"0.7.3";
+static NSString *const kGCVersion     = @"0.8.0";
 static NSString *const kGCSignature   = @"GaodeClean by jibamao";
 
 // 对外签名（供 log / 诊断 / 二次核对使用）
@@ -31,6 +31,17 @@ const char *GaodeCleanSignature(void) {
                  kGCAuthor.UTF8String, kGCRepo.UTF8String);
     });
     return buf;
+}
+
+// 0.8.0：迁移边界缓存键随「当前已识别版本」变化，跨版本不再串味
+static NSString *GCBoundaryKey(void) {
+    static NSString *k;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        NSString *v = [NSBundle.mainBundle objectForInfoDictionaryKey:@"CFBundleShortVersionString"] ?: @"?";
+        k = [NSString stringWithFormat:@"GaodeClean.MineBoundary.%@", v];
+    });
+    return k;
 }
 
 // This tweak changes UI only. No network interception or modification of the IPA.
@@ -73,8 +84,11 @@ static __weak UIWindow *GCCMainWindow;
 static __weak UIWindow *GCCSplashWindow;      // 已识别的广告窗口，之后拒绝其可见
 static __weak UIView   *GCCSplashView;        // 已识别的广告视图
 static NSInteger GCCSplashTicks;              // 兜底扫描剩余拍数（有界）
+static int GCCSplashUntil;                    // 0.7.5(B2)：窗口拉黑失效拍号（60s 后自动解除）
 static int TickCount;         // 0.7.2：主 tick 计数（降频兜底用）
 static BOOL CleanForce;       // 0.7.2：下一拍强制跑一次全量 CleanPage
+static int GCCActiveUntil;    // 0.7.4(A4)：活跃窗截止拍号（切页/新页面挂载后 TickCount+8）
+static void GCCArmTick(void); // 0.7.4(A3)：按前台/后台动态整备 tick 节拍
 static NSMutableDictionary<NSString *, NSNumber *> *AjxCache;  // 0.7.2：类名→是否 AJX
 static BOOL GCCSplashDone;
 static void InstallSplashAdGuard(void);
@@ -444,7 +458,7 @@ static void CleanPage(UIView *page, BOOL full) {
             // 0.6.8：这里原本会去读 Documents/GaodeClean-diagnostics.json（0.5.1 时代的诊断产物）。
             // 「正式包零诊断」之后那个文件永远不会再生成，这段读取只剩一次无意义的磁盘探测，
             // 而且它只在从「我的」页取不到 anchor 时触发 —— 正好是切页路径上。整段删除。
-            NSDictionary *cached = [NSUserDefaults.standardUserDefaults dictionaryForKey:@"GaodeClean.MineBoundary.17.00.2"];
+            NSDictionary *cached = [NSUserDefaults.standardUserDefaults dictionaryForKey:GCBoundaryKey()];
             CGFloat bottom = [cached[@"bottom"] doubleValue];
             if (fabs([cached[@"width"] doubleValue] - page.bounds.size.width) < 1 && bottom > 100 && bottom < page.bounds.size.height) {
                 state.reference = page;
@@ -475,9 +489,9 @@ static void CleanPage(UIView *page, BOOL full) {
         }
     }
     if (kind == 3 && boundary > 100 && boundary < page.bounds.size.height) {
-        NSDictionary *cached = [NSUserDefaults.standardUserDefaults dictionaryForKey:@"GaodeClean.MineBoundary.17.00.2"];
+        NSDictionary *cached = [NSUserDefaults.standardUserDefaults dictionaryForKey:GCBoundaryKey()];
         if (fabs([cached[@"bottom"] doubleValue] - boundary) > 0.5 || fabs([cached[@"width"] doubleValue] - page.bounds.size.width) > 0.5)
-            [NSUserDefaults.standardUserDefaults setObject:@{@"width":@(page.bounds.size.width), @"bottom":@(boundary)} forKey:@"GaodeClean.MineBoundary.17.00.2"];
+            [NSUserDefaults.standardUserDefaults setObject:@{@"width":@(page.bounds.size.width), @"bottom":@(boundary)} forKey:GCBoundaryKey()];
     }
     BindBoundary(page, anchor, peer, boundary, state);
     if (!state.reportedMatch) {
@@ -580,11 +594,10 @@ static void Schedule(void) {
         // （历史记录里那条「NSTimer/GCD timer 都在 ~1.35s 停跑」是同一个坑。）
         // 修法：不 return，而是「不活跃时不干活、但照样续链」；并用 dispatch_after 兜底续链，
         // 即使某一拍真的返回了，1 秒后也会重新接上。
-        if (UIApplication.sharedApplication.applicationState != UIApplicationStateActive) {
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 100 * NSEC_PER_MSEC),
-                           dispatch_get_main_queue(), ^{ Schedule(); });
-            return;
-        }
+        // 0.7.4(A2)：删掉 100ms 自持重试链。它是 NSTimer 时代的补丁（当年 tick 自己续链，
+        // 一旦 return 就永久停跑），而 0.6.4 起链已由 200ms 的 GCD ScheduleTimer 驱动，
+        // 不会因提前返回而断。重试链只剩副作用：非活跃时额外 10 次/秒空转唤醒。
+        if (UIApplication.sharedApplication.applicationState != UIApplicationStateActive) return;
         TickCount++;
         for (id tabs in TabControllers.allObjects) {
             id selected = ObjectGetter(tabs, @"selectedViewControl");
@@ -607,12 +620,14 @@ static void Schedule(void) {
         for (UIView *page in Pages.allObjects) CleanPage(page, fullClean);
         // 0.7.3：三个周期扫描降到 400ms（白雾是持续态不是闪现，
         // 源头修复 0.5.8/0.5.9/0.5.50 已掐死它的出现条件，这里只是兜底）
-        if (TickCount % 2 == 0) {
+        // 0.7.4(A1)：0.7.3 用「注释行 + SweepFogOverlay 行」做锚点替换新块时，
+        // 旧的两行调用（带对齐注释）没被一并删掉 -> 同一个 400ms 窗口内各跑两遍。
+        // 0.7.4(A4)：白雾/可滑手势都是「切页、新页面挂载」那一瞬间的产物，
+        // 加活跃窗门控 —— 事件后 8 拍（1.6s）内每 2 拍扫，静默期降到每 6 拍（1.2s）。
+        if (TickCount % (TickCount < GCCActiveUntil ? 2 : 6) == 0) {
             SweepFogOverlay();
             StripSlidablePan();
             StripTabBarGestures();
-            StripSlidablePan();                  // 每 2 拍，节点上限 1200
-            StripTabBarGestures();               // 每 2 拍，节点上限 400
         }
         // 0.4.41 冷启动兜底：定位超时(约 2.4s)仍未完成则强制显示，避免卡在隐藏态
         ColdTicks++;
@@ -654,11 +669,30 @@ static void Schedule(void) {
         SplashAdTick();
         // 0.6.7：底栏「上拉发现」提示的周期通道 —— 引导态常常晚于最后一次布局才落地，
         // 只挂 layout 就是这个 bug 偶发的根因。扫描范围只有底栏子树，开销可忽略。
-        if (CachedTabBar) SweepTabBarHints(CachedTabBar);
+        // 0.7.4(A6)：「上拉发现」是 200ms~1s 级的异步引导态，5Hz 采样过剩，降到 2.5Hz。
+        if (CachedTabBar && TickCount % 2 == 0) SweepTabBarHints(CachedTabBar);
 #if GCC_DEVICE_TEST
         RunDeviceCheck();
 #endif
     });
+}
+
+// 0.7.4(A3)：按前台/后台动态整备 tick 节拍。
+// 高德带导航后台模式，切后台后主线程仍在跑 —— 原来的 200ms 定时器会 5 次/秒
+// 空转唤醒（每拍都在 applicationState != Active 分支直接 return）。UI 清理在后台
+// 毫无意义，所以后台拉长到 2s（仅作保险），回前台由 DidBecomeActive 立即恢复 200ms。
+static void GCCArmTick(void) {
+    if (!ScheduleTimer) {
+        ScheduleTimer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, dispatch_get_main_queue());
+        dispatch_source_set_event_handler(ScheduleTimer, ^{ Schedule(); });
+        dispatch_resume(ScheduleTimer);
+    }
+    BOOL active = (UIApplication.sharedApplication.applicationState == UIApplicationStateActive);
+    // 0.7.5(B3)：起拍改回 +200ms（0.7.4 用的是 NOW+0，等于 didBecomeActive 时立即起拍，
+    // 会把第一拍推进 App 的 UI 构建期 —— 正是踩中「主窗口未定就拉黑」地雷的推手）。
+    // A3 的后台省电收益不受影响：间隔仍是 200ms / 2000ms。
+    dispatch_source_set_timer(ScheduleTimer, dispatch_time(DISPATCH_TIME_NOW, 200 * NSEC_PER_MSEC),
+                              (active ? 200 : 2000) * NSEC_PER_MSEC, 20 * NSEC_PER_MSEC);
 }
 
 static void Capture(id element) {
@@ -1354,12 +1388,17 @@ static void AlignOneWidget(UIView *bar, UIView *w, CGFloat barTop) {
 static void AlignWeatherRowTick(UIWindow *win) {
     if (!win) return;
     static __weak UIView *Row = nil;
+    static int RescanTick = -4;   // -4：保证首次调用一定重扫
     BOOL stale = (!Row || !Row.window);
     if (!stale) {
         CGRect r0 = [Row convertRect:Row.bounds toView:win];
         if (r0.size.width < 150 || r0.size.width > 360 || r0.size.height >= 40) stale = YES;
     }
+    // 0.7.4(A6)：缓存失效时原本**每拍**都做一次 ≤2000 节点全窗 BFS（切页后连做几拍）。
+    // 节流到每 4 拍（800ms）最多重扫一次。
+    if (stale && TickCount - RescanTick < 4) return;
     if (stale) {
+        RescanTick = TickCount;
         NSMutableArray *q = [NSMutableArray arrayWithObject:win];
         for (NSUInteger i = 0; i < q.count && q.count < 2000; i++) {
             UIView *v = q[i];
@@ -1578,7 +1617,7 @@ static void WatchHomeTransition(id tabs) {
     BOOL prevHome = [NSStringFromClass([prev class]) isEqualToString:@"WINAmapHomeControl"];
     if (home && !prevHome && ColdTicks >= 15) KickBarFixFor(0.32);
     // 0.7.2：切页 = 内容必然重排 → 强制全量 CleanPage
-    if (prevHome != home) CleanForce = YES;
+    if (prevHome != home) { CleanForce = YES; GCCActiveUntil = TickCount + 8; }
 }
 
 // 只走底栏子树：节点数 20-40，无 convertRect:，无窗口遍历。200ms 一次也无所谓。
@@ -1751,6 +1790,24 @@ static BOOL GCCIsSplashAd(UIView *v, UIWindow *win) {
     return GCCIsFullScreen(v);
 }
 
+// 0.7.5(B1)：窗口级拉黑前的二次确认。
+// 原来是「只靠 w == GCCMainWindow 排除」，而 GCCMainWindow 只在 WINTabBar 首次
+// layoutSubviews 时才惰性赋值 —— 在那之前它是 nil，排除条件恒真失效，App 主窗口
+// 会落进可拉黑范围。一旦被拉黑，setHidden: 钩子会**永久**拒绝它重新显示
+// （makeKeyAndVisible 也被拦），表现就是「启动黑屏，必须杀后台重开才正常」。
+// 高德自己的启动屏 APSplashScreenViewController 类名恰好含 "splash"，
+// 正落在 GCCHasAdKeyword 词表里 —— 这条路径是真实可达的。
+// 原则：宁可漏一个开屏广告，也绝不能拉黑 App 的 UI 宿主。
+static BOOL GCCWindowIsAppHost(UIWindow *w) {
+    if (!w) return YES;
+    if (GCCMainWindow == nil) return YES;                    // ★ 保险丝：主窗口未定，谁都不许拉黑
+    if (w == GCCMainWindow) return YES;
+    if (w == UIApplication.sharedApplication.keyWindow) return YES;
+    UIViewController *root = w.rootViewController;           // 承载 App 根 VC 的窗口不是广告窗口
+    if (root && !GCCHasAdKeyword(NSStringFromClass(root.class))) return YES;
+    return NO;
+}
+
 // 处理命中：隐藏广告视图；若它住在一个**独立广告窗口**里（且不是主窗口），连窗口一起收掉。
 static void GCCHideSplashAd(UIView *v, NSString *why) {
     if (!v) return;
@@ -1760,9 +1817,11 @@ static void GCCHideSplashAd(UIView *v, NSString *why) {
     NSLog(@"[GaodeClean] splash ad hidden [%@] view=%@ win=%@",
           why, NSStringFromClass(v.class), NSStringFromClass(w.class));
 
-    if (w && w != GCCMainWindow) {
+    // 0.7.5(B1)：同上的二次确认 —— 只有确认不是 App UI 宿主才连窗口一起收
+    if (w && !GCCWindowIsAppHost(w)) {
         // 该窗口里除了广告没有别的可交互内容 → 直接收掉
         GCCSplashWindow = w;
+        GCCSplashUntil = TickCount + 300;                    // 0.7.5(B2)
         w.hidden = YES;
     }
     GCCSplashDone = YES;
@@ -1772,9 +1831,16 @@ static void GCCHideSplashAd(UIView *v, NSString *why) {
 // 主窗口之外的、类名像广告的窗口 —— 也是强信号
 static void GCCHideAdWindows(void) {
     for (UIWindow *w in UIApplication.sharedApplication.windows) {
-        if (w == GCCMainWindow || w.hidden) continue;
+        if (w.hidden) continue;
         if (!GCCHasAdKeyword(NSStringFromClass(w.class))) continue;
+        // 0.7.5(B1)：主窗口未确定 / 该窗口是 App UI 宿主 → 绝不拉黑
+        if (GCCWindowIsAppHost(w)) {
+            NSLog(@"[GaodeClean] ad-window blacklist SKIPPED (App host): %@",
+                  NSStringFromClass(w.class));
+            continue;
+        }
         GCCSplashWindow = w;
+        GCCSplashUntil = TickCount + 300;                    // 0.7.5(B2)：60s 后自动失效
         w.hidden = YES;
         GCCSplashDone = YES;
         NSLog(@"[GaodeClean] splash ad window hidden: %@", NSStringFromClass(w.class));
@@ -1783,9 +1849,15 @@ static void GCCHideAdWindows(void) {
 
 // 通道 ③：兜底扫描。只在启动 / 回前台后的有界窗口内跑，且有节点上限。
 static void SplashAdTick(void) {
+    // 0.7.4(A5)：15s 有界窗口结束后，窗口兜底降为每 10 拍（2s）。
+    // 后置的广告窗口不靠这条路径 —— CNG 选择器挂钩 + 窗口 addSubview 钩子已覆盖，
+    // 原来即使 GCCSplashTicks 归零也仍每拍遍历所有窗口做类名匹配。
+    if (GCCSplashTicks <= 0) {
+        if (TickCount % 10 != 0) return;
+    } else {
+        GCCSplashTicks--;
+    }
     GCCHideAdWindows();
-    if (GCCSplashTicks <= 0) return;
-    GCCSplashTicks--;
     for (UIWindow *w in UIApplication.sharedApplication.windows) {
         if (w == GCCMainWindow || w.hidden) continue;
         // 只下潜两层、上限 200 个节点 —— 不做全树 BFS（0.6.7a 的教训）
@@ -1835,10 +1907,20 @@ static BOOL GCCIsAdNamespace(NSString *name) {
     static NSArray<NSString *> *prefixes;
     static dispatch_once_t once;
     dispatch_once(&once, ^{
+        // 17.00.2 = 阿里聚合广告（CNG 命名空间）
+        // 17.01.0 = 自研原生 WINSplashScreen*（CNG 与第三方 SDK 已被高德整体移除，
+        //           实测 BUAdSDK/GDTMobSDK/KSAdSDK/BaiduMobAd 在新包中 0 命中）
         prefixes = @[@"CNGLaunchSplash", @"CNGSplashAds", @"CNGSplash", @"CNBSplash",
                      @"CNGBaseThirdPartySDKSplashAds", @"CNGDoubleSplash",
                      @"CNGMSBaseSplashAd", @"CNGMSDirectSplashAd", @"CNGMSS2SBiddingSplashAd",
-                     @"CNGMSSplashAdsManager", @"CNGCSJ", @"CNGAdSplash"];
+                     @"CNGMSSplashAdsManager", @"CNGCSJ", @"CNGAdSplash",
+                     // 0.8.0 新增：17.01.0 自研开屏广告体系
+                     @"WINSplashScreen", @"WINSplashFilter", @"WINSplashPreFilter",
+                     @"WINSplashFrequency", @"WINSplashFrequecy", @"WINSplashScene",
+                     @"WINSplashCloud", @"WINSplashCreative", @"WINSplashRealtime",
+                     @"WINSplashStandard", @"WINSplashAnimator", @"WINSplashArcss",
+                     @"WINSplashSpeed", @"WINSplashActivity", @"WINSplashRoll",
+                     @"WINSplashShake"];
     });
     for (NSString *p in prefixes) if ([name hasPrefix:p]) return YES;
     return NO;
@@ -1870,7 +1952,13 @@ static void GCCHookAdClasses(void) {
                                       @"beginToShowNativeSplashAd"];
     // 「判定」——返回 NO。只接受返回 BOOL/char 的。
     NSArray<NSString *> *boolSels = @[@"isSplashAd", @"hasSplash", @"isShowSplash", @"isSplash",
-                                      @"isSplashExist", @"isSplashAdDidLoad", @"isSplashImageAd"];
+                                      @"isSplashExist", @"isSplashAdDidLoad", @"isSplashImageAd",
+                                      // 0.8.0：17.01.0 自研体系（语义明确：返回 NO = 不展示广告）
+                                      // ★ 不碰 present* 展示层 —— 它带 4 个 completion block，
+                                      //   置空会让启动流程等不到 playFinish/animationFinish，
+                                      //   高概率卡白屏（0.7.4 黑屏事故同源）。
+                                      @"shouldSplashScreenShow:launchCheck:",
+                                      @"isLocalSplashDataCanExposure"];
     NSMutableArray<NSString *> *hooked = [NSMutableArray array];
 
     for (int i = 0; i < count; i++) {
@@ -1910,8 +1998,17 @@ static void GCCHookAdClasses(void) {
             NSMethodSignature *sig = [NSMethodSignature signatureWithObjCTypes:t];
             char r = sig.methodReturnType[0];
             if (r != 'B' && r != 'c') continue;                     // 必须返回 BOOL/char
-            if (sig.numberOfArguments != 2) continue;               // 必须无参
-            Replace(cls, sel, imp_implementationWithBlock(^(__unused id self) { return (BOOL)NO; }), t);
+            // 0.8.0(A3-3)：新版 WINSplashScreen* 的判定方法**带参**
+            // （shouldSplashScreenShow:launchCheck: 两参），旧版「必须无参」会让它们
+            // 一律挂不上。放开到 ≤2 参，并按真实参数个数生成对应 block
+            // —— block 签名必须与方法一致，否则调用约定不匹配（0.6.7a 的教训）。
+            NSUInteger na = sig.numberOfArguments;
+            IMP no = nil;
+            if (na == 2)      no = imp_implementationWithBlock(^(__unused id self) { return (BOOL)NO; });
+            else if (na == 3) no = imp_implementationWithBlock(^(__unused id self, __unused id a1) { return (BOOL)NO; });
+            else if (na == 4) no = imp_implementationWithBlock(^(__unused id self, __unused id a1, __unused id a2) { return (BOOL)NO; });
+            if (!no) continue;                                      // 参数更多就不动
+            Replace(cls, sel, no, t);
             [hooked addObject:[NSString stringWithFormat:@"%@-%@", cn, name]];
         }
     }
@@ -1920,8 +2017,34 @@ static void GCCHookAdClasses(void) {
                             (unsigned long)hooked.count, [hooked componentsJoinedByString:@", "]);
 }
 
+// ---------------------------------------------------------------------------
+//  0.8.0(A4)：只读探针
+//  新版（17.01.0）开屏广告走自研 WINSplashScreen*。静态只能证明「类存在」，
+//  运行时到底哪条路径真被调用必须真机取证。这里只打印、不挂钩、不改行为：
+//  把这份类清单与 GCCHideSplashAd 已有的「兜底命中」日志对照，即可定位下一轮
+//  精确拦截的靶子（届时只动判定层，绝不动展示层）。
+// ---------------------------------------------------------------------------
+static void GCReportSplashClasses(void) {
+    int n = objc_getClassList(NULL, 0);
+    if (n <= 0) return;
+    Class *all = (Class *)malloc(sizeof(Class) * (size_t)n);
+    if (!all) return;
+    n = objc_getClassList(all, n);
+    NSMutableArray<NSString *> *hit = [NSMutableArray array];
+    for (int i = 0; i < n; i++) {
+        Class c = all[i];
+        if (!c) continue;
+        NSString *cn = NSStringFromClass(c);
+        if ([cn hasPrefix:@"WINSplash"] || [cn hasPrefix:@"WINRealtimeSplash"]) [hit addObject:cn];
+    }
+    free(all);
+    NSLog(@"[GaodeClean] WINSplash classes at runtime: %lu [%@]",
+          (unsigned long)hit.count, [hit componentsJoinedByString:@","]);
+}
+
 static void InstallSplashAdGuard(void) {
     GCCHookAdClasses();
+    GCReportSplashClasses();          // 0.8.0(A4)：只读
     ReArmSplashGuard();
 
     // 通道 ①：广告视图被加进窗口的瞬间。钩 UIWindow 而不是 UIView ——
@@ -1970,7 +2093,10 @@ static void InstallSplashAdGuard(void) {
             IMP o = method_getImplementation(m);
             const char *t = method_getTypeEncoding(m);
             Replace(UIWindow.class, sel, imp_implementationWithBlock(^(UIWindow *self, BOOL hidden) {
-                if (!hidden && self == GCCSplashWindow) hidden = YES;
+                // 0.7.5(B2)：拦截有界化 —— 即便误判，60s 后自动失效；
+                // 且窗口一旦成为 keyWindow / 是 App UI 宿主，立即解除。
+                if (!hidden && self == GCCSplashWindow
+                    && TickCount < GCCSplashUntil && !GCCWindowIsAppHost(self)) hidden = YES;
                 ((void (*)(id, SEL, BOOL))o)(self, sel, hidden);
             }), t);
         }
@@ -1980,7 +2106,9 @@ static void InstallSplashAdGuard(void) {
             IMP o2 = method_getImplementation(m2);
             const char *t2 = method_getTypeEncoding(m2);
             Replace(UIWindow.class, mk, imp_implementationWithBlock(^(UIWindow *self) {
-                if (self == GCCSplashWindow) return;          // 广告窗口不许成为 key
+                // 0.7.5(B2)：同上的有界化
+                if (self == GCCSplashWindow
+                    && TickCount < GCCSplashUntil && !GCCWindowIsAppHost(self)) return;
                 ((void (*)(id, SEL))o2)(self, mk);
             }), t2);
         }
@@ -2000,6 +2128,7 @@ static void InstallSplashAdGuard(void) {
                        dispatch_get_main_queue(), ^{
             GCCHookAdClasses();
             ReArmSplashGuard();
+            GCReportSplashClasses();  // 0.8.0(A4)：懒注册的类这时才可能出现
         });
     }
 }
@@ -2361,8 +2490,22 @@ static void InstallMinimalHome(void) {
     });
 }
 
+// ---------------------------------------------------------------------------
+//  0.8.0：版本白名单
+//  0.7.5 是 isEqual:@"17.00.2" 硬匹配单一版本 —— 高德 2026-10-09 升到 17.01.0 后
+//  条件为假，构造函数直接 return，**一个钩子都不装**，现场表现就是「完全没效果」。
+//  护栏不能写成一刀切自杀：改成白名单，每真机验证一个版本加一条。
+// ---------------------------------------------------------------------------
+static NSArray<NSString *> *GCSupportedVersions(void) {
+    static NSArray<NSString *> *v;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ v = @[@"17.00.2", @"17.01.0"]; });
+    return v;
+}
+
 __attribute__((constructor)) static void Initialize(void) {
     @autoreleasepool {
+        NSString *appVer = [NSBundle.mainBundle objectForInfoDictionaryKey:@"CFBundleShortVersionString"] ?: @"?";
         // ---- jibamao 个人标识：启动即打标（可在 Console / 崩溃日志中核对）----
         NSLog(@"[GaodeClean] %@", kGCSignature);
         NSLog(@"[GaodeClean] author=%@ section=%@ repo=%@ version=%@",
@@ -2370,10 +2513,12 @@ __attribute__((constructor)) static void Initialize(void) {
         NSLog(@"[GaodeClean] signature=%s", GaodeCleanSignature());
 
         if (![NSBundle.mainBundle.bundleIdentifier isEqualToString:@"com.autonavi.amap"]) return;
-        if (![[NSBundle.mainBundle objectForInfoDictionaryKey:@"CFBundleShortVersionString"] isEqual:@"17.00.2"]) {
-            NSLog(@"[GaodeClean] unsupported app version; disabled");
+        if (![GCSupportedVersions() containsObject:appVer]) {
+            NSLog(@"[GaodeClean] unsupported app version %@ (supported: %@) - no hooks installed",
+                  appVer, [GCSupportedVersions() componentsJoinedByString:@", "]);
             return;
         }
+        NSLog(@"[GaodeClean] app version %@ accepted, installing hooks", appVer);
         AjxCache = [NSMutableDictionary dictionary];
         Pages = [NSHashTable weakObjectsHashTable];
         NearbyControllers = [NSHashTable weakObjectsHashTable];
@@ -2417,18 +2562,31 @@ __attribute__((constructor)) static void Initialize(void) {
         // 0.7.3：layoutSubviews 在滚动动画里**每帧都触发**，把它当事件源会让
         // fullClean 几乎每拍成立 —— 0.7.2 的 CleanPage 降频实际上被它抵消了。
         // 只保留 didMoveToWindow（真正的页面挂载）。
-        HookVoid(@"AJX3View", @"didMoveToWindow", ^(id page) { [Pages addObject:page]; CleanForce = YES; Schedule(); });
+        HookVoid(@"AJX3View", @"didMoveToWindow", ^(id page) {
+            [Pages addObject:page]; CleanForce = YES; GCCActiveUntil = TickCount + 8; Schedule();
+        });
         HookVoid(@"AJXWINNearbyViewControl", @"viewDidLoad", ^(id controller) { [NearbyControllers addObject:controller]; Schedule(); });
         HookVoid(@"WINTabBarControl", @"viewDidLoad", ^(id tabs) { [TabControllers addObject:tabs]; Schedule(); });
+        // 0.7.4(A3)：前台立即恢复 200ms 节拍并立刻跑一拍；后台把节拍拉长到 2s。
+        [NSNotificationCenter.defaultCenter addObserverForName:UIApplicationDidBecomeActiveNotification
+                                                        object:nil queue:NSOperationQueue.mainQueue
+                                                    usingBlock:^(__unused NSNotification *note) {
+            GCCArmTick();
+            Schedule();
+        }];
+        [NSNotificationCenter.defaultCenter addObserverForName:UIApplicationDidEnterBackgroundNotification
+                                                        object:nil queue:NSOperationQueue.mainQueue
+                                                    usingBlock:^(__unused NSNotification *note) {
+            GCCArmTick();
+        }];
         // Recheck after asynchronous cards and cell reuse; only attached target pages are scanned.
         dispatch_async(dispatch_get_main_queue(), ^{
             Schedule();
             // 0.4.44：GCD 计时器（模式无关，比 NSTimer 更可靠；NSTimer 在 1.4s 后曾停止）
-            ScheduleTimer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, dispatch_get_main_queue());
-            dispatch_source_set_timer(ScheduleTimer, dispatch_time(DISPATCH_TIME_NOW, 200 * NSEC_PER_MSEC), 200 * NSEC_PER_MSEC, 20 * NSEC_PER_MSEC);
-            dispatch_source_set_event_handler(ScheduleTimer, ^{ Schedule(); });
-            dispatch_resume(ScheduleTimer);
+            // 0.7.4(A3)：改为 GCCArmTick() 整备，节拍随前台/后台自动切换
+            GCCArmTick();
         });
-        NSLog(@"[GaodeClean] loaded 0.7.3 (17.00.2 only)");
+        NSLog(@"[GaodeClean] loaded %@ (supported: %@)", kGCVersion,
+              [GCSupportedVersions() componentsJoinedByString:@", "]);
     }
 }
