@@ -5,7 +5,7 @@
 
 | | |
 |:--|:--|
-| **当前版本** | `0.9.3` |
+| **当前版本** | `0.9.4` |
 | **Author** | **jibamao** — <https://gan-jibamao.github.io/> · Section `jibamao-Tweaks` |
 | **目标** | 高德地图 / AMap `com.autonavi.amap`（**版本限制已取消，全版本自适应**） |
 | **架构** | `arm64`（rootless / TrollFools 注入）· `arm64e`（RootHide） |
@@ -705,6 +705,29 @@ GCWeatherReleaseHeld 调用点 ×2：@0x101b4（AlignWeatherRow 尾）/ @0x15b1c
 GCWeatherHeldRows @0x211f0 读写均与设计一致
 ```
 
+### R. 源码审计优化（0.9.4，当前采用）
+
+**背景**：0.9.3 真机验收通过后，应「审计一下源码」指令做全量审计 + 优化。
+**方法**：`-Wall -Wextra` 全告警编译（14 条）逐条溯源 + 热点路径走查 + 死代码反查。
+
+**审计发现与处置（11 项，行为零变化）**：
+| 组 | 改动 | 证据 |
+|---|---|---|
+| A1 | 删 `IsBlurOverlayView` / `GCCColorStr` / `GCCScreenMapMean` | `-Wunused-function` 实证；白雾判定由 `GCCIsWhiteVeil` 承担 |
+| A2 | 删 `ConfineLegacyChrome` | 零引用 |
+| A3 | 删变量 `Cleaning` | 零引用 |
+| B1 | 主循环「探索/附近」数组 → `dispatch_once` 静态化 | 原 5Hz × 每拍重建 |
+| B2 | `NodeText` 取词数组静态化 | 节点扫描热路径 |
+| B3 | `IsHiddenMapPromo` 取词数组静态化 | layout 频率 |
+| B4 | 白雾日志限流（10 条） | 异常时防刷屏 |
+| C1 | `.windows` ×5 → `GCAllWindows()` 集中入口（内联后无符号） | 弃用警告集中 suppress |
+| C2 | `.keyWindow` → `w.isKeyWindow` | 属性替代 |
+| D | 版本 0.9.4 + control | — |
+
+**核心指标**：编译告警 **14 → 0**；4 个死符号 nm 实证消失；行为零变化。
+
+**有意不动（附理由）**：`NSStringFromClass` 42 处逐点比较（内部有类名缓存、每拍仅数次，收益小风险大）；tick 两轮 HomeHandlers 遍历合并（微收益、动行为顺序）。
+
 ## 三、跨版本验证汇总
 
 | 版本 | 项目 | 结果 |
@@ -810,15 +833,15 @@ deb 打包用 `scripts/mkdeb-local.py`（Python 写 `ar` 归档，不需要 `dpk
 
 装完 `sbreload` 或重启用户空间。
 
-### 本包产物（0.9.2）
+### 本包产物（0.9.4）
 
 | 文件 | 说明 |
 |:--|:--|
-| `dist/GaodeClean-arm64.dylib` | 182,608 B · arm64 · chained fixups + adhoc 签名（**TrollFools 注入用**） |
-| `dist/GaodeClean-arm64e.dylib` | 184,000 B · arm64e · dyld_info 绑定 + adhoc 签名 |
-| `dist/com.jibamao.gaodeclean_0.9.2_iphoneos-arm64.deb` | rootless（载荷 `/var/jb/Library/MobileSubstrate/…`） |
-| `dist/com.jibamao.gaodeclean_0.9.2_iphoneos-arm64e-roothide.deb` | RootHide（载荷 `/Library/…`，`Depends` 含 `oldabi`） |
-| `dist/GaodeClean-0.9.2-Source.zip` | 完整源码（src + control + scripts + tools） |
+| `dist/GaodeClean-arm64.dylib` | 183,472 B · arm64 · chained fixups + adhoc 签名（**TrollFools 注入用**） |
+| `dist/GaodeClean-arm64e.dylib` | 184,896 B · arm64e · dyld_info 绑定 + adhoc 签名 |
+| `dist/com.jibamao.gaodeclean_0.9.4_iphoneos-arm64.deb` | rootless（载荷 `/var/jb/Library/MobileSubstrate/…`） |
+| `dist/com.jibamao.gaodeclean_0.9.4_iphoneos-arm64e-roothide.deb` | RootHide（载荷 `/Library/…`，`Depends` 含 `oldabi`） |
+| `dist/GaodeClean-0.9.4-Source.zip` | 完整源码（src + control + scripts + tools） |
 
 ### 每次发版自检清单
 
@@ -874,7 +897,8 @@ cmp <(ar p dist/*.deb data.tar.gz | tar xzO ./var/jb/.../GaodeClean.dylib) dist/
 0.9.0   取消版本限制（修复 17.01.1「失效」；全版本自适应）
 0.9.1   拦截「上拉发现」引导 Lottie（17.01.1 GuideLottie 机制）
 0.9.2   冷启动搜索栏闪断修复（117ms 消失 → 0ms）
-0.9.3   冷启动天气行错误位置闪现修复（350ms 错位 → 0）              ← 当前（采用）
+0.9.3   冷启动天气行错误位置闪现修复（350ms 错位 → 0）
+0.9.4   源码审计优化（告警 14→0；死代码清除 + 热点轻量化）           ← 当前（采用）
 ```
 
 ---
