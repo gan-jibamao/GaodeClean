@@ -5,7 +5,7 @@
 
 | | |
 |:--|:--|
-| **当前版本** | `0.9.0` |
+| **当前版本** | `0.9.1` |
 | **Author** | **jibamao** — <https://gan-jibamao.github.io/> · Section `jibamao-Tweaks` |
 | **目标** | 高德地图 / AMap `com.autonavi.amap`（**版本限制已取消，全版本自适应**） |
 | **架构** | `arm64`（rootless / TrollFools 注入）· `arm64e`（RootHide） |
@@ -614,6 +614,41 @@ deb 双包 dpkg-deb：路径 /var/jb/… 与 /Library/… 分别正确、Version
 本次起改为**运行时自适应**：hook 目标不存在时各自静默跳过，版本判断彻底让位于
 「能力探测」。这与 0.6.x 的「不猜类名、按真实 selector 挂钩」同一哲学。
 
+### O. 「上拉发现」引导 Lottie 拦截（0.9.1，当前采用）
+
+**现象**：高德 17.01.1 上拉底栏时弹出「双箭头 + 上拉发现」（引导态，持续显示）。
+**破译**（视频 40+ 帧 + 主二进制全证据链）：
+17.01.1 的「上拉发现」走 **GuideLottie 渲染链**——
+服务端下发 lottieZipUrl → `WINTabBarItemDataLogic.updateTabBar:param:callback:` →
+`WINTabBarItemControl.updateGuideLottie:viewState:` → **`WINTabBarItem.updateGuideLottie:viewState:`（唯一渲染点）**
+创建 Lottie 动画（双箭头 morph + 文案）叠加到底栏 item，并用 `amap_setGuideMaskHidden:forViewState:`
+盖住原图标。
+
+**铁证**：
+- 埋点串 `tab guide lottie start play` / `tab guide lottie finished`（0x7f538a1）；
+- 「上拉发现」不在任何本地资源（UTF-8/UTF-16 全域扫过）→ 文案打包在 Lottie 资源里
+  → 0.6.7 的文本层扫描（SweepTabBarHints）对动画画面无效——这是 0.6.7 机制在新版失效的根因；
+- xref 全链：唯一渲染点 = `updateGuideLottie:viewState:`（无子类覆写）。
+
+**修复（0.9.1）**：
+| 项 | 改动 |
+|---|---|
+| O1 | 新增 `InstallTabBarGuideLottieBlock()`：空实现 `updateGuideLottie:viewState:` |
+| O2 | 签名校验（4 参数 + void）+ 限流日志 `blocked tab guide lottie`（20 条）|
+| O3 | `kGCVersion` → 0.9.1；control 同步 |
+
+**下游安全论证**：按压观察者对空 lottie 走 NSNull 分支（反汇编确认）；
+`WINTabBar.gestureRecognizerShouldBegin:` 里 `amap_hasActiveGuideLottie=NO` 时跳过引导手势。
+底栏点按/切换/上拉手势不受影响。
+
+**构建门禁（0.9.1 实测全绿）**：
+```
+反汇编核验拦截装载：4fa0(NSClassFromString)→4fb8(NSSelectorFromString)→4fd4(class_getInstanceMethod)
+→5020(imp_implementationWithBlock)→5038(class_addMethod/fallback setImplementation) 全链在案
+拦截 block 0xfaf0：cmp #0x13 限流 + NSLog + ret 不调用原实现
+arm64/arm64e 45/45 页哈希；deb 双包核验；集成 IPA 1418 条目唯一差异
+```
+
 ## 三、跨版本验证汇总
 
 | 版本 | 项目 | 结果 |
@@ -780,7 +815,8 @@ cmp <(ar p dist/*.deb data.tar.gz | tar xzO ./var/jb/.../GaodeClean.dylib) dist/
 0.7.4   ✗ 后台/静默期收敛（真机有问题，已回退）
 0.7.5   启动黑屏根因修复（窗口拉黑保险丝 + 有界化）
 0.8.0   高德 17.01.0 适配：版本白名单 + WINSplashScreen 判定层
-0.9.0   取消版本限制（修复 17.01.1「失效」；全版本自适应）            ← 当前（采用）
+0.9.0   取消版本限制（修复 17.01.1「失效」；全版本自适应）
+0.9.1   拦截「上拉发现」引导 Lottie（17.01.1 GuideLottie 机制）      ← 当前（采用）
 ```
 
 ---
