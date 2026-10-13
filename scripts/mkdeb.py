@@ -14,16 +14,16 @@ arm64e 的由来（重要）：
 import io, os, tarfile
 
 MTIME = 1759600000
-OUT = '/tmp/gcbuild/dist'
+OUT = '/tmp/gcbuild090/dist'
 PLIST = '/tmp/gclean/GaodeClean.plist'
-CTRL = '/tmp/gcbuild/control'
+CTRL = '/tmp/gcbuild090/control'
 LIBSUB = 'Library/MobileSubstrate/DynamicLibraries'
-VERSION = '0.8.0'
+VERSION = '0.9.0'
 
 # (dylib 路径, deb 架构名, 是否 RootHide)
 TARGETS = [
-    ('/tmp/gcbuild/GaodeClean.dylib',        'iphoneos-arm64',  False),
-    ('/tmp/gcbuild/GaodeClean-arm64e.dylib', 'iphoneos-arm64e', True),
+    ('/tmp/gcbuild090/GaodeClean.dylib',        'iphoneos-arm64',  False),
+    ('/tmp/gcbuild090/GaodeClean-arm64e.dylib', 'iphoneos-arm64e', True),
 ]
 
 

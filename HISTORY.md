@@ -5,9 +5,9 @@
 
 | | |
 |:--|:--|
-| **当前版本** | `0.8.0` |
+| **当前版本** | `0.9.0` |
 | **Author** | **jibamao** — <https://gan-jibamao.github.io/> · Section `jibamao-Tweaks` |
-| **目标** | 高德地图 / AMap `com.autonavi.amap` **17.00.2 / 17.01.0**（版本白名单） |
+| **目标** | 高德地图 / AMap `com.autonavi.amap`（**版本限制已取消，全版本自适应**） |
 | **架构** | `arm64`（rootless / TrollFools 注入）· `arm64e`（RootHide） |
 | **未采用** | `0.7.4`（真机有问题，已回退，见 §L） |
 
@@ -581,6 +581,39 @@ deb：dpkg-deb -f / -c / -e 全通过；载荷路径 rootless=/var/jb/… arm64�
 节区，NUL 切分导出 txt，再 `rg` 比对两版差异。比 `strings` 精确，能直接判定
 「某个类 / selector 在新版是否还存在」。
 
+### N. 高德 17.01.1「失效」修复 —— 取消版本限制（0.9.0，当前采用）
+
+**现象**：高德 2026-10-13 升级 17.01.1 后 GaodeClean 完全没效果。
+**根因**：0.8.0 的版本白名单 `{17.00.2, 17.01.0}` 不含 17.01.1 →
+构造函数撞闸门 `return`，**零钩子安装**（设计内的自禁护栏）。
+铁证：用户注入的 dylib 与 0.8.0 官方产物 21 个区段逐字节相同（唯一差异=TrollFools
+重签名），内含 `unsupported app version` 串与白名单仅两版本。
+
+**修复（0.9.0，应「取消版本限制」指令）**：
+| 项 | 改动 |
+|---|---|
+| N1 | 删除 `GCSupportedVersions()` 白名单函数及其注释块 |
+| N2 | 删除构造函数闸门判断，直接 `installing hooks` |
+| N3 | loaded 日志改 `(no version limit; appVer=%@)` |
+| N4 | `kGCVersion` → `0.9.0`；文件头 Target 行同步 |
+| N5 | deb control → Version 0.9.0；描述同步 |
+
+**17.01.1 数据面实测（全存活）**：16 主 hook 类 + 12 次要 hook 类 = **28/28**；
+全部关键 selector 命中；WINSplash* 63 类仍在。→ 无需任何类名/selector 适配。
+
+**构建门禁（0.9.0 实测全绿）**：
+```
+双架构编译零告警；unsupported app version 字符串 0 残留
+反汇编：Initialize 唯一早退 = bundleID 检查（设计保留）；版本早退路径消失
+arm64e cpusubtype=2 + 45/45 页哈希；arm64 45/45
+deb 双包 dpkg-deb：路径 /var/jb/… 与 /Library/… 分别正确、Version=0.9.0
+集成版 IPA：1418 条目无增缺、唯一差异=GaodeClean 条目、DTHbalSe/主程序 CRC 未动、testzip 无坏条目
+```
+
+**教训**：护栏（版本白名单）在自禁时是安全的，但每次高德升级都会「失效」——
+本次起改为**运行时自适应**：hook 目标不存在时各自静默跳过，版本判断彻底让位于
+「能力探测」。这与 0.6.x 的「不猜类名、按真实 selector 挂钩」同一哲学。
+
 ## 三、跨版本验证汇总
 
 | 版本 | 项目 | 结果 |
@@ -746,7 +779,8 @@ cmp <(ar p dist/*.deb data.tar.gz | tar xzO ./var/jb/.../GaodeClean.dylib) dist/
 0.7.3   滚动热路径收敛
 0.7.4   ✗ 后台/静默期收敛（真机有问题，已回退）
 0.7.5   启动黑屏根因修复（窗口拉黑保险丝 + 有界化）
-0.8.0   高德 17.01.0 适配：版本白名单 + WINSplashScreen 判定层    ← 当前（采用）
+0.8.0   高德 17.01.0 适配：版本白名单 + WINSplashScreen 判定层
+0.9.0   取消版本限制（修复 17.01.1「失效」；全版本自适应）            ← 当前（采用）
 ```
 
 ---

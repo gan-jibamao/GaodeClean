@@ -4,7 +4,7 @@
 
 | | |
 |:--|:--|
-| **版本** | `0.8.0`（适配高德 17.01.0；0.7.4 已回退，见 HISTORY §L） |
+| **版本** | `0.9.0`（取消版本限制，全版本自适应；0.7.4 已回退，见 HISTORY §L） |
 | **Author** | **jibamao** |
 | **Repo** | <https://gan-jibamao.github.io/> · Section `jibamao-Tweaks` |
 | **目标** | 高德地图 / AMap `com.autonavi.amap` **17.00.2 / 17.01.0**（版本白名单） |
@@ -32,6 +32,7 @@
 | 滚动热路径收敛 | 0.7.3 | ✅ |
 | 启动黑屏根因修复 | 0.7.5 | ✅ |
 | 适配高德 17.01.0（新开屏体系 + 版本闸门） | 0.8.0 | ✅ |
+| 取消版本限制（修复 17.01.1「失效」，全版本自适应） | 0.9.0 | ✅ |
 
 正式包**零诊断埋点** —— 不再写 `Documents/GaodeClean-*.txt`，源文件零磁盘 I/O。
 
@@ -138,7 +139,8 @@ arm64e 切片有两个坑：lld 不支持它的 `-fixup_chains`（改走经典 `
 0.7.3   滚动热路径收敛
 0.7.4   ✗ 后台/静默期收敛（真机有问题，已回退）
 0.7.5   启动黑屏根因修复
-0.8.0   高德 17.01.0 适配（版本白名单 + WINSplashScreen 判定层）   ← 当前（采用）
+0.8.0   高德 17.01.0 适配（版本白名单 + WINSplashScreen 判定层）
+0.9.0   取消版本限制（修复 17.01.1「失效」；全版本自适应）        ← 当前（采用）
 ```
 
 ---
@@ -155,4 +157,4 @@ strings GaodeClean.dylib | grep -i jibamao
 # GaodeClean by jibamao
 ```
 
- 启动输出：`[GaodeClean] GaodeClean v0.8.0 | jibamao | https://gan-jibamao.github.io/`
+ 启动输出：`[GaodeClean] GaodeClean v0.9.0 | jibamao | https://gan-jibamao.github.io/`

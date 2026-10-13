@@ -4,7 +4,7 @@
 //      Author  : jibamao
 //      Repo    : https://gan-jibamao.github.io/
 //      Section : jibamao-Tweaks
-//      Target  : AMap / 高德地图  com.autonavi.amap  17.00.2 / 17.01.0
+//      Target  : AMap / 高德地图  com.autonavi.amap  （版本限制已取消，全版本自适应）
 //
 //  This tweak changes UI only. No network interception or modification of the IPA.
 // ============================================================================
@@ -18,7 +18,7 @@
 static NSString *const kGCAuthor      = @"jibamao";
 static NSString *const kGCRepo        = @"https://gan-jibamao.github.io/";
 static NSString *const kGCSection     = @"jibamao-Tweaks";
-static NSString *const kGCVersion     = @"0.8.0";
+static NSString *const kGCVersion     = @"0.9.0";
 static NSString *const kGCSignature   = @"GaodeClean by jibamao";
 
 // 对外签名（供 log / 诊断 / 二次核对使用）
@@ -2491,17 +2491,12 @@ static void InstallMinimalHome(void) {
 }
 
 // ---------------------------------------------------------------------------
-//  0.8.0：版本白名单
-//  0.7.5 是 isEqual:@"17.00.2" 硬匹配单一版本 —— 高德 2026-10-09 升到 17.01.0 后
-//  条件为假，构造函数直接 return，**一个钩子都不装**，现场表现就是「完全没效果」。
-//  护栏不能写成一刀切自杀：改成白名单，每真机验证一个版本加一条。
+//  0.9.0：取消版本限制（应「取消版本限制」指令）
+//  历史：0.7.5 硬匹配 17.00.2 → 0.8.0 白名单 {17.00.2, 17.01.0}
+//  → 0.9.0 彻底移除版本判断，修复高德 17.01.1 升级后「失效」。
+//  安全网改为运行时自适应：hook 目标不存在时各自静默跳过（HookVoid/Replace
+//  内部均有存在性检查），未知版本照常安装全部可用钩子。
 // ---------------------------------------------------------------------------
-static NSArray<NSString *> *GCSupportedVersions(void) {
-    static NSArray<NSString *> *v;
-    static dispatch_once_t once;
-    dispatch_once(&once, ^{ v = @[@"17.00.2", @"17.01.0"]; });
-    return v;
-}
 
 __attribute__((constructor)) static void Initialize(void) {
     @autoreleasepool {
@@ -2513,12 +2508,7 @@ __attribute__((constructor)) static void Initialize(void) {
         NSLog(@"[GaodeClean] signature=%s", GaodeCleanSignature());
 
         if (![NSBundle.mainBundle.bundleIdentifier isEqualToString:@"com.autonavi.amap"]) return;
-        if (![GCSupportedVersions() containsObject:appVer]) {
-            NSLog(@"[GaodeClean] unsupported app version %@ (supported: %@) - no hooks installed",
-                  appVer, [GCSupportedVersions() componentsJoinedByString:@", "]);
-            return;
-        }
-        NSLog(@"[GaodeClean] app version %@ accepted, installing hooks", appVer);
+        NSLog(@"[GaodeClean] app version %@ - installing hooks (version limit removed)", appVer);
         AjxCache = [NSMutableDictionary dictionary];
         Pages = [NSHashTable weakObjectsHashTable];
         NearbyControllers = [NSHashTable weakObjectsHashTable];
@@ -2586,7 +2576,6 @@ __attribute__((constructor)) static void Initialize(void) {
             // 0.7.4(A3)：改为 GCCArmTick() 整备，节拍随前台/后台自动切换
             GCCArmTick();
         });
-        NSLog(@"[GaodeClean] loaded %@ (supported: %@)", kGCVersion,
-              [GCSupportedVersions() componentsJoinedByString:@", "]);
+        NSLog(@"[GaodeClean] loaded %@ (no version limit; appVer=%@)", kGCVersion, appVer);
     }
 }
