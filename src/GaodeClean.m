@@ -18,7 +18,7 @@
 static NSString *const kGCAuthor      = @"jibamao";
 static NSString *const kGCRepo        = @"https://gan-jibamao.github.io/";
 static NSString *const kGCSection     = @"jibamao-Tweaks";
-static NSString *const kGCVersion     = @"0.9.0";
+static NSString *const kGCVersion     = @"0.9.1";
 static NSString *const kGCSignature   = @"GaodeClean by jibamao";
 
 // 对外签名（供 log / 诊断 / 二次核对使用）
@@ -1664,6 +1664,52 @@ static void InstallTabBarHintHooks(void) {
     });
 }
 
+// ===========================================================================
+// 0.9.1 —— 「上拉发现」引导 Lottie 拦截（17.01.1 新机制）
+//
+// 17.01.1 的「上拉发现」不再走文本替换，而是 GuideLottie 渲染链：
+//   WINTabBarItemDataLogic.updateTabBar:param:callback:（服务端下发）
+//   → WINTabBarItemStateModel.guide = WINTabBarItemGuideModel{lottieZipUrl}
+//   → WINTabBarItemControl.updateGuideLottie:viewState:（转发）
+//   → WINTabBarItem.updateGuideLottie:viewState:   ★ 唯一渲染点
+//        创建 Lottie 动画（双箭头 morph + 文案）叠加到底栏 item 上，
+//        并用 amap_setGuideMaskHidden:forViewState: 盖住原图标。
+//
+// 证据（17.01.1 主二进制实测）：
+//   · 埋点字符串 "tab guide lottie start play" / "tab guide lottie finished"；
+//   · 「上拉发现」文案不在任何本地资源（UTF-8/UTF-16 全域查过）→ 打包在
+//     服务端下发的 Lottie 资源里 → 旧文本层扫描（0.6.7 SweepTabBarHints）失效；
+//   · 全调用链 xref：唯一渲染点 = WINTabBarItem.updateGuideLottie:viewState:
+//     （无子类覆写；其余方法都是它下游）。
+//
+// 处置：空实现渲染入口（不调用原实现）→ 不创建 Lottie、不叠加、不盖蒙版。
+//   下游均有空值兜底：按压观察者对空 lottie 走 NSNull 分支；
+//   WINTabBar.gestureRecognizerShouldBegin: 里 amap_hasActiveGuideLottie=NO
+//   时跳过引导手势。均安全，底栏点按/切换/上拉手势不受影响。
+// 真机验证：日志见 "blocked tab guide lottie"（限流 20 条）。
+// ===========================================================================
+static NSInteger GCGuideLottieBlocked = 0;
+
+static void InstallTabBarGuideLottieBlock(void) {
+    Class cls = NSClassFromString(@"WINTabBarItem");
+    SEL sel = NSSelectorFromString(@"updateGuideLottie:viewState:");
+    Method m = cls ? class_getInstanceMethod(cls, sel) : NULL;
+    if (!m) return;                      // 方法不存在（旧版/未来改名）：静默跳过
+    const char *t = method_getTypeEncoding(m);
+    NSMethodSignature *s = [NSMethodSignature signatureWithObjCTypes:t];
+    // 签名必须是 v@:@q（self,_cmd,guide,viewState）——不匹配就不动
+    if (s.numberOfArguments != 4 || s.methodReturnType[0] != 'v') return;
+    IMP imp = imp_implementationWithBlock(^(__unused id item, __unused id guide,
+                                            __unused NSInteger viewState) {
+        if (GCGuideLottieBlocked < 20) {
+            GCGuideLottieBlocked++;
+            NSLog(@"[GaodeClean] blocked tab guide lottie (viewState=%ld)", (long)viewState);
+        }
+        // 不调用原实现：整个「上拉发现」渲染链在此掐断
+    });
+    Replace(cls, sel, imp, t);
+}
+
 // 底栏的 legacy 玻璃（模糊/backdrop/chrome/shadow）被 app 在按下时放大到覆盖地图区，
 // 这就是残留的模糊带。只把「明显超出底栏范围」的收回到底栏矩形；不隐藏、不改 alpha。
 static void ConfineLegacyChrome(UIView *bar) {
@@ -2138,6 +2184,8 @@ static void InstallMinimalHome(void) {
     InstallSplashAdGuard();
     HookVoid(@"WINTabBar", @"layoutSubviews", ^(UIView *bar) { CachedTabBar = bar; CenterTabButtons(bar); SweepTabBarHints(bar); });
     InstallTabBarHintHooks();
+    // 0.9.1：「上拉发现」引导 Lottie 拦截（17.01.1 GuideLottie 机制）
+    InstallTabBarGuideLottieBlock();
 
     HookVoid(@"GDAmapHomeHandler", @"viewDidLoad", ^(id handler) {
         [HomeHandlers addObject:handler];
