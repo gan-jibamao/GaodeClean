@@ -18,7 +18,7 @@
 static NSString *const kGCAuthor      = @"jibamao";
 static NSString *const kGCRepo        = @"https://gan-jibamao.github.io/";
 static NSString *const kGCSection     = @"jibamao-Tweaks";
-static NSString *const kGCVersion     = @"0.9.3";
+static NSString *const kGCVersion     = @"0.9.4";
 static NSString *const kGCSignature   = @"GaodeClean by jibamao";
 
 // 对外签名（供 log / 诊断 / 二次核对使用）
@@ -51,7 +51,7 @@ static NSHashTable *NearbyControllers;
 static NSHashTable *TabControllers;
 static NSHashTable *HomeHandlers;
 static BOOL LayingOutHome;
-static BOOL Scheduled, Applying, Cleaning;
+static BOOL Scheduled, Applying;
 static CGFloat SearchBarSettledY;
 static BOOL SearchBarSettled;
 static NSInteger BarStableTicks;
@@ -233,7 +233,10 @@ static NSString *NodeText(UIView *v) {
     if ([v isKindOfClass:UILabel.class]) [s appendString:((UILabel *)v).text ?: @""];
     // AJX uses custom CoreText labels, not just UIKit UILabel.
     if (NodeIsAjx(v)) {
-        for (NSString *getter in @[@"attributedString", @"attributedText", @"text"]) {
+        static NSArray<NSString *> *getters;
+        static dispatch_once_t once;
+        dispatch_once(&once, ^{ getters = @[@"attributedString", @"attributedText", @"text"]; });
+        for (NSString *getter in getters) {
             id value = ObjectGetter(v, getter);
             if ([value isKindOfClass:NSAttributedString.class]) value = [value string];
             if ([value isKindOfClass:NSString.class] && [value length] < 160) [s appendFormat:@" %@", value];
@@ -608,7 +611,10 @@ static void Schedule(void) {
                 if (selected && ObjectGetter(item, @"viewControl") == selected) {
                     id title = ObjectGetter(item, @"title");
                     id label = ObjectGetter(item, @"accessibilityLabel");
-                    if ([@[@"探索", @"附近"] containsObject:title ?: @""] || [@[@"探索", @"附近"] containsObject:label ?: @""]) {
+                    static NSArray<NSString *> *nearbyTitles;
+                    static dispatch_once_t once;
+                    dispatch_once(&once, ^{ nearbyTitles = @[@"探索", @"附近"]; });
+                    if ([nearbyTitles containsObject:title ?: @""] || [nearbyTitles containsObject:label ?: @""]) {
                         [NearbyControllers addObject:selected];
                     }
                 }
@@ -722,6 +728,16 @@ static void Capture(id element) {
     Schedule();
 }
 
+// 0.9.4：统一窗口枚举入口（审计统一处理弃用警告；iOS 15+ 下 UIApplication.windows
+// 仍返回全部连接 scene 的窗口，对本插件「扫描广告窗口/清理」的用途语义更稳，
+// 故保留 .windows（场景 API 覆盖不到非前景 scene 的窗口），在此集中 suppress）。
+static NSArray<UIWindow *> *GCAllWindows(void) {
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+    return UIApplication.sharedApplication.windows;
+#pragma clang diagnostic pop
+}
+
 // Install on a class's own method table, preserving inherited implementations.
 static void Replace(Class cls, SEL sel, IMP replacement, const char *types) {
     if (!class_addMethod(cls, sel, replacement, types))
@@ -743,57 +759,9 @@ static void HookVoid(NSString *name, NSString *methodName, void (^after)(id)) {
     Replace(cls, sel, imp, method_getTypeEncoding(m));
 }
 
-// 0.5.34：底栏上滑时出现的全屏白雾 = WINMapMaskView（393x852 全屏蒙版）
-// + AUGlobalBlurService（往屏幕加模糊层的全局服务）。
-// 实测该层 alpha 从 0 渐涨到 0.84 后常驻，把整张地图蒙白。
-// 这里从三个入口封死：setHidden: / setAlpha: / addBlurViewToScreen。
-static BOOL IsBlurOverlayView(UIView *v) {
-    if (!v) return NO;
-    return [NSStringFromClass(v.class) isEqualToString:@"WINMapMaskView"];
-}
-
-
-static NSString *GCCColorStr(CGColorRef cg) {
-    if (!cg) return @"-";
-    size_t n = CGColorGetNumberOfComponents(cg);
-    const CGFloat *c = CGColorGetComponents(cg);
-    if (n == 2) return [NSString stringWithFormat:@"gray%.2f/a%.2f", c[0], c[1]];
-    if (n == 4) return [NSString stringWithFormat:@"rgba%.2f,%.2f,%.2f,%.2f", c[0], c[1], c[2], c[3]];
-    return [NSString stringWithFormat:@"%zucomp", n];
-}
-
-
-
-// 判定：半透明白色（白雾的特征——不透明白会把地图整个盖死，
-// 纯透明的又不显形）。只对这一类出手，避免误伤正常 UI。
-// 把窗口渲染到一张小灰度图上，返回「地图区」的平均亮度。
-// 白雾正在生效时这个值会接近 250；正常地图约 220-230。这样文件能自证抓取时机。
-// 把窗口截图到一张 39x85 的 sRGB 位图上，返回「地图区」的平均亮度。
-// 用它来自证：抓取的那一刻白雾在不在（正常地图 ~200-235，被压白 ~245+）。
-static CGFloat GCCScreenMapMean(UIWindow *w) {
-    const size_t W = 39, H = 85;
-    unsigned char *buf = calloc(W * H * 4, 1);
-    CGColorSpaceRef cs = CGColorSpaceCreateDeviceRGB();
-    CGContextRef c = CGBitmapContextCreate(buf, W, H, 8, W * 4, cs,
-                                           kCGImageAlphaPremultipliedLast | kCGBitmapByteOrder32Big);
-    CGColorSpaceRelease(cs);
-    if (!c) { free(buf); return -1; }
-    CGFloat px = w.bounds.size.width > 0 ? (CGFloat)W / w.bounds.size.width : 1;
-    CGContextScaleCTM(c, px * (w.bounds.size.width > 0 ? 1 : 1), px);
-    UIGraphicsPushContext(c);
-    [w drawViewHierarchyInRect:CGRectMake(0, 0, w.bounds.size.width, w.bounds.size.height)
-           afterScreenUpdates:NO];
-    UIGraphicsPopContext();
-    CGContextRelease(c);
-    double sum = 0; int n = 0;
-    for (size_t y = 20; y < 56; y++)
-        for (size_t x = 2; x < 37; x++) {
-            size_t o = (y * W + x) * 4;
-            sum += (buf[o] + buf[o + 1] + buf[o + 2]) / 3.0; n++;
-        }
-    free(buf);
-    return n ? (CGFloat)(sum / n) : -1;
-}
+// 0.9.4：删除 IsBlurOverlayView / GCCColorStr / GCCScreenMapMean
+// （审计确认零引用的诊断期遗留，编译器 -Wunused-function 实证）。
+// 0.5.34 白雾判定现由 GCCIsWhiteVeil（半透明白特征）直接承担。
 
 static BOOL GCCIsWhiteVeil(UIView *v, CGFloat *outA) {
     UIColor *bg = v.backgroundColor;
@@ -821,7 +789,7 @@ static BOOL GCCIsWhiteVeil(UIView *v, CGFloat *outA) {
 static void StripSlidablePan(void) {
     Class sv = NSClassFromString(@"AMapUIWaterFallContentSlidableView");
     if (!sv) return;
-    for (UIWindow *w in UIApplication.sharedApplication.windows) {
+    for (UIWindow *w in GCAllWindows()) {
         if (w.hidden) continue;
         NSMutableArray *q = [NSMutableArray arrayWithObject:w];
         for (NSUInteger i = 0; i < q.count && q.count < 1200; i++) {
@@ -841,7 +809,7 @@ static void StripSlidablePan(void) {
     }
 }
 static void SweepFogOverlay(void) {
-    for (UIWindow *w in UIApplication.sharedApplication.windows) {
+    for (UIWindow *w in GCAllWindows()) {
         if (w.hidden || w.alpha < 0.02) continue;
         CGRect wb = w.bounds;
         NSMutableArray *q = [NSMutableArray arrayWithObject:w];
@@ -853,7 +821,11 @@ static void SweepFogOverlay(void) {
             if (f.size.width < wb.size.width * 0.50 || f.size.height < wb.size.height * 0.50) continue;
             CGFloat a = 0;
             if (!GCCIsWhiteVeil(v, &a)) continue;
-            NSLog(@"[GaodeClean] fog sweep hides %@ a=%.2f", NSStringFromClass(v.class), a);
+            static NSInteger GCCTealsSweepLogs = 0;
+            if (GCCTealsSweepLogs < 10) {
+                GCCTealsSweepLogs++;
+                NSLog(@"[GaodeClean] fog sweep hides %@ a=%.2f", NSStringFromClass(v.class), a);
+            }
             v.hidden = YES;
         }
     }
@@ -863,7 +835,7 @@ static void SweepFogOverlay(void) {
 // 0.7.2：从 400ms 定时器抽出来，由主 tick 每 2 拍调一次。节点上限 400
 // （WINTabBar / WINMultiStyleRootView 都在浅层，够用）。
 static void StripTabBarGestures(void) {
-    for (UIWindow *w in UIApplication.sharedApplication.windows) {
+    for (UIWindow *w in GCAllWindows()) {
         if (w.hidden) continue;
         NSMutableArray *q = [NSMutableArray arrayWithObject:w];
         for (NSUInteger i = 0; i < q.count && q.count < 400; i++) {
@@ -914,15 +886,15 @@ static void SealBlurOverlay(void) {
         Class vc = NSClassFromString(@"WINViewControl");
         SEL sl = NSSelectorFromString(@"showMapMaskView");
         Method mm = class_getInstanceMethod(vc, sl);
-        if (mm) Replace(vc, sl, imp_implementationWithBlock(^(id self) { return NO; }),
+        if (mm) Replace(vc, sl, imp_implementationWithBlock(^(__unused id self) { return NO; }),
                         method_getTypeEncoding(mm));
         SEL rl = NSSelectorFromString(@"resetMapMaskView");
         Method rm = class_getInstanceMethod(vc, rl);
-        if (rm) Replace(vc, rl, imp_implementationWithBlock(^(id self) {}),
+        if (rm) Replace(vc, rl, imp_implementationWithBlock(^(__unused id self) {}),
                         method_getTypeEncoding(rm));
         SEL sl2 = NSSelectorFromString(@"setShowMapMaskView:");
         Method mm2 = class_getInstanceMethod(vc, sl2);
-        if (mm2) Replace(vc, sl2, imp_implementationWithBlock(^(id self, __unused BOOL on) {}),
+        if (mm2) Replace(vc, sl2, imp_implementationWithBlock(^(__unused id self, __unused BOOL on) {}),
                          method_getTypeEncoding(mm2));
     }
     // 诊断 v2：把「谁盖在地图上」查清楚。
@@ -1038,7 +1010,10 @@ static BOOL IsHiddenMapPromo(UIView *view) {
     id tag = ObjectGetter(view, @"getItemTag");
     if ([tag isEqual:@"template_oparate_icon"] || [tag isEqual:@"template_rank"]) return YES;
     NSMutableString *identity = [NSMutableString string];
-    for (NSString *getter in @[@"iconImageName", @"accessibilityLabel"]) {
+    static NSArray<NSString *> *getters;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ getters = @[@"iconImageName", @"accessibilityLabel"]; });
+    for (NSString *getter in getters) {
         id value = ObjectGetter(view, getter);
         if ([value isKindOfClass:NSString.class]) [identity appendFormat:@" %@", value];
     }
@@ -1780,27 +1755,7 @@ static void InstallTabBarGuideLottieBlock(void) {
     Replace(cls, sel, imp, t);
 }
 
-// 底栏的 legacy 玻璃（模糊/backdrop/chrome/shadow）被 app 在按下时放大到覆盖地图区，
-// 这就是残留的模糊带。只把「明显超出底栏范围」的收回到底栏矩形；不隐藏、不改 alpha。
-static void ConfineLegacyChrome(UIView *bar) {
-    if (!bar.bounds.size.width || !bar.bounds.size.height) return;
-    UIWindow *win = bar.window;
-    CGFloat sw = win ? win.bounds.size.width : bar.bounds.size.width;
-    CGFloat sh = win ? win.bounds.size.height : bar.bounds.size.height;
-    for (NSString *name in @[@"amap_legacyBlurView", @"amap_legacyChromeView",
-                             @"amap_legacyBackdropView", @"amap_legacyShadowView",
-                             @"amap_legacyBackdropGradient"]) {
-        UIView *v = ObjectGetter(bar, name);
-        if (![v isKindOfClass:UIView.class] || !v.superview || v.hidden) continue;
-        CGRect f = v.frame;
-        if (f.size.width < sw * 0.7 || f.size.height < sh * 0.35) continue;   // 没被放大就不动
-        CGRect target = [bar convertRect:bar.bounds toView:v.superview];
-        [CATransaction begin];
-        [CATransaction setDisableActions:YES];
-        v.frame = target;
-        [CATransaction commit];
-    }
-}
+// 0.9.4：删除 ConfineLegacyChrome（审计确认零引用）。
 
 static void CenterTabButtons(UIView *bar) {
     // 0.7.0：能承载底栏的窗口就是 App 主窗口 —— 后面屏蔽开屏广告时，
@@ -1918,7 +1873,7 @@ static BOOL GCCWindowIsAppHost(UIWindow *w) {
     if (!w) return YES;
     if (GCCMainWindow == nil) return YES;                    // ★ 保险丝：主窗口未定，谁都不许拉黑
     if (w == GCCMainWindow) return YES;
-    if (w == UIApplication.sharedApplication.keyWindow) return YES;
+    if (w.isKeyWindow) return YES;   // 0.9.4：弃用 API → 属性
     UIViewController *root = w.rootViewController;           // 承载 App 根 VC 的窗口不是广告窗口
     if (root && !GCCHasAdKeyword(NSStringFromClass(root.class))) return YES;
     return NO;
@@ -1946,7 +1901,7 @@ static void GCCHideSplashAd(UIView *v, NSString *why) {
 
 // 主窗口之外的、类名像广告的窗口 —— 也是强信号
 static void GCCHideAdWindows(void) {
-    for (UIWindow *w in UIApplication.sharedApplication.windows) {
+    for (UIWindow *w in GCAllWindows()) {
         if (w.hidden) continue;
         if (!GCCHasAdKeyword(NSStringFromClass(w.class))) continue;
         // 0.7.5(B1)：主窗口未确定 / 该窗口是 App UI 宿主 → 绝不拉黑
@@ -1974,7 +1929,7 @@ static void SplashAdTick(void) {
         GCCSplashTicks--;
     }
     GCCHideAdWindows();
-    for (UIWindow *w in UIApplication.sharedApplication.windows) {
+    for (UIWindow *w in GCAllWindows()) {
         if (w == GCCMainWindow || w.hidden) continue;
         // 只下潜两层、上限 200 个节点 —— 不做全树 BFS（0.6.7a 的教训）
         NSMutableArray *q = [NSMutableArray arrayWithObject:w];
@@ -2313,11 +2268,11 @@ static void InstallMinimalHome(void) {
         if (vc) {
             SEL sl = NSSelectorFromString(@"setGlobalShowMask:");
             Method m = class_getInstanceMethod(vc, sl);
-            if (m) Replace(vc, sl, imp_implementationWithBlock(^(id self, __unused BOOL on) {}),
+            if (m) Replace(vc, sl, imp_implementationWithBlock(^(__unused id self, __unused BOOL on) {}),
                            method_getTypeEncoding(m));
             SEL sc = NSSelectorFromString(@"setMaskColor:value:");
             Method m2 = class_getInstanceMethod(vc, sc);
-            if (m2) Replace(vc, sc, imp_implementationWithBlock(^(id self, __unused id ek, __unused int c) {}),
+            if (m2) Replace(vc, sc, imp_implementationWithBlock(^(__unused id self, __unused id ek, __unused int c) {}),
                             method_getTypeEncoding(m2));
         }
     }
@@ -2341,13 +2296,13 @@ static void InstallMinimalHome(void) {
         if (sv) {
             SEL ag = @selector(addGestureRecognizer:);
             Method m = class_getInstanceMethod(sv, ag);
-            if (m) Replace(sv, ag, imp_implementationWithBlock(^(id self, __unused id g) {}),
+            if (m) Replace(sv, ag, imp_implementationWithBlock(^(__unused id self, __unused id g) {}),
                            method_getTypeEncoding(m));
             for (NSString *setter in @[@"setHeaderPanGestureRecognizer:",
                                        @"setMockPanGestureRecognizer:"]) {
                 SEL sl = NSSelectorFromString(setter);
                 Method mm = class_getInstanceMethod(sv, sl);
-                if (mm) Replace(sv, sl, imp_implementationWithBlock(^(id self, __unused id g) {}),
+                if (mm) Replace(sv, sl, imp_implementationWithBlock(^(__unused id self, __unused id g) {}),
                                 method_getTypeEncoding(mm));
             }
         }
@@ -2603,7 +2558,7 @@ static void InstallMinimalHome(void) {
         Method mr = class_getInstanceMethod(tb, selr);
         if (!mr) continue;
         IMP origr = method_getImplementation(mr);
-        method_setImplementation(mr, imp_implementationWithBlock(^(id self, id key, id blk) {
+        method_setImplementation(mr, imp_implementationWithBlock(^(id self, id key, __unused id blk) {
             void (^noop)(void) = ^{};
             ((void (*)(id, SEL, id, id))origr)(self, selr, key, noop);
         }));
