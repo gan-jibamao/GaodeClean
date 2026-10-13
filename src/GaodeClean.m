@@ -18,7 +18,7 @@
 static NSString *const kGCAuthor      = @"jibamao";
 static NSString *const kGCRepo        = @"https://gan-jibamao.github.io/";
 static NSString *const kGCSection     = @"jibamao-Tweaks";
-static NSString *const kGCVersion     = @"0.9.1";
+static NSString *const kGCVersion     = @"0.9.2";
 static NSString *const kGCSignature   = @"GaodeClean by jibamao";
 
 // 对外签名（供 log / 诊断 / 二次核对使用）
@@ -55,6 +55,7 @@ static BOOL Scheduled, Applying, Cleaning;
 static CGFloat SearchBarSettledY;
 static BOOL SearchBarSettled;
 static NSInteger BarStableTicks;
+static BOOL BarShownOnce;      // 0.9.2：搜索栏在正确位置显示过至少一次（冷启动防闪断标记）
 static BOOL HomeSettled;
 static NSHashTable<UIView *> *ColdWidgets;
 static NSInteger ColdTicks;
@@ -1308,6 +1309,7 @@ static void LayoutMinimalHome(id handler) {
     if (fabs(bar.frame.origin.y - SearchBarSettledY) < 0.5) BarStableTicks++;
     else BarStableTicks = 0;
     bar.hidden = (BarStableTicks < 3 && ColdTicks < 15);
+    if (!bar.hidden) BarShownOnce = YES;   // 0.9.2：记下「已显示过」——冷启动后段防瞬时隐藏
     LayingOutHome = NO;
     AlignCornerWidgets(bar);
 }
@@ -2417,7 +2419,20 @@ static void InstallMinimalHome(void) {
     //         被摘时若已 hidden（切到「我的」的正常摘除）则不介入；切「我的」时 onHome=NO 也不介入。
     HookVoid(@"WINQuickSearchBarV2", @"didMoveToSuperview", ^(UIView *b) {
         if (!SearchBarSettled || !BarParent || b.superview == BarParent) return;
-        if (ColdTicks < 15) return;
+        // 0.9.2：冷启动后段保护 —— 已显示过一次且仍可见的搜索栏被摘掉时也立即挂回；
+        // 未显示过 / 已隐藏（切「我的」的正常摘除）/ 非首页选中 → 维持原早退。
+        if (ColdTicks < 15) {
+            if (!BarShownOnce || b.hidden) return;
+            if (CachedTabs) {
+                id sel = ObjectGetter(CachedTabs, @"selectedViewControl");
+                if (![NSStringFromClass([sel class]) isEqualToString:@"WINAmapHomeControl"]) return;
+            }
+            static NSInteger GCBarReattach = 0;
+            if (GCBarReattach < 5) {
+                GCBarReattach++;
+                NSLog(@"[GaodeClean] re-attached search bar (cold start, shown-once)");
+            }
+        }
         KickBarFix();                               // 0.5.57：被动到就立刻进快修，不等 100ms tick
         // 0.5.58：不再等 selectedViewControl 翻转（app 切页完成才翻，实测有 ~33ms 延迟），
         // 搜索栏一被 app 动到就立刻挂回并显示 —— 若当前其实是「我的」页，
@@ -2444,9 +2459,20 @@ static void InstallMinimalHome(void) {
                 IMP o = method_getImplementation(m);
                 const char *t = method_getTypeEncoding(m);
                 Replace(bc, sh, imp_implementationWithBlock(^(UIView *self, BOOL h) {
-                    if (h && ColdTicks >= 15 && CachedTabs) {
+                    // 0.9.2：把「已显示过一次的搜索栏」纳入防隐保护 —— 冷启动后段（<15 拍）
+                    // app 的一次瞬时隐藏会让搜索栏消失 ~117ms（120fps 逐帧实测）。
+                    if (h && (ColdTicks >= 15 || BarShownOnce) && CachedTabs) {
                         id sel = ObjectGetter(CachedTabs, @"selectedViewControl");
-                        if ([NSStringFromClass([sel class]) isEqualToString:@"WINAmapHomeControl"]) h = NO;
+                        if ([NSStringFromClass([sel class]) isEqualToString:@"WINAmapHomeControl"]) {
+                            if (ColdTicks < 15) {
+                                static NSInteger GCBarHideRefused = 0;
+                                if (GCBarHideRefused < 5) {
+                                    GCBarHideRefused++;
+                                    NSLog(@"[GaodeClean] refused search bar hide (cold start, shown-once)");
+                                }
+                            }
+                            h = NO;
+                        }
                     }
                     ((void (*)(id, SEL, BOOL))o)(self, sh, h);
                 }), t);
