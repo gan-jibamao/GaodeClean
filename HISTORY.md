@@ -5,7 +5,7 @@
 
 | | |
 |:--|:--|
-| **当前版本** | `0.9.1` |
+| **当前版本** | `0.9.2` |
 | **Author** | **jibamao** — <https://gan-jibamao.github.io/> · Section `jibamao-Tweaks` |
 | **目标** | 高德地图 / AMap `com.autonavi.amap`（**版本限制已取消，全版本自适应**） |
 | **架构** | `arm64`（rootless / TrollFools 注入）· `arm64e`（RootHide） |
@@ -649,6 +649,35 @@ deb 双包 dpkg-deb：路径 /var/jb/… 与 /Library/… 分别正确、Version
 arm64/arm64e 45/45 页哈希；deb 双包核验；集成 IPA 1418 条目唯一差异
 ```
 
+### P. 冷启动搜索栏「闪断」修复（0.9.2，当前采用）
+
+**现象**：冷启动后搜索栏出现 0.4s → 消失 ~117ms → 恢复（120fps 逐帧实测：
+t=2.775s 整屏消失 14 帧，t=2.892s 恢复，位置完全一致——纯「隐藏→恢复」脉冲）。
+
+**根因**：三道防闪线门槛全是 `ColdTicks >= 15`（启动后约 3.2s 才生效）——
+- `setHidden:` 拒绝（2447 行）：`ColdTicks >= 15 && 首页选中`
+- `didMoveToSuperview` 抢挂（2419-2420 行）：`if (ColdTicks < 15) return;`
+- tick 偏差兜底（651-654 行）：`ColdTicks < 15` 才隐藏
+
+闪发生在启动后 ≈2.0s（ColdTicks ≈ 7~9）→ **正好落在「无保护窗口」**：
+app 原生布局在冷启动后段的一次瞬时隐藏被全部放行。
+
+**修复（0.9.2）**：
+| 项 | 改动 |
+|---|---|
+| P1 | 新增 `BarShownOnce` 标记（LayoutMinimalHome 里 `!bar.hidden` 时置位）|
+| P2 | `setHidden:` 保护条件 → `(ColdTicks >= 15 \|\| BarShownOnce)` + 限流日志 `refused search bar hide` |
+| P3 | `didMoveToSuperview` 冷启动门 → 三重条件（显示过 + 仍可见 + 首页选中）+ 日志 `re-attached search bar` |
+
+**反汇编核验（BarShownOnce 三处代码落位）**：
+```
+写点 @0xb4c8: tbnz(hidden)→skip; strb [0x21000,#0x250] ← 仅 !hidden 置位
+读点 @0xc7bc: cmp ColdTicks,#0xe → b.gt 原路径; ldrb [0x250] ← A2 保护
+读点 @0xca5c: cmp ColdTicks,#0xe → b.gt 原路径; ldrb [0x250] ← A3 冷启动门
+```
+
+**下游安全**：与既有 >=15 行为同语义、只提前生效点；「我的」页/正常摘除照常放行。
+
 ## 三、跨版本验证汇总
 
 | 版本 | 项目 | 结果 |
@@ -816,7 +845,8 @@ cmp <(ar p dist/*.deb data.tar.gz | tar xzO ./var/jb/.../GaodeClean.dylib) dist/
 0.7.5   启动黑屏根因修复（窗口拉黑保险丝 + 有界化）
 0.8.0   高德 17.01.0 适配：版本白名单 + WINSplashScreen 判定层
 0.9.0   取消版本限制（修复 17.01.1「失效」；全版本自适应）
-0.9.1   拦截「上拉发现」引导 Lottie（17.01.1 GuideLottie 机制）      ← 当前（采用）
+0.9.1   拦截「上拉发现」引导 Lottie（17.01.1 GuideLottie 机制）
+0.9.2   冷启动搜索栏闪断修复（117ms 消失 → 0ms）                     ← 当前（采用）
 ```
 
 ---
