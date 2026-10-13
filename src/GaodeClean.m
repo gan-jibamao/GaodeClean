@@ -18,7 +18,7 @@
 static NSString *const kGCAuthor      = @"jibamao";
 static NSString *const kGCRepo        = @"https://gan-jibamao.github.io/";
 static NSString *const kGCSection     = @"jibamao-Tweaks";
-static NSString *const kGCVersion     = @"0.9.2";
+static NSString *const kGCVersion     = @"0.9.3";
 static NSString *const kGCSignature   = @"GaodeClean by jibamao";
 
 // 对外签名（供 log / 诊断 / 二次核对使用）
@@ -63,6 +63,7 @@ static char AlignedKey;
 static dispatch_source_t ScheduleTimer;
 static __weak UIView *BarParent;
 static __weak UIView *CachedCar, *CachedRight, *CachedRoute;
+static NSHashTable<UIView *> *GCWeatherHeldRows;   // 0.9.3：冷启动被扣留的天气行（锚点未就绪期间不显示）
 static __weak id CachedTabs;
 static __weak UIView *SearchBarView;   // 0.5.58   // 0.5.55：用于判断当前是否「首页」选中
 static void UpdateMask(UIView *page);
@@ -1086,6 +1087,46 @@ static BOOL IsInputLike(UIView *v) {
 // - 行容器收起 + 内容上移各带一次性守卫（0.4.31 无守卫 = 历史列表飞出屏幕）；
 // - 任何输入相关视图先被 IsInputLike 拦下。
 
+// ===========================================================================
+// 0.9.3：「天气行+LOGO 错误位置闪现」修复
+// 60fps 逐帧实测：t≈2.12-2.47s 天气行停在原生位置（屏幕中部 y≈411pt），
+// 搜索栏就位后才瞬跳回搜索栏上方（约 350ms 的可见错误位置）。
+// 根因：对齐锚点（车机圆钮）比天气行晚就绪；锚点未就绪时没有任何扣留机制，
+// 天气行就直接以 app 的原生位置露出来了。
+// 策略（与车机圆钮 0.4.41「冷启动先隐藏、对齐后再显示」同一套路）：
+//   ① 冷启动「扣留窗」内（ColdTicks<30 且锚点未就绪）——凡是要显示的天气行
+//      一律按住（hidden=YES）并登记；
+//   ② 对齐成功 / 6 秒兜底 —— 统一恢复显示（此时已在搜索栏上方的正确位置）。
+// ===========================================================================
+static BOOL GCWeatherAnchorReady(void) {
+    return CachedCar && CachedCar.window;
+}
+static BOOL GCWeatherInHoldPhase(void) {
+    return ColdTicks < 30 && !GCWeatherAnchorReady();
+}
+static void GCWeatherHoldRow(UIView *v) {
+    if (!v) return;
+    if (!GCWeatherHeldRows) GCWeatherHeldRows = [NSHashTable weakObjectsHashTable];
+    if (![GCWeatherHeldRows containsObject:v]) {
+        [GCWeatherHeldRows addObject:v];
+        static NSInteger GCWeatherHoldLogs = 0;
+        if (GCWeatherHoldLogs < 5) {
+            GCWeatherHoldLogs++;
+            NSLog(@"[GaodeClean] weather row held (cold start, anchor not ready): %@",
+                  NSStringFromClass(v.class));
+        }
+    }
+    v.hidden = YES;
+}
+static void GCWeatherReleaseHeld(void) {
+    if (!GCWeatherHeldRows || GCWeatherHeldRows.count == 0) return;
+    if (GCWeatherInHoldPhase()) return;   // 仍在扣留窗 → 继续按住
+    NSArray *all = GCWeatherHeldRows.allObjects;
+    for (UIView *v in all) if (v) v.hidden = NO;
+    [GCWeatherHeldRows removeAllObjects];
+    NSLog(@"[GaodeClean] weather row released (%lu)", (unsigned long)all.count);
+}
+
 static void AlignWeatherRow(UIView *row) {
     // 0.5.33：把「天气+LOGO」行对齐到车机钮右边。用坐标转换 + center 写入
     // （transform 安全、幂等，不累积误差）。
@@ -1115,6 +1156,7 @@ static void AlignWeatherRow(UIView *row) {
         row.center = wantCenter;
         [CATransaction commit];
     }
+    GCWeatherReleaseHeld();   // 0.9.3：对齐完成 → 恢复扣留的天气行（出现在正确位置）
     inAlign = NO;
 }
 
@@ -1202,6 +1244,30 @@ static void HookWeatherRow(void) {
                 if (IsWeatherRowView(self)) AlignWeatherRow(self);
             }), t);
         }
+    }
+    // 0.9.3：冷启动扣留 —— 锚点未就绪期间，天气行三类的「显示」请求全部按住：
+    //   didMoveToWindow 抓「刚上窗」；setHidden: 拒绝「想要显示」。
+    // 释放统一走 A3（对齐成功）与 A4a（6 秒兜底）。
+    for (NSString *cn in @[@"WINGroupMapWidget", @"WINScaleLineLogoMapWidget", @"WINWeatherLimitView"]) {
+        if (!NSClassFromString(cn)) continue;
+        HookVoid(cn, @"didMoveToWindow", ^(UIView *v) {
+            if (!v.window) return;
+            if (!GCWeatherInHoldPhase()) return;
+            GCWeatherHoldRow(v);
+        });
+        Class c = NSClassFromString(cn);
+        SEL sh = @selector(setHidden:);
+        Method m = class_getInstanceMethod(c, sh);
+        if (!m) continue;
+        IMP o = method_getImplementation(m);
+        const char *t = method_getTypeEncoding(m);
+        Replace(c, sh, imp_implementationWithBlock(^(UIView *self, BOOL h) {
+            if (!h && GCWeatherInHoldPhase()) {
+                GCWeatherHoldRow(self);
+                h = YES;   // 拒绝这次「显示」——等锚点就绪后统一恢复
+            }
+            ((void (*)(id, SEL, BOOL))o)(self, sh, h);
+        }), t);
     }
 }
 
@@ -1389,6 +1455,7 @@ static void AlignOneWidget(UIView *bar, UIView *w, CGFloat barTop) {
 // 修法：把它移出来，并入周期 tick（与车机钮同一条路径），并在冷启动头 2 秒加 8ms 快窗。
 static void AlignWeatherRowTick(UIWindow *win) {
     if (!win) return;
+    if (ColdTicks >= 30) GCWeatherReleaseHeld();   // 0.9.3：兜底——6 秒后无论如何恢复
     static __weak UIView *Row = nil;
     static int RescanTick = -4;   // -4：保证首次调用一定重扫
     BOOL stale = (!Row || !Row.window);
@@ -1414,8 +1481,9 @@ static void AlignWeatherRowTick(UIWindow *win) {
             }
         }
     }
-    if (!Row || !IsWeatherRowView(Row) || Row.hidden) return;
-    AlignWeatherRow(Row);
+    if (!Row || !IsWeatherRowView(Row)) return;
+    if (Row.hidden && !(GCWeatherHeldRows && [GCWeatherHeldRows containsObject:Row])) return;
+    AlignWeatherRow(Row);   // 0.9.3：被扣留的行也放行（对齐成功即恢复显示）
 }
 
 static void AlignCornerWidgets(UIView *bar) {
