@@ -4,7 +4,7 @@
 
 | | |
 |:--|:--|
-| **版本** | `0.9.2`（冷启动搜索栏闪断修复；0.7.4 已回退，见 HISTORY §L） |
+| **版本** | `0.9.3`（冷启动天气行错误位置修复；0.7.4 已回退，见 HISTORY §L） |
 | **Author** | **jibamao** |
 | **Repo** | <https://gan-jibamao.github.io/> · Section `jibamao-Tweaks` |
 | **目标** | 高德地图 / AMap `com.autonavi.amap`（**版本限制已取消，全版本自适应**） |
@@ -35,6 +35,7 @@
 | 取消版本限制（修复 17.01.1「失效」，全版本自适应） | 0.9.0 | ✅ |
 | 拦截「上拉发现」引导 Lottie（17.01.1 新机制） | 0.9.1 | ✅ |
 | 冷启动搜索栏闪断修复（120fps 精测 117ms → 0ms） | 0.9.2 | ✅ |
+| 冷启动天气行错误位置修复（60fps 精测 350ms 错位 → 0） | 0.9.3 | ✅ |
 
 正式包**零诊断埋点** —— 不再写 `Documents/GaodeClean-*.txt`，源文件零磁盘 I/O。
 
@@ -145,7 +146,8 @@ arm64e 切片有两个坑：lld 不支持它的 `-fixup_chains`（改走经典 `
 0.8.0   高德 17.01.0 适配（版本白名单 + WINSplashScreen 判定层）
 0.9.0   取消版本限制（修复 17.01.1「失效」；全版本自适应）
 0.9.1   拦截「上拉发现」引导 Lottie（17.01.1 GuideLottie 机制）
-0.9.2   冷启动搜索栏闪断修复（117ms 消失 → 0ms）                ← 当前（采用）
+0.9.2   冷启动搜索栏闪断修复（117ms 消失 → 0ms）
+0.9.3   冷启动天气行错误位置修复（350ms 错位 → 0）              ← 当前（采用）
 ```
 
 ---
@@ -162,4 +164,4 @@ strings GaodeClean.dylib | grep -i jibamao
 # GaodeClean by jibamao
 ```
 
- 启动输出：`[GaodeClean] GaodeClean v0.9.2 | jibamao | https://gan-jibamao.github.io/`
+ 启动输出：`[GaodeClean] GaodeClean v0.9.3 | jibamao | https://gan-jibamao.github.io/`

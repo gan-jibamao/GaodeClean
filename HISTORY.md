@@ -5,7 +5,7 @@
 
 | | |
 |:--|:--|
-| **当前版本** | `0.9.2` |
+| **当前版本** | `0.9.3` |
 | **Author** | **jibamao** — <https://gan-jibamao.github.io/> · Section `jibamao-Tweaks` |
 | **目标** | 高德地图 / AMap `com.autonavi.amap`（**版本限制已取消，全版本自适应**） |
 | **架构** | `arm64`（rootless / TrollFools 注入）· `arm64e`（RootHide） |
@@ -678,6 +678,33 @@ app 原生布局在冷启动后段的一次瞬时隐藏被全部放行。
 
 **下游安全**：与既有 >=15 行为同语义、只提前生效点；「我的」页/正常摘除照常放行。
 
+### Q. 冷启动「天气行错误位置闪现」修复（0.9.3，当前采用）
+
+**现象**：冷启动后「天气行+高德LOGO」先出现在**屏幕中部原生位置**（y≈411pt），
+约 350ms 后瞬跳回搜索栏上方。60fps 逐帧实测：t≈2.12s 露错位（无搜索栏陪伴）
+→ t≈2.47s 搜索栏出现同时归位。用户视角 = 「天气和LOGO瞬间回到搜索栏上方」。
+
+**根因**：对齐锚点（车机圆钮 CachedCar）比天气行晚就绪（350ms 差）。
+`AlignWeatherRow` 在锚点未就绪时直接 `return`（无法计算目标位）——
+这 350ms 里天气行就**敞在 app 原生位置**，没有任何扣留机制。
+
+**修复（0.9.3）**：
+| 项 | 改动 |
+|---|---|
+| Q1 | 新增 `GCWeatherHeldRows` 扣留登记表 + 三帮助函数（AnchorReady / InHoldPhase / HoldRow / ReleaseHeld）|
+| Q2 | `AlignWeatherRow` 对齐成功 → `GCWeatherReleaseHeld()` 恢复 |
+| Q3 | tick 顶部 `ColdTicks >= 30` 兜底释放（6 秒，杜绝永久隐藏）|
+| Q4 | tick 放行被扣留的行（否则 deadlock：行被扣 → tick 早退 → 永远释放不了）|
+| Q5 | 三类双路径拦截（didMoveToWindow 上窗扣留 + setHidden: 拒绝显示请求）|
+| Q6 | `kGCVersion` → 0.9.3；control 同步 |
+
+**反汇编核验（调用点级）**：
+```
+GCWeatherHoldRow 调用点 ×2：@0x11294（setHidden: 拒绝路径）/ @0x11440（didMoveToWindow 上窗路径）
+GCWeatherReleaseHeld 调用点 ×2：@0x101b4（AlignWeatherRow 尾）/ @0x15b1c（tick cmp #0x1e 后）
+GCWeatherHeldRows @0x211f0 读写均与设计一致
+```
+
 ## 三、跨版本验证汇总
 
 | 版本 | 项目 | 结果 |
@@ -846,7 +873,8 @@ cmp <(ar p dist/*.deb data.tar.gz | tar xzO ./var/jb/.../GaodeClean.dylib) dist/
 0.8.0   高德 17.01.0 适配：版本白名单 + WINSplashScreen 判定层
 0.9.0   取消版本限制（修复 17.01.1「失效」；全版本自适应）
 0.9.1   拦截「上拉发现」引导 Lottie（17.01.1 GuideLottie 机制）
-0.9.2   冷启动搜索栏闪断修复（117ms 消失 → 0ms）                     ← 当前（采用）
+0.9.2   冷启动搜索栏闪断修复（117ms 消失 → 0ms）
+0.9.3   冷启动天气行错误位置闪现修复（350ms 错位 → 0）              ← 当前（采用）
 ```
 
 ---
