@@ -783,15 +783,15 @@ deb 打包用 `scripts/mkdeb-local.py`（Python 写 `ar` 归档，不需要 `dpk
 
 装完 `sbreload` 或重启用户空间。
 
-### 本包产物（0.8.0）
+### 本包产物（0.9.2）
 
 | 文件 | 说明 |
 |:--|:--|
-| `dist/GaodeClean-arm64.dylib` | 182,464 B · arm64 · chained fixups + adhoc 签名（**TrollFools 注入用**） |
-| `dist/GaodeClean-arm64e.dylib` | 183,856 B · arm64e · dyld_info 绑定 + adhoc 签名 |
-| `dist/com.jibamao.gaodeclean_0.8.0_iphoneos-arm64.deb` | rootless（载荷 `/var/jb/Library/MobileSubstrate/…`） |
-| `dist/com.jibamao.gaodeclean_0.8.0_iphoneos-arm64e-roothide.deb` | RootHide（载荷 `/Library/…`，`Depends` 含 `oldabi`） |
-| `dist/GaodeClean-0.8.0-Source.zip` | 完整源码（src + control + scripts + tools） |
+| `dist/GaodeClean-arm64.dylib` | 182,608 B · arm64 · chained fixups + adhoc 签名（**TrollFools 注入用**） |
+| `dist/GaodeClean-arm64e.dylib` | 184,000 B · arm64e · dyld_info 绑定 + adhoc 签名 |
+| `dist/com.jibamao.gaodeclean_0.9.2_iphoneos-arm64.deb` | rootless（载荷 `/var/jb/Library/MobileSubstrate/…`） |
+| `dist/com.jibamao.gaodeclean_0.9.2_iphoneos-arm64e-roothide.deb` | RootHide（载荷 `/Library/…`，`Depends` 含 `oldabi`） |
+| `dist/GaodeClean-0.9.2-Source.zip` | 完整源码（src + control + scripts + tools） |
 
 ### 每次发版自检清单
 

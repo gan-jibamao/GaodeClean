@@ -7,7 +7,7 @@
 | **版本** | `0.9.2`（冷启动搜索栏闪断修复；0.7.4 已回退，见 HISTORY §L） |
 | **Author** | **jibamao** |
 | **Repo** | <https://gan-jibamao.github.io/> · Section `jibamao-Tweaks` |
-| **目标** | 高德地图 / AMap `com.autonavi.amap` **17.00.2 / 17.01.0**（版本白名单） |
+| **目标** | 高德地图 / AMap `com.autonavi.amap`（**版本限制已取消，全版本自适应**） |
 | **架构** | rootless `arm64` · RootHide `arm64e` · TrollFools 注入用裸 `arm64` dylib |
 | **许可** | 私有备份，不对外分发 |
 
@@ -60,12 +60,13 @@
 ## 目录
 
 ```
-src/GaodeClean.m          当前源码（0.8.0）
+src/GaodeClean.m          当前源码（0.9.2）
 src/GCCGeometry.h         几何辅助头
 scripts/make-roothide.sh  rootless deb → RootHide deb 转换
 scripts/mkdeb.py          不依赖 dpkg-deb 的打包脚本
-scripts/fixarch.py          arm64e cpusubtype 修正 + 签名页哈希重算
-dist/                     构建产物
+scripts/fixarch.py        arm64e cpusubtype 修正 + 签名页哈希重算
+tools/                    逆向分析工具箱（高德升级应对流程，见 tools/README.md）
+dist/                     构建产物（当前版本）
 HISTORY.md                功能清单 / 版本链 / 根因分析 / 构建配方
 ```
 
@@ -161,4 +162,4 @@ strings GaodeClean.dylib | grep -i jibamao
 # GaodeClean by jibamao
 ```
 
- 启动输出：`[GaodeClean] GaodeClean v0.9.0 | jibamao | https://gan-jibamao.github.io/`
+ 启动输出：`[GaodeClean] GaodeClean v0.9.2 | jibamao | https://gan-jibamao.github.io/`
