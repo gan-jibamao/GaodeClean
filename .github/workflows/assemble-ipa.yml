@@ -1,0 +1,40 @@
+name: Assemble IPA from chunks
+
+# 把草稿 release 中的分块资产（c_XXXXX.bin）拼装回完整文件，
+# 校验 sha256 后挂到目标 release。触发：workflow_dispatch。
+# 场景：本机网络对大文件上传有限制 → 分块上传 → 云端拼装。
+
+on:
+  workflow_dispatch:
+    inputs:
+      draft_release_id:
+        description: 'draft release ID (chunks)'
+        required: true
+      target_release_id:
+        description: 'target release ID'
+        required: true
+      expected_sha256:
+        description: 'expected sha256'
+        required: true
+      filename:
+        description: 'assembled filename'
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  assemble:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Assemble chunks (download + verify + upload)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          DRAFT_ID: ${{ github.event.inputs.draft_release_id }}
+          TARGET_ID: ${{ github.event.inputs.target_release_id }}
+          EXPECTED_SHA: ${{ github.event.inputs.expected_sha256 }}
+          FILENAME: ${{ github.event.inputs.filename }}
+        run: python3 assemble_chunks.py
