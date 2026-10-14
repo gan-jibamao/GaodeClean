@@ -4,7 +4,7 @@
 
 | | |
 |:--|:--|
-| **版本** | `0.9.5`（冷启动 LOGO 中屏闪现修复；0.7.4 已回退，见 HISTORY §L） |
+| **版本** | `0.9.6`（LOGO 叠压天气回归修复；0.7.4 已回退，见 HISTORY §L） |
 | **Author** | **jibamao** |
 | **Repo** | <https://gan-jibamao.github.io/> · Section `jibamao-Tweaks` |
 | **目标** | 高德地图 / AMap `com.autonavi.amap`（**版本限制已取消，全版本自适应**） |
@@ -38,6 +38,7 @@
 | 冷启动天气行错误位置修复（60fps 精测 350ms 错位 → 0） | 0.9.3 | ✅ |
 | 源码审计优化（告警 14→0，死代码清除，行为零变化） | 0.9.4 | ✅ |
 | 冷启动 LOGO 中屏闪现修复（半件 130ms → 0） | 0.9.5 | ✅ |
+| 回归修复：LOGO 搬运叠压天气（搬运面收归单一） | 0.9.6 | ✅ |
 
 正式包**零诊断埋点** —— 不再写 `Documents/GaodeClean-*.txt`，源文件零磁盘 I/O。
 
@@ -151,7 +152,8 @@ arm64e 切片有两个坑：lld 不支持它的 `-fixup_chains`（改走经典 `
 0.9.2   冷启动搜索栏闪断修复（117ms 消失 → 0ms）
 0.9.3   冷启动天气行错误位置修复（350ms 错位 → 0）
 0.9.4   源码审计优化（告警 14→0）
-0.9.5   冷启动 LOGO 中屏闪现修复（半件 130ms → 0）            ← 当前（采用）
+0.9.5   冷启动 LOGO 中屏闪现修复（半件 130ms → 0）
+0.9.6   回归修复：LOGO 叠压天气（搬运面收归单一）              ← 当前（采用）
 ```
 
 ---
@@ -168,4 +170,4 @@ strings GaodeClean.dylib | grep -i jibamao
 # GaodeClean by jibamao
 ```
 
- 启动输出：`[GaodeClean] GaodeClean v0.9.5 | jibamao | https://gan-jibamao.github.io/`
+ 启动输出：`[GaodeClean] GaodeClean v0.9.6 | jibamao | https://gan-jibamao.github.io/`

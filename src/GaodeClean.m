@@ -18,7 +18,7 @@
 static NSString *const kGCAuthor      = @"jibamao";
 static NSString *const kGCRepo        = @"https://gan-jibamao.github.io/";
 static NSString *const kGCSection     = @"jibamao-Tweaks";
-static NSString *const kGCVersion     = @"0.9.5";
+static NSString *const kGCVersion     = @"0.9.6";
 static NSString *const kGCSignature   = @"GaodeClean by jibamao";
 
 // 对外签名（供 log / 诊断 / 二次核对使用）
@@ -1105,8 +1105,9 @@ static void GCWeatherReleaseHeld(void) {
     [GCWeatherHeldRows removeAllObjects]; // 0.9.5：先清表，杜绝「释放→对齐→再释放」递归
     for (UIView *v in all) if (v) {
         v.hidden = NO;
-        // 0.9.5：行级元素恢复时顺手校正到位（半件 LOGO 由父行带动）
-        if (IsWeatherRowView(v)) AlignWeatherRow(v);
+        // 0.9.6：恢复后**不再逐元素搬运** —— 0.9.5 曾在这里顺手 AlignWeatherRow(v)，
+        // 导致 LOGO 半件与天气件各自被搬到「车机钮右侧」同一目标位、互相叠压（真机回归）。
+        // 搬运权收归单一链路：tick 选行 / WINGroupMapWidget 布局钩子（0.9.4 验收行为）。
     }
     NSLog(@"[GaodeClean] weather row released (%lu)", (unsigned long)all.count);
 }
@@ -1247,8 +1248,9 @@ static void HookWeatherRow(void) {
         // ① 上窗
         HookVoid(cn, @"didMoveToWindow", ^(UIView *v) {
             if (!v.window) return;
-            if (GCWeatherInHoldPhase()) { GCWeatherHoldRow(v); return; }
-            if (IsWeatherRowView(v)) AlignWeatherRow(v);
+            // 0.9.6：出窗后只做「扣留」（在扣留窗内）；**不再** AlignWeatherRow(v) ——
+            // 0.9.5 的新增搬运会让每个家族元素各自叠到同一目标位（真机回归）。
+            if (GCWeatherInHoldPhase()) GCWeatherHoldRow(v);
         });
         // ② setHidden:（扣留窗内拒绝显示；出窗后行级元素先对齐再显示）
         {
@@ -1275,9 +1277,8 @@ static void HookWeatherRow(void) {
                 const char *ft = method_getTypeEncoding(fm);
                 Replace(c, fs, imp_implementationWithBlock(^(UIView *self, CGRect f) {
                     ((void (*)(id, SEL, CGRect))fo)(self, fs, f);
-                    if (!self.window) return;
-                    if (GCWeatherInHoldPhase()) { GCWeatherHoldRow(self); return; }
-                    if (IsWeatherRowView(self)) AlignWeatherRow(self);
+                    // 0.9.6：位置写入路径只做「扣留」，**不搬运**（见 A1a 注释）。
+                    if (self.window && GCWeatherInHoldPhase()) GCWeatherHoldRow(self);
                 }), ft);
             }
             SEL cs = @selector(setCenter:);
@@ -1287,9 +1288,8 @@ static void HookWeatherRow(void) {
                 const char *ct = method_getTypeEncoding(cm);
                 Replace(c, cs, imp_implementationWithBlock(^(UIView *self, CGPoint center) {
                     ((void (*)(id, SEL, CGPoint))co)(self, cs, center);
-                    if (!self.window) return;
-                    if (GCWeatherInHoldPhase()) { GCWeatherHoldRow(self); return; }
-                    if (IsWeatherRowView(self)) AlignWeatherRow(self);
+                    // 0.9.6：同上，只扣留不搬运。
+                    if (self.window && GCWeatherInHoldPhase()) GCWeatherHoldRow(self);
                 }), ct);
             }
         }
@@ -1519,12 +1519,19 @@ static void AlignWeatherRowTick(UIWindow *win) {
             if (holdNow && !v.hidden && v.window && IsWeatherRowClass(NSStringFromClass(v.class))) {
                 GCWeatherHoldRow(v);
             }
-            if (IsWeatherRowClass(NSStringFromClass(v.class)) && IsWeatherRowView(v)) {
+            // 0.9.6：**搬运候选**收窄回 3 类（0.9.4 验收行为）——
+            // 新增的 Lite/引擎族类只用于「扣留」（上一段），不得参与搬运：
+            // 它们若成为 Row 候选，会把半件元素整体搬到车机钮右侧（真机回归）。
+            NSString *vcn = NSStringFromClass(v.class);
+            if (( [vcn isEqualToString:@"WINGroupMapWidget"]
+                || [vcn isEqualToString:@"WINScaleLineLogoMapWidget"]
+                || [vcn isEqualToString:@"WINWeatherLimitView"])
+                && IsWeatherRowView(v)) {
                 // 优先外层容器（WINGroupMapWidget 存在时它就是整行）；
                 // 否则取最宽的那个候选（冷启动时是 WINScaleLineLogoMapWidget，188pt）
-                if (!Row || [NSStringFromClass(v.class) isEqualToString:@"WINGroupMapWidget"]
+                if (!Row || [vcn isEqualToString:@"WINGroupMapWidget"]
                     || v.bounds.size.width > Row.bounds.size.width) Row = v;
-                if ([NSStringFromClass(v.class) isEqualToString:@"WINGroupMapWidget"]) break;
+                if ([vcn isEqualToString:@"WINGroupMapWidget"]) break;
             }
         }
     }
