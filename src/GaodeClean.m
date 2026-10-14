@@ -18,7 +18,7 @@
 static NSString *const kGCAuthor      = @"jibamao";
 static NSString *const kGCRepo        = @"https://gan-jibamao.github.io/";
 static NSString *const kGCSection     = @"jibamao-Tweaks";
-static NSString *const kGCVersion     = @"0.9.6";
+static NSString *const kGCVersion     = @"0.9.7";
 static NSString *const kGCSignature   = @"GaodeClean by jibamao";
 
 // 对外签名（供 log / 诊断 / 二次核对使用）
@@ -1079,11 +1079,23 @@ static BOOL GCWeatherAnchorReady(void) {
     return CachedCar && CachedCar.window
         && objc_getAssociatedObject(CachedCar, &AlignedKey) != nil;
 }
+static BOOL GCWeatherDoneOnce;   // 0.9.7：本轮冷启动已释放过扣留 → 不再重新开窗
 static BOOL GCWeatherInHoldPhase(void) {
-    return ColdTicks < 30 && !GCWeatherAnchorReady();
+    // 0.9.7：加 !GCWeatherDoneOnce —— 首次释放（锚点就绪或 6s 兜底）后本轮封网。
+    // 背景：真机实测 app 会刷新车机钮实例（AlignedKey 随实例丢失），扣留窗会
+    // 在启动中段重新打开，把「200米」比例尺误关 3.2 秒（0.9.6 案例）。
+    return ColdTicks < 30 && !GCWeatherAnchorReady() && !GCWeatherDoneOnce;
 }
-static void GCWeatherHoldRow(UIView *v) {
-    if (!v) return;
+static BOOL GCWeatherHoldRow(UIView *v) {
+    if (!v) return NO;
+    // 0.9.7：位置门槛 —— 只扣留「落在中屏原生错误位」的元素（冷启动闪现指纹，
+    // y < 窗高 55%）；已在对齐行内（y ≈ 窗高 78%）的显示请求直接放行。
+    // 没有这道门，扩网钩子（setHidden:/setAlpha:/setFrame:）会误伤正常刷新的
+    // 行内元素（0.9.6 真机案例：200米比例尺被误关 3.2s）。
+    if (v.window) {
+        CGRect r = [v convertRect:v.bounds toView:v.window];
+        if (r.origin.y > v.window.bounds.size.height * 0.55) return NO;   // 位置正确，不扣
+    }
     if (!GCWeatherHeldRows) GCWeatherHeldRows = [NSHashTable weakObjectsHashTable];
     if (![GCWeatherHeldRows containsObject:v]) {
         [GCWeatherHeldRows addObject:v];
@@ -1095,6 +1107,7 @@ static void GCWeatherHoldRow(UIView *v) {
         }
     }
     v.hidden = YES;
+    return YES;
 }
 static void AlignWeatherRow(UIView *row);      // 0.9.5：前置声明（释放路径要用）
 static BOOL IsWeatherRowView(UIView *v);       // 0.9.5：前置声明
@@ -1109,6 +1122,7 @@ static void GCWeatherReleaseHeld(void) {
         // 导致 LOGO 半件与天气件各自被搬到「车机钮右侧」同一目标位、互相叠压（真机回归）。
         // 搬运权收归单一链路：tick 选行 / WINGroupMapWidget 布局钩子（0.9.4 验收行为）。
     }
+    GCWeatherDoneOnce = YES;   // 0.9.7：本轮冷启动扣留使命完成，此后不再重开窗
     NSLog(@"[GaodeClean] weather row released (%lu)", (unsigned long)all.count);
 }
 
@@ -1261,8 +1275,9 @@ static void HookWeatherRow(void) {
                 const char *t = method_getTypeEncoding(m);
                 Replace(c, sh, imp_implementationWithBlock(^(UIView *self, BOOL h) {
                     if (!h && GCWeatherInHoldPhase()) {
-                        GCWeatherHoldRow(self);
-                        h = YES;   // 拒绝这次「显示」——等锚点就绪后统一恢复
+                        // 0.9.7：HoldRow 返回是否真正扣留 —— 位置门槛放行的元素
+                        // **不得**拒绝显示（否则藏了却没登记，永远等不到释放）。
+                        if (GCWeatherHoldRow(self)) h = YES;
                     }
                     ((void (*)(id, SEL, BOOL))o)(self, sh, h);
                 }), t);
