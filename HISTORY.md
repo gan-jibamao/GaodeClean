@@ -5,7 +5,7 @@
 
 | | |
 |:--|:--|
-| **当前版本** | `0.9.4` |
+| **当前版本** | `0.9.5` |
 | **Author** | **jibamao** — <https://gan-jibamao.github.io/> · Section `jibamao-Tweaks` |
 | **目标** | 高德地图 / AMap `com.autonavi.amap`（**版本限制已取消，全版本自适应**） |
 | **架构** | `arm64`（rootless / TrollFools 注入）· `arm64e`（RootHide） |
@@ -728,6 +728,28 @@ GCWeatherHeldRows @0x211f0 读写均与设计一致
 
 **有意不动（附理由）**：`NSStringFromClass` 42 处逐点比较（内部有类名缓存、每拍仅数次，收益小风险大）；tick 两轮 HomeHandlers 遍历合并（微收益、动行为顺序）。
 
+### S. 冷启动「LOGO 中屏闪现」修复（0.9.5，当前采用）
+
+**现象**：冷启动 t≈2.4s，「🔷高德地图」LOGO **单独**闪现在屏幕中部原生位（~130ms），
+随后才跳回搜索栏上方。用户 120fps 视频指认「2 秒处 LOGO 位置不对」。
+（0.9.3 修复的是「整行」闪现；本次是「半件 LOGO」残留。）
+
+**根因**（逐帧 + 源码级）：
+- 0.9.3 扣留只覆盖 3 类且要求行级尺寸（宽 150-360pt）；
+- 闪现的 LOGO 是半行（仅 ~65pt 宽）——尺寸门槛漏网；
+- 二进制还有 `WINLiteWidgetLogoScaleLineView`（Lite 版）/ `LTMBigPearMapLogoView`（引擎版）等族类未覆盖。
+
+**修复（0.9.5）**：
+| 项 | 改动 |
+|---|---|
+| Q1 | 类网 3→6 + 语义前缀兜底（`*LogoScaleLine*`/`*ScaleLineLogo*`）|
+| Q2 | 六类 × 四路径全挂：上窗 / setHidden: / setFrame:+setCenter: / setAlpha:（防淡入绕过）|
+| Q3 | 锚点就绪收紧 =「车机钮已对齐」（打过 AlignedKey），不再过早放行 |
+| Q4 | 释放即时化（每拍）+ 扣留窗内扫描取消防抖（防 130ms 窗口错过）+ BFS 任意尺寸扣留 |
+| Q5 | 版本 0.9.5 + control |
+
+**安全设计**：扣留仅冷启动窗内；6s 兜底；释放先清表防递归；类存在性全检查。
+
 ## 三、跨版本验证汇总
 
 | 版本 | 项目 | 结果 |
@@ -833,15 +855,15 @@ deb 打包用 `scripts/mkdeb-local.py`（Python 写 `ar` 归档，不需要 `dpk
 
 装完 `sbreload` 或重启用户空间。
 
-### 本包产物（0.9.4）
+### 本包产物（0.9.5）
 
 | 文件 | 说明 |
 |:--|:--|
-| `dist/GaodeClean-arm64.dylib` | 183,472 B · arm64 · chained fixups + adhoc 签名（**TrollFools 注入用**） |
-| `dist/GaodeClean-arm64e.dylib` | 184,896 B · arm64e · dyld_info 绑定 + adhoc 签名 |
-| `dist/com.jibamao.gaodeclean_0.9.4_iphoneos-arm64.deb` | rootless（载荷 `/var/jb/Library/MobileSubstrate/…`） |
-| `dist/com.jibamao.gaodeclean_0.9.4_iphoneos-arm64e-roothide.deb` | RootHide（载荷 `/Library/…`，`Depends` 含 `oldabi`） |
-| `dist/GaodeClean-0.9.4-Source.zip` | 完整源码（src + control + scripts + tools） |
+| `dist/GaodeClean-arm64.dylib` | 183,632 B · arm64 · chained fixups + adhoc 签名（**TrollFools 注入用**） |
+| `dist/GaodeClean-arm64e.dylib` | 185,072 B · arm64e · dyld_info 绑定 + adhoc 签名 |
+| `dist/com.jibamao.gaodeclean_0.9.5_iphoneos-arm64.deb` | rootless（载荷 `/var/jb/Library/MobileSubstrate/…`） |
+| `dist/com.jibamao.gaodeclean_0.9.5_iphoneos-arm64e-roothide.deb` | RootHide（载荷 `/Library/…`，`Depends` 含 `oldabi`） |
+| `dist/GaodeClean-0.9.5-Source.zip` | 完整源码（src + control + scripts + tools） |
 
 ### 每次发版自检清单
 
@@ -898,7 +920,8 @@ cmp <(ar p dist/*.deb data.tar.gz | tar xzO ./var/jb/.../GaodeClean.dylib) dist/
 0.9.1   拦截「上拉发现」引导 Lottie（17.01.1 GuideLottie 机制）
 0.9.2   冷启动搜索栏闪断修复（117ms 消失 → 0ms）
 0.9.3   冷启动天气行错误位置闪现修复（350ms 错位 → 0）
-0.9.4   源码审计优化（告警 14→0；死代码清除 + 热点轻量化）           ← 当前（采用）
+0.9.4   源码审计优化（告警 14→0；死代码清除 + 热点轻量化）
+0.9.5   冷启动 LOGO 中屏闪现修复（半件 130ms → 0）                  ← 当前（采用）
 ```
 
 ---
