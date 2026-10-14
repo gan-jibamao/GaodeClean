@@ -18,7 +18,7 @@
 static NSString *const kGCAuthor      = @"jibamao";
 static NSString *const kGCRepo        = @"https://gan-jibamao.github.io/";
 static NSString *const kGCSection     = @"jibamao-Tweaks";
-static NSString *const kGCVersion     = @"0.9.4";
+static NSString *const kGCVersion     = @"0.9.5";
 static NSString *const kGCSignature   = @"GaodeClean by jibamao";
 
 // 对外签名（供 log / 诊断 / 二次核对使用）
@@ -1074,7 +1074,10 @@ static BOOL IsInputLike(UIView *v) {
 //   ② 对齐成功 / 6 秒兜底 —— 统一恢复显示（此时已在搜索栏上方的正确位置）。
 // ===========================================================================
 static BOOL GCWeatherAnchorReady(void) {
-    return CachedCar && CachedCar.window;
+    // 0.9.5：锚点就绪 = 车机钮「已对齐」（打过 AlignedKey），而不只是「在窗上」——
+    // 过早放行会让天气行落在旧目标位、随后再跳一下。
+    return CachedCar && CachedCar.window
+        && objc_getAssociatedObject(CachedCar, &AlignedKey) != nil;
 }
 static BOOL GCWeatherInHoldPhase(void) {
     return ColdTicks < 30 && !GCWeatherAnchorReady();
@@ -1093,12 +1096,18 @@ static void GCWeatherHoldRow(UIView *v) {
     }
     v.hidden = YES;
 }
+static void AlignWeatherRow(UIView *row);      // 0.9.5：前置声明（释放路径要用）
+static BOOL IsWeatherRowView(UIView *v);       // 0.9.5：前置声明
 static void GCWeatherReleaseHeld(void) {
     if (!GCWeatherHeldRows || GCWeatherHeldRows.count == 0) return;
     if (GCWeatherInHoldPhase()) return;   // 仍在扣留窗 → 继续按住
     NSArray *all = GCWeatherHeldRows.allObjects;
-    for (UIView *v in all) if (v) v.hidden = NO;
-    [GCWeatherHeldRows removeAllObjects];
+    [GCWeatherHeldRows removeAllObjects]; // 0.9.5：先清表，杜绝「释放→对齐→再释放」递归
+    for (UIView *v in all) if (v) {
+        v.hidden = NO;
+        // 0.9.5：行级元素恢复时顺手校正到位（半件 LOGO 由父行带动）
+        if (IsWeatherRowView(v)) AlignWeatherRow(v);
+    }
     NSLog(@"[GaodeClean] weather row released (%lu)", (unsigned long)all.count);
 }
 
@@ -1144,9 +1153,14 @@ static void AlignWeatherRow(UIView *row) {
 // 也就是说：正常态用容器 WINGroupMapWidget，冷启动态只有子件 WINScaleLineLogoMapWidget。
 // 原来的查找只认前者 → 冷启动永远找不到 → 不归位；切页后容器才被建出来 → 才归位。
 static BOOL IsWeatherRowClass(NSString *cn) {
-    return [cn isEqualToString:@"WINGroupMapWidget"]
+    if ([cn isEqualToString:@"WINGroupMapWidget"]
         || [cn isEqualToString:@"WINScaleLineLogoMapWidget"]
-        || [cn isEqualToString:@"WINWeatherLimitView"];
+        || [cn isEqualToString:@"WINWeatherLimitView"]
+        || [cn isEqualToString:@"WINLiteWidgetLogoScaleLineView"]   // 0.9.5：17.01.1 冷启动 Lite 版 LOGO 视图
+        || [cn isEqualToString:@"LTMBigPearMapLogoView"]            // 0.9.5：引擎内 LOGO 视图
+        || [cn isEqualToString:@"LTMBigPearScaleLine"])             // 0.9.5：引擎内比例尺
+        return YES;
+    return [cn containsString:@"LogoScaleLine"] || [cn containsString:@"ScaleLineLogo"];
 }
 
 static BOOL IsWeatherRowView(UIView *v) {
@@ -1223,26 +1237,75 @@ static void HookWeatherRow(void) {
     // 0.9.3：冷启动扣留 —— 锚点未就绪期间，天气行三类的「显示」请求全部按住：
     //   didMoveToWindow 抓「刚上窗」；setHidden: 拒绝「想要显示」。
     // 释放统一走 A3（对齐成功）与 A4a（6 秒兜底）。
-    for (NSString *cn in @[@"WINGroupMapWidget", @"WINScaleLineLogoMapWidget", @"WINWeatherLimitView"]) {
-        if (!NSClassFromString(cn)) continue;
+    // 0.9.5：六类 × 四路径全挂（上窗 / 显示 / 位置写入×2 / 透明度），
+    // 且扣留判断**不再要求行级尺寸** —— 2.4s 闪现的 LOGO 半件仅 ~65pt 宽，
+    // 尺寸门槛会让它从扣留网里漏掉（逐帧实测 130ms 窗口）。
+    for (NSString *cn in @[@"WINGroupMapWidget", @"WINScaleLineLogoMapWidget", @"WINWeatherLimitView",
+                           @"WINLiteWidgetLogoScaleLineView", @"LTMBigPearMapLogoView", @"LTMBigPearScaleLine"]) {
+        Class c = NSClassFromString(cn);
+        if (!c) continue;
+        // ① 上窗
         HookVoid(cn, @"didMoveToWindow", ^(UIView *v) {
             if (!v.window) return;
-            if (!GCWeatherInHoldPhase()) return;
-            GCWeatherHoldRow(v);
+            if (GCWeatherInHoldPhase()) { GCWeatherHoldRow(v); return; }
+            if (IsWeatherRowView(v)) AlignWeatherRow(v);
         });
-        Class c = NSClassFromString(cn);
-        SEL sh = @selector(setHidden:);
-        Method m = class_getInstanceMethod(c, sh);
-        if (!m) continue;
-        IMP o = method_getImplementation(m);
-        const char *t = method_getTypeEncoding(m);
-        Replace(c, sh, imp_implementationWithBlock(^(UIView *self, BOOL h) {
-            if (!h && GCWeatherInHoldPhase()) {
-                GCWeatherHoldRow(self);
-                h = YES;   // 拒绝这次「显示」——等锚点就绪后统一恢复
+        // ② setHidden:（扣留窗内拒绝显示；出窗后行级元素先对齐再显示）
+        {
+            SEL sh = @selector(setHidden:);
+            Method m = class_getInstanceMethod(c, sh);
+            if (m) {
+                IMP o = method_getImplementation(m);
+                const char *t = method_getTypeEncoding(m);
+                Replace(c, sh, imp_implementationWithBlock(^(UIView *self, BOOL h) {
+                    if (!h && GCWeatherInHoldPhase()) {
+                        GCWeatherHoldRow(self);
+                        h = YES;   // 拒绝这次「显示」——等锚点就绪后统一恢复
+                    }
+                    ((void (*)(id, SEL, BOOL))o)(self, sh, h);
+                }), t);
             }
-            ((void (*)(id, SEL, BOOL))o)(self, sh, h);
-        }), t);
+        }
+        // ③ 位置写入（WINGroupMapWidget 已有独立钩子块，此处只补其余五类，避免重复叠加）
+        if (![cn isEqualToString:@"WINGroupMapWidget"]) {
+            SEL fs = @selector(setFrame:);
+            Method fm = class_getInstanceMethod(c, fs);
+            if (fm) {
+                IMP fo = method_getImplementation(fm);
+                const char *ft = method_getTypeEncoding(fm);
+                Replace(c, fs, imp_implementationWithBlock(^(UIView *self, CGRect f) {
+                    ((void (*)(id, SEL, CGRect))fo)(self, fs, f);
+                    if (!self.window) return;
+                    if (GCWeatherInHoldPhase()) { GCWeatherHoldRow(self); return; }
+                    if (IsWeatherRowView(self)) AlignWeatherRow(self);
+                }), ft);
+            }
+            SEL cs = @selector(setCenter:);
+            Method cm = class_getInstanceMethod(c, cs);
+            if (cm) {
+                IMP co = method_getImplementation(cm);
+                const char *ct = method_getTypeEncoding(cm);
+                Replace(c, cs, imp_implementationWithBlock(^(UIView *self, CGPoint center) {
+                    ((void (*)(id, SEL, CGPoint))co)(self, cs, center);
+                    if (!self.window) return;
+                    if (GCWeatherInHoldPhase()) { GCWeatherHoldRow(self); return; }
+                    if (IsWeatherRowView(self)) AlignWeatherRow(self);
+                }), ct);
+            }
+        }
+        // ④ setAlpha:（防止 app 用透明度淡入绕过 setHidden:）
+        {
+            SEL al = @selector(setAlpha:);
+            Method am = class_getInstanceMethod(c, al);
+            if (am) {
+                IMP ao = method_getImplementation(am);
+                const char *at = method_getTypeEncoding(am);
+                Replace(c, al, imp_implementationWithBlock(^(UIView *self, CGFloat alpha) {
+                    ((void (*)(id, SEL, CGFloat))ao)(self, al, alpha);
+                    if (alpha > 0.01 && self.window && GCWeatherInHoldPhase()) GCWeatherHoldRow(self);
+                }), at);
+            }
+        }
     }
 }
 
@@ -1430,7 +1493,9 @@ static void AlignOneWidget(UIView *bar, UIView *w, CGFloat barTop) {
 // 修法：把它移出来，并入周期 tick（与车机钮同一条路径），并在冷启动头 2 秒加 8ms 快窗。
 static void AlignWeatherRowTick(UIWindow *win) {
     if (!win) return;
-    if (ColdTicks >= 30) GCWeatherReleaseHeld();   // 0.9.3：兜底——6 秒后无论如何恢复
+    // 0.9.5：每拍检查释放（内部自判扣留窗）——锚点就绪后立即恢复，
+    // 不再只等 6 秒兜底把半件 LOGO 按太久。
+    GCWeatherReleaseHeld();
     static __weak UIView *Row = nil;
     static int RescanTick = -4;   // -4：保证首次调用一定重扫
     BOOL stale = (!Row || !Row.window);
@@ -1440,13 +1505,20 @@ static void AlignWeatherRowTick(UIWindow *win) {
     }
     // 0.7.4(A6)：缓存失效时原本**每拍**都做一次 ≤2000 节点全窗 BFS（切页后连做几拍）。
     // 节流到每 4 拍（800ms）最多重扫一次。
-    if (stale && TickCount - RescanTick < 4) return;
+    // 0.9.5：扣留窗内取消防抖 —— 2.4s 闪现窗口仅 ~130ms，节流会整段错过。
+    BOOL holdNow = GCWeatherInHoldPhase();
+    if (holdNow) stale = YES;   // Row 已缓存时也强制全扫
+    if (stale && TickCount - RescanTick < 4 && !holdNow) return;
     if (stale) {
         RescanTick = TickCount;
         NSMutableArray *q = [NSMutableArray arrayWithObject:win];
         for (NSUInteger i = 0; i < q.count && q.count < 2000; i++) {
             UIView *v = q[i];
             [q addObjectsFromArray:v.subviews];
+            // 0.9.5：扣留窗内，家族元素（不论尺寸，含半件 LOGO）一见光就按住
+            if (holdNow && !v.hidden && v.window && IsWeatherRowClass(NSStringFromClass(v.class))) {
+                GCWeatherHoldRow(v);
+            }
             if (IsWeatherRowClass(NSStringFromClass(v.class)) && IsWeatherRowView(v)) {
                 // 优先外层容器（WINGroupMapWidget 存在时它就是整行）；
                 // 否则取最宽的那个候选（冷启动时是 WINScaleLineLogoMapWidget，188pt）
