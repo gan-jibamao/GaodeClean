@@ -65,11 +65,12 @@
 ## 目录
 
 ```
-src/GaodeClean.m          当前源码（0.9.2）
+src/GaodeClean.m          当前源码（0.9.8）
 src/GCCGeometry.h         几何辅助头
-scripts/make-roothide.sh  rootless deb → RootHide deb 转换
-scripts/mkdeb.py          不依赖 dpkg-deb 的打包脚本
+Makefile                  一键构建（arm64 + arm64e + deb + 0 警告门禁）
+scripts/mkdeb.py          不依赖 dpkg-deb 的打包脚本（版本/路径全参数化）
 scripts/fixarch.py        arm64e cpusubtype 修正 + 签名页哈希重算
+scripts/make-roothide.sh  【已废弃】历史脚本，打包请直接用 mkdeb.py
 tools/                    逆向分析工具箱（高德升级应对流程，见 tools/README.md）
 dist/                     构建产物（当前版本）
 HISTORY.md                功能清单 / 版本链 / 根因分析 / 构建配方
@@ -79,32 +80,52 @@ HISTORY.md                功能清单 / 版本链 / 根因分析 / 构建配方
 
 ## 构建
 
-### 本机直接编译（iSH / Alpine aarch64，无需 macOS 与 theos 本体）
+### 一键（0.9.8 起）
 
 需要 theos 的 SDK：<https://github.com/theos/sdks> → `iPhoneOS16.5.sdk`
 
 ```bash
-SDK=/path/to/iPhoneOS16.5.sdk
+make SDK=/path/to/iPhoneOS16.5.sdk        # arm64 + arm64e + 两个 deb
+make check SDK=/path/to/iPhoneOS16.5.sdk  # 只跑 0 警告门禁
+make clean
+```
 
-clang -target arm64-apple-ios15.0 -isysroot $SDK \
-  -fobjc-arc -fblocks -fobjc-runtime=ios-15 -O2 \
-  -dynamiclib -fuse-ld=lld \
+等价的手工命令（`make` 内部就是这两条）：
+
+```bash
+SDK=/path/to/iPhoneOS16.5.sdk
+CLANG=clang
+
+# arm64 / rootless：lld 支持 -fixup_chains
+$CLANG -target arm64-apple-ios15.0 -isysroot $SDK \
+  -fobjc-arc -fmodules -O2 -Wall -Wextra -I src \
+  -dynamiclib -install_name /Library/MobileSubstrate/DynamicLibraries/GaodeClean.dylib \
+  -framework UIKit -framework Foundation -fuse-ld=lld -Wl,-adhoc_codesign \
   -Wl,-fixup_chains \
-  -Wl,-install_name,@rpath/GaodeClean.dylib \
-  -Wl,-adhoc_codesign \
-  -framework UIKit -framework Foundation \
-  -framework CoreGraphics -framework QuartzCore \
-  src/GaodeClean.m -o GaodeClean.dylib
+  src/GaodeClean.m -o dist/GaodeClean-arm64.dylib
+
+# arm64e / RootHide：lld 不支持 arm64e 的 -fixup_chains，且会把 cpusubtype 写成 0
+$CLANG -target arm64e-apple-ios15.0 -isysroot $SDK \
+  -fobjc-arc -fmodules -O2 -Wall -Wextra -I src \
+  -dynamiclib -install_name /Library/MobileSubstrate/DynamicLibraries/GaodeClean.dylib \
+  -framework UIKit -framework Foundation -fuse-ld=lld -Wl,-adhoc_codesign \
+  src/GaodeClean.m -o dist/GaodeClean-arm64e.dylib
+python3 scripts/fixarch.py dist/GaodeClean-arm64e.dylib 2
 ```
 
 ### 打包 deb
 
 ```bash
-python3 scripts/mkdeb.py
+make deb
+# 等价：python3 scripts/mkdeb.py --dist dist --control control \
+#         --plist GaodeClean.plist \
+#         --dylib-arm64 dist/GaodeClean-arm64.dylib \
+#         --dylib-arm64e dist/GaodeClean-arm64e.dylib
 ```
 
 产出 rootless（arm64）与 RootHide（arm64e）两种布局。RootHide 包载荷去掉
 `/var/jb` 前缀，`Architecture` 写 `iphoneos-arm64e`，`Depends` 补 `oldabi`。
+版本号从 `control` 的 `Version` 字段读，`Installed-Size` 按真实载荷计算。
 
 arm64e 切片有两个坑：lld 不支持它的 `-fixup_chains`（改走经典 `LC_DYLD_INFO` 绑定），
 且 lld 会把输出头的 **cpusubtype 写成 0**（dyld 靠它判断是否为 arm64e 映像）。

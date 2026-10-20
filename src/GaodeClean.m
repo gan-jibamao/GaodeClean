@@ -18,7 +18,7 @@
 static NSString *const kGCAuthor      = @"jibamao";
 static NSString *const kGCRepo        = @"https://gan-jibamao.github.io/";
 static NSString *const kGCSection     = @"jibamao-Tweaks";
-static NSString *const kGCVersion     = @"0.9.7";
+static NSString *const kGCVersion     = @"0.9.8";
 static NSString *const kGCSignature   = @"GaodeClean by jibamao";
 
 // 对外签名（供 log / 诊断 / 二次核对使用）
@@ -56,7 +56,7 @@ static CGFloat SearchBarSettledY;
 static BOOL SearchBarSettled;
 static NSInteger BarStableTicks;
 static BOOL BarShownOnce;      // 0.9.2：搜索栏在正确位置显示过至少一次（冷启动防闪断标记）
-static BOOL HomeSettled;
+// 0.9.8（A8）：HomeSettled 已删除（只写不读，且语义错误）。
 static NSHashTable<UIView *> *ColdWidgets;
 static NSInteger ColdTicks;
 static char AlignedKey;
@@ -84,7 +84,6 @@ static void KickBarFixFor(NSTimeInterval seconds);
 static void WatchHomeTransition(id tabs);
 static __weak UIWindow *GCCMainWindow;
 static __weak UIWindow *GCCSplashWindow;      // 已识别的广告窗口，之后拒绝其可见
-static __weak UIView   *GCCSplashView;        // 已识别的广告视图
 static NSInteger GCCSplashTicks;              // 兜底扫描剩余拍数（有界）
 static int GCCSplashUntil;                    // 0.7.5(B2)：窗口拉黑失效拍号（60s 后自动解除）
 static int TickCount;         // 0.7.2：主 tick 计数（降频兜底用）
@@ -92,7 +91,6 @@ static BOOL CleanForce;       // 0.7.2：下一拍强制跑一次全量 CleanPag
 static int GCCActiveUntil;    // 0.7.4(A4)：活跃窗截止拍号（切页/新页面挂载后 TickCount+8）
 static void GCCArmTick(void); // 0.7.4(A3)：按前台/后台动态整备 tick 节拍
 static NSMutableDictionary<NSString *, NSNumber *> *AjxCache;  // 0.7.2：类名→是否 AJX
-static BOOL GCCSplashDone;
 static void InstallSplashAdGuard(void);
 static void SplashAdTick(void);
 static void AlignOneWidget(UIView *bar, UIView *w, CGFloat barTop);
@@ -140,7 +138,6 @@ static void AlignOneWidget(UIView *bar, UIView *w, CGFloat barTop);
 @property(nonatomic) BOOL matched;
 @property(nonatomic) BOOL reportedMatch;
 @property(nonatomic) BOOL reportedMiss;
-@property(nonatomic) NSUInteger attempts;
 @end
 @implementation GCCState
 - (instancetype)init {
@@ -271,9 +268,13 @@ static void UpdateMask(UIView *page) {
     CGPoint edge = [state.reference convertPoint:state.boundaryPoint toView:page];
     CGFloat height = MAX(0, MIN(page.bounds.size.height, edge.y - page.bounds.origin.y));
     if (!isfinite(height)) return;
+    // 0.9.8（A10）：Kind() 走的是 PagePath → ObjectGetter → methodSignatureForSelector
+    // 的完整链路，原来在这里被算了**两遍**。UpdateMask 挂在 setBounds: 之后，
+    // 滚动时每帧触发，Pages 有几个页就乘几 —— 白烧一半。
+    NSInteger kind = Kind(page);
     [CATransaction begin];
     [CATransaction setDisableActions:YES];
-    if (Kind(page) == 2 || Kind(page) == 3) {
+    if (kind == 2 || kind == 3) {
         if (page.layer.mask == state.clip && state.clip) {
             state.clip.mask = nil;
             page.layer.mask = state.previousMask;
@@ -396,7 +397,6 @@ static void CleanPage(UIView *page, BOOL full) {
         Restore(state);
         state.path = path;
         state.reportedMatch = state.reportedMiss = NO;
-        state.attempts = 0;
     }
     NSInteger kind = Kind(page);
     if (!kind) { Restore(state); return; }
@@ -419,7 +419,6 @@ static void CleanPage(UIView *page, BOOL full) {
     if (!full && state.matched) { ApplyLimits(state); return; }
     NSArray<UIView *> *nodes = Flatten(page);
     if (!nodes) { ApplyLimits(state); return; }
-    state.attempts++;
     NSArray *primary = kind == 1 ? @[@"常去地点"] : kind == 2 ? @[@"停车", @"美食", @"酒店", @"加油", @"旅游"] : @[@"家人地图", @"地图共建"];
     NSArray *secondary = kind == 1 ? @[@"回家", @"去单位", @"编辑"] : kind == 2 ? @[@"美食", @"酒店", @"加油", @"旅游"] : @[@"车辆服务", @"高德运动", @"店铺入驻"];
     UIView *anchor = nil, *peer = nil;
@@ -638,14 +637,19 @@ static void Schedule(void) {
             StripTabBarGestures();
         }
         // 0.4.41 冷启动兜底：定位超时(约 2.4s)仍未完成则强制显示，避免卡在隐藏态
+        // 0.9.8（A8）：兜底与 HomeSettled 解耦。
+        //   原来只要**任一** widget 对齐成功就置 HomeSettled=YES，这条兜底便再也不跑 ——
+        //   其余仍在 ColdWidgets 里被隐藏的控件（典型：右下定位钮，其 getItemTag 判据
+        //   在 0.9.7 取消版本限制后完全可能不再匹配）就永久停在 hidden=YES，
+        //   用户看到的是「右下角按钮凭空消失，杀进程重开才可能回来」。
+        //   现在逐成员补显示，已对齐（打过 AlignedKey）的不重复写，天然幂等。
         ColdTicks++;
-        if (!HomeSettled && ColdTicks > 12) {
-            HomeSettled = YES;
+        if (ColdTicks > 12) {
             for (UIView *w in ColdWidgets.allObjects) {
-                if ([w isKindOfClass:UIView.class]) {
-                    objc_setAssociatedObject(w, &AlignedKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-                    w.hidden = NO;
-                }
+                if (![w isKindOfClass:UIView.class]) continue;
+                if (objc_getAssociatedObject(w, &AlignedKey)) continue;
+                objc_setAssociatedObject(w, &AlignedKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+                w.hidden = NO;
             }
         }
         // 0.4.45：搜索栏被 app 拉回原生位置(447)时重新隐藏并重置稳定性计数（兜底）
@@ -746,11 +750,21 @@ static void Replace(Class cls, SEL sel, IMP replacement, const char *types) {
 
 static void HookVoid(NSString *name, NSString *methodName, void (^after)(id)) {
     Class cls = NSClassFromString(name);
+    if (!cls) return;
     SEL sel = NSSelectorFromString(methodName);
     Method m = class_getInstanceMethod(cls, sel);
     if (!m) return;
     NSMethodSignature *s = [NSMethodSignature signatureWithObjCTypes:method_getTypeEncoding(m)];
-    if (s.numberOfArguments != 2 || s.methodReturnType[0] != 'v') return;
+    if (s.numberOfArguments != 2 || s.methodReturnType[0] != 'v') {
+        // 0.9.8（A4）：原来这里静默 return —— initWithFrame:model:（4 参 + 返回 @）
+        // 就是这样被无声跳过的，导致「item 建好后关掉重复点击」从未执行。
+        // 这里不再假装成功：留下证据，调用点必须改用 ABI 安全的等价通道。
+        if (getenv("GAODECLEAN_DEBUG_HOOKS")) {
+            NSLog(@"[GaodeClean] hook SKIPPED (sig %lu/%c): %@ -%@",
+                  (unsigned long)s.numberOfArguments, s.methodReturnType[0], name, methodName);
+        }
+        return;
+    }
     IMP original = method_getImplementation(m);
     IMP imp = imp_implementationWithBlock(^(id self) {
         ((void (*)(id, SEL))original)(self, sel);
@@ -801,7 +815,11 @@ static void StripSlidablePan(void) {
                 if (![g isKindOfClass:UIGestureRecognizer.class]) continue;
                 UIView *gv = ((UIGestureRecognizer *)g).view;
                 if (gv) [gv removeGestureRecognizer:g];
-                [v setValue:nil forKey:prop];
+                // 0.9.8（A3-1）：裸 setValue:forKey: 在新版删除/改名该属性时会抛
+                // NSUnknownKeyException（uncaught → 直接崩）。这里吞掉异常，
+                // 摘手势这个核心动作已经完成，KVC 置空只是清理残留引用。
+                @try { [v setValue:nil forKey:prop]; }
+                @catch (__unused NSException *e) {}
             }
             for (UIGestureRecognizer *g in [v.gestureRecognizers copy])
                 if ([g isKindOfClass:UIPanGestureRecognizer.class]) [v removeGestureRecognizer:g];
@@ -876,8 +894,30 @@ static void SealBlurOverlay(void) {
         HookVoid(@"WINMapMaskView", @"layoutSubviews", ^(UIView *v) { v.hidden = YES; v.alpha = 0; });
     }
     // AUGlobalBlurService 往窗口加的全屏模糊视图同样封死。
-    HookVoid(@"AUGlobalBlurService", @"addBlurViewToScreen", ^(id s) { [[s valueForKey:@"maskViews"] makeObjectsPerformSelector:@selector(removeFromSuperview)]; });
-    HookVoid(@"AUGlobalBlurService", @"startService", ^(id s) { ((void (*)(id, SEL))objc_msgSend)(s, NSSelectorFromString(@"clearBlurViews")); });
+    // 0.9.8（A3-2/3）：valueForKey:/clearBlurViews 都是**裸调用**。
+    //   · `maskViews` 属性被删/改名 → NSUnknownKeyException（uncaught 崩溃）；
+    //     返回非数组（NSNull/NSSet）→ makeObjectsPerformSelector: 崩。
+    //   · `clearBlurViews` 不存在 → unrecognized selector 崩。
+    //   两条都在 App 启动路径上（startService 由高德自己调），必须防御。
+    HookVoid(@"AUGlobalBlurService", @"addBlurViewToScreen", ^(id s) {
+        id mv = nil;
+        @try { mv = [s valueForKey:@"maskViews"]; }
+        @catch (__unused NSException *e) { mv = nil; }
+        if ([mv isKindOfClass:NSArray.class]) {
+            for (id v in (NSArray *)mv)
+                if ([v isKindOfClass:UIView.class]) [v removeFromSuperview];
+        } else if ([mv isKindOfClass:NSSet.class]) {
+            for (id v in [(NSSet *)mv allObjects])
+                if ([v isKindOfClass:UIView.class]) [v removeFromSuperview];
+        }
+    });
+    HookVoid(@"AUGlobalBlurService", @"startService", ^(id s) {
+        SEL clr = NSSelectorFromString(@"clearBlurViews");
+        if (![s respondsToSelector:clr]) return;
+        NSMethodSignature *sig = [s methodSignatureForSelector:clr];
+        if (sig.numberOfArguments != 2) return;
+        ((void (*)(id, SEL))objc_msgSend)(s, clr);
+    });
     // 根因入口：底栏上滑 → WINViewControl showMapMaskView → 亮起全屏白色蒙版。
     // 二进制实测签名：showMapMaskView B16@0:8（返回 BOOL！）、resetMapMaskView v16@0:8、
     // setShowMapMaskView: v20@0:8B16。showMapMaskView 必须返回 NO 才算拒绝，
@@ -1088,13 +1128,16 @@ static BOOL GCWeatherInHoldPhase(void) {
 }
 static BOOL GCWeatherHoldRow(UIView *v) {
     if (!v) return NO;
-    // 0.9.7：位置门槛 —— 只扣留「落在中屏原生错误位」的元素（冷启动闪现指纹，
-    // y < 窗高 55%）；已在对齐行内（y ≈ 窗高 78%）的显示请求直接放行。
+    // 0.9.7：位置门槛 —— 只扣留「落在中屏原生错误位」的元素（冷启动闪现指纹）。
     // 没有这道门，扩网钩子（setHidden:/setAlpha:/setFrame:）会误伤正常刷新的
     // 行内元素（0.9.6 真机案例：200米比例尺被误关 3.2s）。
+    // 0.9.8（A1）：门槛 0.55 → 0.70。原生错误位是**绝对 411pt**（见 LayoutMinimalHome
+    //   内 {{10,411}} 的实测注释），不是窗高比例。667pt 机型 0.55h = 367pt < 411pt
+    //   → 门槛在错误位置上方就已经放行，扣留网整个放空 —— SE2/8/8P 上 0.9.3~0.9.5
+    //   修掉的「LOGO 中屏闪现」会回归。0.70 × 667 = 467pt > 411pt，667~932pt 全机型覆盖。
     if (v.window) {
         CGRect r = [v convertRect:v.bounds toView:v.window];
-        if (r.origin.y > v.window.bounds.size.height * 0.55) return NO;   // 位置正确，不扣
+        if (r.origin.y > v.window.bounds.size.height * 0.70) return NO;   // 位置正确，不扣
     }
     if (!GCWeatherHeldRows) GCWeatherHeldRows = [NSHashTable weakObjectsHashTable];
     if (![GCWeatherHeldRows containsObject:v]) {
@@ -1112,7 +1155,14 @@ static BOOL GCWeatherHoldRow(UIView *v) {
 static void AlignWeatherRow(UIView *row);      // 0.9.5：前置声明（释放路径要用）
 static BOOL IsWeatherRowView(UIView *v);       // 0.9.5：前置声明
 static void GCWeatherReleaseHeld(void) {
-    if (!GCWeatherHeldRows || GCWeatherHeldRows.count == 0) return;
+    if (!GCWeatherHeldRows || GCWeatherHeldRows.count == 0) {
+        // 0.9.8（A13）：本轮一行都没扣留时（机型没有该行 / 位置本来就对），
+        // 下面那句 GCWeatherDoneOnce = YES 永远走不到 —— 于是整个 ColdTicks<30
+        // 期间 GCWeatherInHoldPhase() 恒为真，AlignWeatherRowTick 每拍全功率
+        // 全窗 BFS（≤2000 节点），纯空转 6 秒。没有待释放对象时同样要封网。
+        if (!GCWeatherInHoldPhase()) GCWeatherDoneOnce = YES;
+        return;
+    }
     if (GCWeatherInHoldPhase()) return;   // 仍在扣留窗 → 继续按住
     NSArray *all = GCWeatherHeldRows.allObjects;
     [GCWeatherHeldRows removeAllObjects]; // 0.9.5：先清表，杜绝「释放→对齐→再释放」递归
@@ -1168,14 +1218,26 @@ static void AlignWeatherRow(UIView *row) {
 // 也就是说：正常态用容器 WINGroupMapWidget，冷启动态只有子件 WINScaleLineLogoMapWidget。
 // 原来的查找只认前者 → 冷启动永远找不到 → 不归位；切页后容器才被建出来 → 才归位。
 static BOOL IsWeatherRowClass(NSString *cn) {
+    if (!cn.length) return NO;
+    // 0.9.8（A12）：冷启动 hold 期每拍一次 ≤2000 节点全窗 BFS（见 AlignWeatherRowTick），
+    // 每个节点都要过这里 8 次字符串比较 —— 30 拍 × 2000 × 8 ≈ 48 万次，全在启动关键 6 秒。
+    // 类名集合有限且稳定，按 AjxCache 同样的思路缓存判定结果。
+    static NSMutableDictionary<NSString *, NSNumber *> *cache;
+    if (!cache) cache = [NSMutableDictionary dictionary];
+    NSNumber *cached = cache[cn];
+    if (cached) return cached.boolValue;
+    BOOL hit = NO;
     if ([cn isEqualToString:@"WINGroupMapWidget"]
         || [cn isEqualToString:@"WINScaleLineLogoMapWidget"]
         || [cn isEqualToString:@"WINWeatherLimitView"]
         || [cn isEqualToString:@"WINLiteWidgetLogoScaleLineView"]   // 0.9.5：17.01.1 冷启动 Lite 版 LOGO 视图
         || [cn isEqualToString:@"LTMBigPearMapLogoView"]            // 0.9.5：引擎内 LOGO 视图
         || [cn isEqualToString:@"LTMBigPearScaleLine"])             // 0.9.5：引擎内比例尺
-        return YES;
-    return [cn containsString:@"LogoScaleLine"] || [cn containsString:@"ScaleLineLogo"];
+        hit = YES;
+    else
+        hit = [cn containsString:@"LogoScaleLine"] || [cn containsString:@"ScaleLineLogo"];
+    cache[cn] = @(hit);
+    return hit;
 }
 
 static BOOL IsWeatherRowView(UIView *v) {
@@ -1391,6 +1453,7 @@ static void LayoutMinimalHome(id handler) {
     {
         UIWindow *win = bar.window;
         static __weak UIView *CachedRow = nil;
+        static int RowRescanTick = -4;
         // 0.6.1：缓存失效条件加上「尺寸不再匹配」—— 切 2D/3D 后 app 换掉的是实例，
         // 旧实例的 window 可能还在，原本的 !CachedRow.window 判据抓不到，缓存会一直指着旧的。
         BOOL rowStale = (!CachedRow || !CachedRow.window);
@@ -1398,7 +1461,14 @@ static void LayoutMinimalHome(id handler) {
             CGRect r0 = [CachedRow convertRect:CachedRow.bounds toView:win];
             if (r0.size.width < 150 || r0.size.width > 360 || r0.size.height >= 40) rowStale = YES;
         }
+        // 0.9.8（A9）：这个块跑在 LayoutMinimalHome 里，而它被 BarFixTimer 以 **8ms**
+        // 周期调用 —— 一次 640ms 快修窗最多 80 次。rowStale 时每次都是 ≤2000 节点的
+        // 全窗 BFS，切页/切 2D-3D 瞬间就是 16 万次视图访问，全在主线程。
+        // 与 AlignWeatherRowTick 同策略：非扣留期节流到每 4 拍（800ms）最多重扫一次；
+        // 扣留期保持全速（0.9.5 的闪现窗口只有 ~130ms，不能等）。
+        if (rowStale && !GCWeatherInHoldPhase() && TickCount - RowRescanTick < 4) rowStale = NO;
         if (win && rowStale) {
+            RowRescanTick = TickCount;
             NSMutableArray *q = [NSMutableArray arrayWithObject:win];
             for (NSUInteger qi = 0; qi < q.count && q.count < 2000; qi++) {
                 UIView *v = q[qi];
@@ -1497,7 +1567,9 @@ static void AlignOneWidget(UIView *bar, UIView *w, CGFloat barTop) {
     // 逐 widget 对齐标记：对齐过才显示，避免冷启动在原生位置(如 {0,0})闪现
     objc_setAssociatedObject(w, &AlignedKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     if (w.hidden) w.hidden = NO;
-    HomeSettled = YES;
+    // 0.9.8（A8）：原来的 HomeSettled = YES 已删除 —— 它的语义（任一 widget 对齐
+    // 即「首页稳定」）与实际不符，而且解耦后无人读取。稳定性改由每个成员自身的
+    // AlignedKey + Schedule 里的逐成员兜底共同保证。
 }
 
 
@@ -1798,6 +1870,14 @@ static void InstallTabBarHintHooks(void) {
         }
     }
     HookVoid(@"WINTabBarItem", @"didMoveToWindow", ^(UIView *item) {
+        // 0.9.8（A4）：原「initWithFrame:model: 建好后关掉重复点击」的钩子，
+        // 被 HookVoid 的签名守卫（只接受 2 参 + 返回 void）静默跳过 ——
+        // 真实签名是 4 参、返回 @。这里迁到 didMoveToWindow（v16@0:8）：
+        // 同一语义、零 ABI 风险；WINTabBarItem 固定两个、不复用，时机等价。
+        for (NSString *setter in @[@"setAllowRepeatClick:", @"setAmap_allowRepeatClick:"]) {
+            SEL s = NSSelectorFromString(setter);
+            if ([item respondsToSelector:s]) ((void (*)(id, SEL, BOOL))objc_msgSend)(item, s, NO);
+        }
         for (UIView *p = item.superview; p; p = p.superview)
             if ([NSStringFromClass(p.class) isEqualToString:@"WINTabBar"]) { SweepTabBarHints(p); break; }
     });
@@ -1922,6 +2002,7 @@ static BOOL GCCHasAdKeyword(NSString *name) {
     if (!name.length) return NO;
     static NSArray<NSString *> *kw;
     static dispatch_once_t once;
+    static NSMutableDictionary<NSString *, NSNumber *> *hitCache;
     dispatch_once(&once, ^{
         // 只列**明确属于广告 SDK** 的词。注意不能放裸 "ad"：
         // header / download / shadow / badge 都会误伤。
@@ -1931,10 +2012,18 @@ static BOOL GCCHasAdKeyword(NSString *name) {
                @"kssplash", @"ksad", @"mtgsplash", @"mtgad",
                @"baidumob", @"beacon", @"splashad", @"adskip",
                @"winsplash", @"amapsplash", @"autosplash"];
+        hitCache = [NSMutableDictionary dictionary];
     });
+    // 0.9.8（A11）：这个函数挂在 UIWindow -addSubview: 这条全局热路径上（开屏广告通道①），
+    // 原来每次都要 lowercaseString（分配新字符串）+ 27 次 containsString:。
+    // 类名集合有限且稳定，按原名缓存判定结果，命中即 O(1)。
+    NSNumber *cached = hitCache[name];
+    if (cached) return cached.boolValue;
     NSString *low = name.lowercaseString;
-    for (NSString *k in kw) if ([low containsString:k]) return YES;
-    return NO;
+    BOOL hit = NO;
+    for (NSString *k in kw) if ([low containsString:k]) { hit = YES; break; }
+    hitCache[name] = @(hit);
+    return hit;
 }
 
 // 覆盖所在窗口 ≥60% 面积才算开屏广告
@@ -1947,11 +2036,30 @@ static BOOL GCCIsFullScreen(UIView *v) {
         && CGRectGetHeight(r) >= w.bounds.size.height * 0.6;
 }
 
+// 0.9.8（A6）：高德自家的启动屏/开屏外壳 —— 类名含 splash，但**不是广告**。
+// GCCHasAdKeyword 的词表里有裸词 "splash"，会把 APSplashScreen* 一并网住；
+// 这条路径真实可达（见下面 GCCWindowIsAppHost 的原注释）：一旦被当广告隐藏，
+// App 启动直接白屏。原则不变：宁可漏一个广告，也绝不误伤 App 自身。
+static BOOL GCCIsAppOwnSplash(NSString *cn) {
+    if (!cn.length) return NO;
+    static NSArray<NSString *> *own;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        own = @[@"APSplashScreen", @"APLaunchScreen", @"AMapLaunchScreen",
+                @"GDAmapLaunchScreen", @"WINAppLaunchScreen", @"AMapSplashScreen"];
+    });
+    for (NSString *p in own) if ([cn hasPrefix:p]) return YES;
+    return NO;
+}
+
 static BOOL GCCIsSplashAd(UIView *v, UIWindow *win) {
     if (!v || v.hidden) return NO;
     NSString *cn = NSStringFromClass(v.class);
     if ([cn hasPrefix:@"GCC"]) return NO;                    // 自己的视图
-    if (!GCCHasAdKeyword(cn) && !GCCHasAdKeyword(NSStringFromClass(win.class))) return NO;
+    if (GCCIsAppOwnSplash(cn)) return NO;                    // 0.9.8(A6)：自家启动屏
+    NSString *wcn = NSStringFromClass(win.class);
+    if (GCCIsAppOwnSplash(wcn)) return NO;                   // 0.9.8(A6)：自家启动窗
+    if (!GCCHasAdKeyword(cn) && !GCCHasAdKeyword(wcn)) return NO;
     return GCCIsFullScreen(v);
 }
 
@@ -1969,7 +2077,11 @@ static BOOL GCCWindowIsAppHost(UIWindow *w) {
     if (w == GCCMainWindow) return YES;
     if (w.isKeyWindow) return YES;   // 0.9.4：弃用 API → 属性
     UIViewController *root = w.rootViewController;           // 承载 App 根 VC 的窗口不是广告窗口
-    if (root && !GCCHasAdKeyword(NSStringFromClass(root.class))) return YES;
+    if (root) {
+        NSString *rc = NSStringFromClass(root.class);
+        // 0.9.8（A6）：自家启动屏优先放行，再走关键词判定
+        if (GCCIsAppOwnSplash(rc) || !GCCHasAdKeyword(rc)) return YES;
+    }
     return NO;
 }
 
@@ -1977,7 +2089,6 @@ static BOOL GCCWindowIsAppHost(UIWindow *w) {
 static void GCCHideSplashAd(UIView *v, NSString *why) {
     if (!v) return;
     UIWindow *w = v.window;
-    GCCSplashView = v;
     v.hidden = YES;
     NSLog(@"[GaodeClean] splash ad hidden [%@] view=%@ win=%@",
           why, NSStringFromClass(v.class), NSStringFromClass(w.class));
@@ -1989,7 +2100,6 @@ static void GCCHideSplashAd(UIView *v, NSString *why) {
         GCCSplashUntil = TickCount + 300;                    // 0.7.5(B2)
         w.hidden = YES;
     }
-    GCCSplashDone = YES;
     GCCSplashTicks = 0;
 }
 
@@ -1997,18 +2107,18 @@ static void GCCHideSplashAd(UIView *v, NSString *why) {
 static void GCCHideAdWindows(void) {
     for (UIWindow *w in GCAllWindows()) {
         if (w.hidden) continue;
-        if (!GCCHasAdKeyword(NSStringFromClass(w.class))) continue;
+        NSString *wcn = NSStringFromClass(w.class);
+        if (!GCCHasAdKeyword(wcn)) continue;
+        if (GCCIsAppOwnSplash(wcn)) continue;                // 0.9.8(A6)：自家启动窗
         // 0.7.5(B1)：主窗口未确定 / 该窗口是 App UI 宿主 → 绝不拉黑
         if (GCCWindowIsAppHost(w)) {
-            NSLog(@"[GaodeClean] ad-window blacklist SKIPPED (App host): %@",
-                  NSStringFromClass(w.class));
+            NSLog(@"[GaodeClean] ad-window blacklist SKIPPED (App host): %@", wcn);
             continue;
         }
         GCCSplashWindow = w;
         GCCSplashUntil = TickCount + 300;                    // 0.7.5(B2)：60s 后自动失效
         w.hidden = YES;
-        GCCSplashDone = YES;
-        NSLog(@"[GaodeClean] splash ad window hidden: %@", NSStringFromClass(w.class));
+            NSLog(@"[GaodeClean] splash ad window hidden: %@", wcn);
     }
 }
 
@@ -2047,7 +2157,6 @@ static void SplashAdTick(void) {
 
 static void ReArmSplashGuard(void) {
     GCCSplashTicks = 75;          // 75 × 200ms ≈ 15s
-    GCCSplashDone = NO;
     SplashAdTick();
 }
 
@@ -2104,6 +2213,14 @@ static BOOL GCCClassImplements(Class cls, SEL sel) {
 }
 
 static void GCCHookAdClasses(void) {
+    // 0.9.8（A7）：原来每次回到前台都跑一遍 objc_getClassList（真机约 4 万类）
+    // + malloc，日志还会把已经装过的钩子重打一遍。类表在启动后不久就稳定，
+    // 这里限制为 4 次（install / +1s / +3s / 首个回前台），之后交给
+    // GCCHideAdWindows 的窗口级兜底。真机卡顿与日志刷屏同时消失。
+    static int runs = 0;
+    if (runs >= 4) return;
+    runs++;
+
     int count = objc_getClassList(NULL, 0);
     if (count <= 0) return;
     Class *all = (Class *)malloc(sizeof(Class) * (size_t)count);
@@ -2190,6 +2307,13 @@ static void GCCHookAdClasses(void) {
 //  精确拦截的靶子（届时只动判定层，绝不动展示层）。
 // ---------------------------------------------------------------------------
 static void GCReportSplashClasses(void) {
+    // 0.9.8（A7）：诊断探针默认关闭 —— 原来 install / +1s / +3s 各跑一次
+    // 全类枚举（约 4 万类）并打一整行类名日志，正式包里毫无产出价值。
+    // 需要取证时：启动环境加 GAODECLEAN_DEBUG_SPLASH=1。
+    static int enabled = -1;
+    if (enabled < 0) enabled = getenv("GAODECLEAN_DEBUG_SPLASH") ? 1 : 0;
+    if (!enabled) return;
+
     int n = objc_getClassList(NULL, 0);
     if (n <= 0) return;
     Class *all = (Class *)malloc(sizeof(Class) * (size_t)n);
@@ -2229,6 +2353,12 @@ static void InstallSplashAdGuard(void) {
 
     // 通道 ②：模态全屏广告。presentViewController 一次会话只调用几次，
     // 不是热路径；且只在「呈现出来的确实是广告」时才动手。
+    // 0.9.8（A2）：判定点从**调用栈内**移到 completion 块。
+    //   原实现在 present 返回瞬间读 vc.view / pv.window：present 尚未开始转场，
+    //   pv.window 恒为 nil → GCCIsSplashAd 的 GCCIsFullScreen 首句就判死 →
+    //   这条通道**从未命中过**；而且即便命中，在 present 调用栈里同步 dismiss
+    //   会撞 UIKit 的「presentation in progress」断言。
+    //   现在：completion 里再判，dismiss 也放到下一 runloop，避开转场锁。
     {
         SEL sel = @selector(presentViewController:animated:completion:);
         Method m = class_getInstanceMethod(UIViewController.class, sel);
@@ -2238,14 +2368,18 @@ static void InstallSplashAdGuard(void) {
             Replace(UIViewController.class, sel,
                 imp_implementationWithBlock(^(UIViewController *self, UIViewController *vc,
                                               BOOL animated, void (^done)(void)) {
-                    ((void (*)(id, SEL, id, BOOL, id))o)(self, sel, vc, animated, done);
-                    UIView *pv = vc.view;
-                    if (pv && GCCIsSplashAd(pv, pv.window)) {
-                        GCCHideSplashAd(pv, @"present");
-                        if (vc.presentingViewController) {
-                            [vc dismissViewControllerAnimated:NO completion:nil];
-                        }
-                    }
+                    void (^tail)(void) = ^{
+                        if (done) done();
+                        dispatch_async(dispatch_get_main_queue(), ^{
+                            UIView *pv = vc.viewIfLoaded;
+                            if (!pv || !GCCIsSplashAd(pv, pv.window)) return;
+                            GCCHideSplashAd(pv, @"present");
+                            if (vc.presentingViewController) {
+                                [vc dismissViewControllerAnimated:NO completion:nil];
+                            }
+                        });
+                    };
+                    ((void (*)(id, SEL, id, BOOL, id))o)(self, sel, vc, animated, tail);
                 }), t);
         }
     }
@@ -2350,8 +2484,13 @@ static void InstallMinimalHome(void) {
         if (lm) {
             IMP o2 = method_getImplementation(lm); const char *t2 = method_getTypeEncoding(lm);
             Replace(CALayer.class, so, imp_implementationWithBlock(^(CALayer *self, float op) {
-                id dg = self.delegate;
-                if (dg && [dg isKindOfClass:mv] && op < 0.99f) op = 1.0f;
+                // 0.9.8（A14）：setOpacity: 是全 app 每个图层动画都走的方法。
+                // 原来先取 delegate 再判值，而绝大多数调用 op == 1.0。
+                // 把判值提到最前，省掉 99% 的 delegate 访问 + isKindOfClass:。
+                if (op < 0.99f) {
+                    id dg = self.delegate;
+                    if (dg && [dg isKindOfClass:mv]) op = 1.0f;
+                }
                 ((void (*)(id, SEL, float))o2)(self, so, op);
             }), t2);
         }
@@ -2658,12 +2797,8 @@ static void InstallMinimalHome(void) {
         }));
     }
     // 注册顺序可能晚于此处，所以在每个 item 建好后同步清一次。
-    HookVoid(@"WINTabBarItem", @"initWithFrame:model:", ^(UIView *item) {
-        for (NSString *setter in @[@"setAllowRepeatClick:", @"setAmap_allowRepeatClick:"]) {
-            SEL s = NSSelectorFromString(setter);
-            if ([item respondsToSelector:s]) ((void (*)(id, SEL, BOOL))objc_msgSend)(item, s, NO);
-        }
-    });
+    // 0.9.8（A4）：这段原挂在 initWithFrame:model: 上，因签名不匹配从未执行；
+    // 已并入上面的 WINTabBarItem -didMoveToWindow（见 InstallTabBarHintHooks）。
     HookVoid(@"WINTabBar", @"amap_relayoutTabItems", ^(UIView *bar) {
         // 0.6.7：这个 selector 在本文件被装了两次，而 Replace() 走
         // method_setImplementation —— 后装的那次会把先装的顶掉（CenterTabButtons 失效）。
@@ -2716,7 +2851,17 @@ __attribute__((constructor)) static void Initialize(void) {
                 if ([@[@"WINAmapHomeControl", @"WINMineViewControl"] containsObject:ObjectGetter(item, @"className") ?: @""])
                     [kept addObject:item];
             }
-            if (kept.count == 2) ((void (*)(id, SEL, id))objc_msgSend)(tabs, NSSelectorFromString(@"setViewControlParams:"), kept);
+            // 0.9.8（A3-4）：setViewControlParams: 是裸 objc_msgSend，方法被改名即崩。
+            // 加存在性 + 签名（应为 void, 1 对象参数）。
+            if (kept.count == 2) {
+                SEL svp = NSSelectorFromString(@"setViewControlParams:");
+                if ([tabs respondsToSelector:svp]) {
+                    NSMethodSignature *sig = [tabs methodSignatureForSelector:svp];
+                    if (sig.numberOfArguments == 3) {
+                        ((void (*)(id, SEL, id))objc_msgSend)(tabs, svp, kept);
+                    }
+                }
+            }
         });
         HookHitTest(UIView.class);
         HookHitTest(NSClassFromString(@"AJX3View"));
@@ -2738,7 +2883,13 @@ __attribute__((constructor)) static void Initialize(void) {
             }
         }
         HookVoid(@"AJXBaseElement", @"reloadView", ^(id e) { Capture(e); });
-        HookVoid(@"AJXBaseElement", @"layoutSubViews", ^(id e) { Capture(e); });
+        // 0.9.8（A5）：这里原本是 @"layoutSubViews"（大写 V）—— ObjC/UIKit 惯例是
+        // layoutSubviews（小写 v），自定义方法一律带 amap_ 前缀，所以这一行几乎可以
+        // 断定从未命中过，是纯死代码。
+        // **不能**改成 layoutSubviews：0.7.3 的实测结论就写在下面 —— 它在滚动动画里
+        // 每帧触发，当事件源会让 fullClean 几乎每拍成立，把 0.7.2 的 CleanPage 降频
+        // 整个抵消掉。删除即可，Capture 的事件源由 reloadView /
+        // updateVoiceOverIDAndLabel / AJX3View-didMoveToWindow 三条承担。
         HookVoid(@"AJXBaseElement", @"updateVoiceOverIDAndLabel", ^(id e) { Capture(e); });
         // 0.7.3：layoutSubviews 在滚动动画里**每帧都触发**，把它当事件源会让
         // fullClean 几乎每拍成立 —— 0.7.2 的 CleanPage 降频实际上被它抵消了。
@@ -2760,6 +2911,26 @@ __attribute__((constructor)) static void Initialize(void) {
                                                     usingBlock:^(__unused NSNotification *note) {
             GCCArmTick();
         }];
+        // 0.9.8（A15）：SearchBarSettled 原来**只置 YES、从不复位** —— 横竖屏切换 /
+        // 分屏 / 窗口尺寸变化后，HookWidgetSetFrame 里的 targetBottom 仍然是旧坐标，
+        // 搜索栏与两个圆钮整片错位，直到杀进程。方向变化时清掉首帧锁定，
+        // 让下一拍 LayoutMinimalHome 按新宽度重算。
+        // 该通知在 iOS 13 起标记废弃（推荐 viewWillTransitionToSize:），但对全屏单窗口
+        // 的 App 仍会正常发送，且不依赖任何 VC 层级 —— 对本插件最稳。与 GCAllWindows
+        // 一样在本处集中 suppress，保持全文件 0 警告基线。
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+        [NSNotificationCenter.defaultCenter addObserverForName:UIApplicationDidChangeStatusBarOrientationNotification
+                                                        object:nil queue:NSOperationQueue.mainQueue
+                                                    usingBlock:^(__unused NSNotification *note) {
+            SearchBarSettled = NO;
+            SearchBarSettledY = 0;
+            BarStableTicks = 0;
+            CachedCar = nil;
+            CachedRight = nil;
+            CachedRoute = nil;
+        }];
+#pragma clang diagnostic pop
         // Recheck after asynchronous cards and cell reuse; only attached target pages are scanned.
         dispatch_async(dispatch_get_main_queue(), ^{
             Schedule();
