@@ -5,7 +5,7 @@
 
 | | |
 |:--|:--|
-| **当前版本** | `0.9.7` |
+| **当前版本** | `0.9.8` |
 | **Author** | **jibamao** — <https://gan-jibamao.github.io/> · Section `jibamao-Tweaks` |
 | **目标** | 高德地图 / AMap `com.autonavi.amap`（**版本限制已取消，全版本自适应**） |
 | **架构** | `arm64`（rootless / TrollFools 注入）· `arm64e`（RootHide） |
@@ -848,22 +848,20 @@ LayoutMinimalHome ×1 + WINGroupMapWidget 老块 ×4 + tick ×1）。
 
 ## 六、构建与产物
 
-### 本机直接编译（iSH / Alpine aarch64，无需 macOS 与 theos 本体）
+### 一键构建（0.9.8 起）
 
 需要 theos 的 SDK：<https://github.com/theos/sdks> → `iPhoneOS16.5.sdk`
 
 ```bash
-SDK=/path/to/iPhoneOS16.5.sdk
-
-clang -target arm64-apple-ios15.0 -isysroot $SDK -fobjc-arc -fblocks \
-  -fobjc-runtime=ios-15 -O2 -dynamiclib -fuse-ld=lld -Wl,-fixup_chains \
-  -Wl,-install_name,@rpath/GaodeClean.dylib -Wl,-adhoc_codesign \
-  -framework UIKit -framework Foundation \
-  -framework CoreGraphics -framework QuartzCore \
-  src/GaodeClean.m -o GaodeClean.dylib
+make SDK=/path/to/iPhoneOS16.5.sdk        # arm64 + arm64e + 两个 deb
+make check SDK=/path/to/iPhoneOS16.5.sdk  # 只跑 0 警告门禁
 ```
 
-deb 打包用 `scripts/mkdeb-local.py`（Python 写 `ar` 归档，不需要 `dpkg-deb`）。
+`Makefile` 内部就是「clang 两条 + fixarch.py 一次 + mkdeb.py 一次」，
+参数与产物命名全部与本节下文一致。
+
+deb 打包用 `scripts/mkdeb.py`（Python 写 `ar` 归档，不需要 `dpkg-deb`）；
+版本号从 `control` 的 `Version` 读，`Installed-Size` 按真实载荷计算。
 
 > **arm64e 是这样出来的** —— 两件事都要处理：
 > 1. lld 不支持 arm64e 的 `-fixup_chains`（只支持 x86_64 与 arm64），
@@ -969,7 +967,8 @@ cmp <(ar p dist/*.deb data.tar.gz | tar xzO ./var/jb/.../GaodeClean.dylib) dist/
 0.9.4   源码审计优化（告警 14→0；死代码清除 + 热点轻量化）
 0.9.5   冷启动 LOGO 中屏闪现修复（半件 130ms → 0）
 0.9.6   回归修复：LOGO 搬运叠压天气（搬运面收归单一）
-0.9.7   200米比例尺误关修复（首次释放后封网 + 位置门槛）             ← 当前（采用）
+0.9.7   200米比例尺误关修复（首次释放后封网 + 位置门槛）
+0.9.8   审计修复 15 项：崩溃面 / 兜底失效 / 6 条热路径 / 构建链       ← 当前（采用）
 ```
 
 ---
