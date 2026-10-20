@@ -52,6 +52,9 @@
 | 启动屏广告移除 | 0.7.1 |
 | 常驻开销收敛（3 定时器 → 2，全树遍历 -80%） | 0.7.2 |
 | 滚动热路径收敛（事件源 + bringSubviewToFront + clip path 缓存） | 0.7.3 |
+| 冷启动兜底解耦（逐成员补显示，控制件不再永久隐藏） | 0.9.8 |
+| 热路径缓存（广告关键词 / 天气行类名 / `Kind()`） | 0.9.8 |
+| 全类枚举有界化 + 诊断探针默认关 | 0.9.8 |
 
 ---
 
@@ -796,6 +799,50 @@ LayoutMinimalHome ×1 + WINGroupMapWidget 老块 ×4 + tick ×1）。
 **教训**：扩网（扣留面）之后，每一个钩子路径都要重新审「误伤面」——
 锚点实例会抖、app 会刷新实例，任何「实例级状态」都不可作为长窗状态判定。
 
+### V. 0.9.8 审计修复 15 项（当前采用）
+
+**背景**：0.9.7 发版后应「检查源码还有没有需要优化的地方」做全量审计。审计前先核对远端，
+发现 **0.9.7 之后那批修复从未推送**（仓库一直停在 `ed01450`：0.55 门、`layoutSubViews`、
+无 `GCCIsAppOwnSplash` 全部原样命中）—— 所以本轮把旧账与本轮新发现一并做掉，一次出 0.9.8。
+
+**P1 · 崩溃面与功能失效**
+
+| 编号 | 问题 | 根因铁证 | 修复 |
+|:--|:--|:--|:--|
+| A1 | 667pt 机型 LOGO 中屏闪现回归 | 扣留门槛按窗高比例算（`0.55h = 367pt`），而原生错误位是**绝对 411pt**（源码内 `{{10,411}}` 实测注释）—— 门槛在错误位置上方就已放行 | 0.55 → **0.70**（0.70×667 = 467pt > 411pt），667–932pt 全机型覆盖 |
+| A2 | 模态全屏广告通道**从未命中** | `presentViewController:...` 返回瞬间 `vc.view.window` 恒为 nil，`GCCIsSplashAd` 首句即判死；且即便命中，在调用栈内同步 dismiss 会撞 UIKit「presentation in progress」断言 | 判定移到 completion 内 + dismiss 放下一 runloop |
+| A3 | 新版高德一改属性就崩 | 4 处裸 KVC / 裸 selector：`maskViews`（非数组 → `makeObjectsPerformSelector:` 崩）、`clearBlurViews` 与 `setViewControlParams:`（改名 → unrecognized selector）、`setValue:nil forKey:`（属性删除 → `NSUnknownKeyException`）| 类型 / 存在性 / 方法签名三重校验 |
+| A4 | 「重复点首页」清理从未生效 | `initWithFrame:model:` 真实签名是 **4 参 + 返回 `@`**，被 `HookVoid` 的「2 参 + void」守卫**静默跳过** | 迁到 ABI 安全的 `-didMoveToWindow`；守卫增加可发现日志（`GAODECLEAN_DEBUG_HOOKS=1`）|
+| A6 | 启动偶发白屏 | `GCCHasAdKeyword` 词表含裸词 `splash`，把自家 `APSplashScreen*` 一并网住并隐藏 | 新增 `GCCIsAppOwnSplash` 白名单，3 处判定统一放行 |
+| A8 | 右下定位钮凭空消失 | 任一 widget 对齐成功即置 `HomeSettled = YES`，`ColdTicks > 12` 兜底对其余仍在 `ColdWidgets` 里隐藏的控件**永久失效** | 兜底改为逐成员补显示（幂等）；该标志只写不读，整体删除 |
+
+**P2 · 热路径与常驻开销**
+
+| 编号 | 问题 | 根因铁证 | 修复 |
+|:--|:--|:--|:--|
+| A7 | 每次回前台卡顿 + 日志刷屏 | `GCCHookAdClasses` 每次 `DidBecomeActive` 都跑 `objc_getClassList`（真机约 4 万类）+ malloc，并把已装钩子重打一遍 | 限制为 4 次（install / +1s / +3s / 首个回前台）；`GCReportSplashClasses` 默认关闭 |
+| A9 | 切页 / 切 2D-3D 瞬间卡顿 | `LayoutMinimalHome` 被 `BarFixTimer` 以 **8ms** 调用，`rowStale` 时每次 ≤2000 节点全窗 BFS —— 一次 640ms 快修窗最多 16 万次视图访问 | 非扣留期节流到每 4 拍；扣留期保持全速 |
+| A10 | 滚动时每帧多算一半 | `UpdateMask` 把 `Kind()` 算两遍，而它是 `PagePath → ObjectGetter → methodSignatureForSelector` 全链路，挂在 `setBounds:` 后每帧触发 | 只算一次 |
+| A11 | 启动期 addSubview 变慢 | `GCCHasAdKeyword` 挂在 `UIWindow -addSubview:` 全局热路径，每次 `lowercaseString` + 27 次 `containsString:` | 按类名缓存判定结果 |
+| A12 | 冷启动前 6 秒空转 | `IsWeatherRowClass` 无缓存 —— 30 拍 × 2000 节点 × 8 次字符串比较 ≈ **48 万次** | 类名缓存（同 `AjxCache` 模式）|
+| A13 | 无天气行机型同样空转 | `GCWeatherHeldRows` 为空时 `GCWeatherReleaseHeld` 提前 return，`GCWeatherDoneOnce` 永不置位 → 整个 `ColdTicks < 30` 期间判定恒真 | 无待释放对象时同样封网 |
+| A14 | 全 app 图层动画多一层开销 | `CALayer -setOpacity:` 先取 `delegate` 再判值，而绝大多数调用 `op == 1.0` | 判值提到最前，99% 调用免 delegate 访问 |
+
+**P3 · 清理与构建链**
+
+- **A5** 删除 `layoutSubViews`（大写 V）死钩子。**不补** `layoutSubviews` —— 0.7.3 已实测它
+  在滚动动画里每帧触发，会抵消 `CleanPage` 降频。事件源由 `reloadView` /
+  `updateVoiceOverIDAndLabel` / `AJX3View-didMoveToWindow` 三条承担。
+- **A15** 死变量清理（`GCCSplashView` / `GCCSplashDone` / `state.attempts`，均为只写不读）；
+  `SearchBarSettled` 方向变化时复位；`mkdeb.py` 全参数化（版本读 `control`、路径走参数、
+  `Installed-Size` 按真实载荷）；**新增 `Makefile`**；`make-roothide.sh` 标注废弃。
+
+**门禁（全绿）**：双架构 0 警告（与 0.9.7 基线逐条一致）；版本串 `0.9.7` 残留 0；
+arm64e cpusubtype `0x2`（fixarch 重算 50 页签名哈希）；载荷路径与 `Depends` 解包核验；
+`Installed-Size` 181 / 199 KB（原写死 160）。
+
+**教训**：见 §五 第 11、12 条（群体标志不可作兜底门控；守卫不得静默拒绝签名）。
+
 ## 三、跨版本验证汇总
 
 | 版本 | 项目 | 结果 |
@@ -808,6 +855,10 @@ LayoutMinimalHome ×1 + WINGroupMapWidget 老块 ×4 + tick ×1）。
 | 0.6.7 | 底栏「上拉发现」 | 整段录屏未见提示态 **通过** |
 | 0.6.9 | 切页后地图区残差 | 0 帧超阈（原 50 帧）**通过** |
 | 0.7.1 | 开屏广告 | 待真机确认 |
+| 0.9.8 | 构建门禁（静态） | 双架构 0 警告 · 旧版本串残留 0 · cpusubtype `0x2` · 载荷路径与 `Depends` 解包核验 **通过** |
+| 0.9.8 | 运行时（真机） | 待验收（清单见 Release notes 与 `README.md`）|
+
+> 本表只收录**有明确记录**的条目；0.8.0–0.9.7 各版的逐版真机结论未逐条回填。
 
 ---
 
@@ -843,6 +894,14 @@ LayoutMinimalHome ×1 + WINGroupMapWidget 老块 ×4 + tick ×1）。
 9. **热路径上不能有文件 I/O、全树遍历、几何换算** —— 底栏布局路径上挂了个写文件的诊断，
    一直没被发现，直到逐帧量差分才暴露（0.6.8 / 0.6.9）。
 10. **重复 `HookVoid` 对会互相顶掉**（`Replace()` 走 `method_setImplementation`），加钩子前先查重。
+11. **兜底不能挂在「任一成功」的群体标志上** —— 标志一旦被第一个成功的成员置位，
+    其余成员的兜底就永久失效。兜底必须按**成员自身状态**判断，不要按群体标志
+    （0.9.8 A8：`HomeSettled` 被任一 widget 置 YES → 其余仍隐藏的控件失去 2.4s 兜底，
+    表现为右下定位钮凭空消失）。
+12. **守卫只接受一种签名，就等于静默拒绝其他签名** —— 挂钩器只支持「2 参 + void」，
+    4 参返回对象的构造器钩子就**从未装上**，而且一声不响。任何「不匹配就 return」
+    的守卫都必须留痕，否则等于把 bug 藏起来（0.9.8 A4：`initWithFrame:model:` 的
+    「重复点首页」清理从未执行）。
 
 ---
 
@@ -899,15 +958,17 @@ deb 打包用 `scripts/mkdeb.py`（Python 写 `ar` 归档，不需要 `dpkg-deb`
 
 装完 `sbreload` 或重启用户空间。
 
-### 本包产物（0.9.5）
+### 本包产物（0.9.8）
 
 | 文件 | 说明 |
 |:--|:--|
-| `dist/GaodeClean-arm64.dylib` | 183,632 B · arm64 · chained fixups + adhoc 签名（**TrollFools 注入用**） |
-| `dist/GaodeClean-arm64e.dylib` | 185,072 B · arm64e · dyld_info 绑定 + adhoc 签名 |
-| `dist/com.jibamao.gaodeclean_0.9.5_iphoneos-arm64.deb` | rootless（载荷 `/var/jb/Library/MobileSubstrate/…`） |
-| `dist/com.jibamao.gaodeclean_0.9.5_iphoneos-arm64e-roothide.deb` | RootHide（载荷 `/Library/…`，`Depends` 含 `oldabi`） |
-| `dist/GaodeClean-0.9.5-Source.zip` | 完整源码（src + control + scripts + tools） |
+| `dist/GaodeClean-arm64.dylib` | 184,912 B · arm64 · chained fixups + adhoc 签名（**TrollFools 注入用**） |
+| `dist/GaodeClean-arm64e.dylib` | 202,944 B · arm64e · dyld_info 绑定 + adhoc 签名（cpusubtype 已修正为 `0x2`） |
+| `dist/com.jibamao.gaodeclean_0.9.8_iphoneos-arm64.deb` | 61,810 B · rootless（载荷 `/var/jb/Library/MobileSubstrate/…`） |
+| `dist/com.jibamao.gaodeclean_0.9.8_iphoneos-arm64e-roothide.deb` | 61,556 B · RootHide（载荷 `/Library/…`，`Depends` 含 `oldabi`） |
+| `dist/GaodeClean-0.9.8-Source.zip` | 97,922 B · 完整源码（src + control + scripts + tools + Makefile） |
+
+> 产物体积随代码增长而变；以 `make` 的实际输出与 `dist/SHA256SUMS.txt` 为准。
 
 ### 每次发版自检清单
 
@@ -988,5 +1049,5 @@ strings GaodeClean.dylib | grep -i jibamao
 启动输出：
 
 ```
-[GaodeClean] GaodeClean v0.7.1 | jibamao | https://gan-jibamao.github.io/
+[GaodeClean] GaodeClean v0.9.8 | jibamao | https://gan-jibamao.github.io/
 ```
