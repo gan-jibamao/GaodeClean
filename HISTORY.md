@@ -5,7 +5,7 @@
 
 | | |
 |:--|:--|
-| **当前版本** | `0.9.12` |
+| **当前版本** | `0.9.13` |
 | **Author** | **jibamao** — <https://gan-jibamao.github.io/> · Section `jibamao-Tweaks` |
 | **目标** | 高德地图 / AMap `com.autonavi.amap`（**版本限制已取消，全版本自适应**） |
 | **架构** | `arm64`（rootless / TrollFools 注入）· `arm64e`（RootHide） |
@@ -843,7 +843,7 @@ arm64e cpusubtype `0x2`（fixarch 重算 50 页签名哈希）；载荷路径与
 
 **教训**：见 §五 第 11、12 条（群体标志不可作兜底门控；守卫不得静默拒绝签名）。
 
-### W. 冷启动「右下按钮在屏幕中部裸奔」修复（0.9.9 → 0.9.12，当前采用）
+### W. 冷启动「右下按钮在屏幕中部裸奔」修复（0.9.9 → 0.9.13，当前采用）
 
 **现象**（60fps 逐帧，真机视频）：冷启动 **1.47s**，右下角「定位 + 路线」按钮首次出现，
 位置在**屏幕右侧中部**（原图 y 768–958，约屏高 40–50%）；停留 **19 帧（310ms）** 后，
@@ -871,10 +871,11 @@ app 走 `setHidden:NO` 这条路时直接绕过 → 按钮以原生位置露出�
 | W1c | **0.9.11 补丁**：几何兜底改为**纯类名认定**，并去掉 `setHidden:`/`setAlpha:` 的 `self.window` 前置条件 —— app 常在 `addSubview` **之前**就设好 hidden/alpha，那时 window 还是 nil，条件被整段跳过（复验仍裸奔 14 帧/233ms）|
 | W1d | **0.9.11 补丁**：补 `-didMoveToWindow` 通道 —— 上窗那一帧即触发，早于首次渲染，覆盖「直接 addSubview（默认可见）」这条不经过任何 setter 的路径 |
 | W1f | **0.9.12 补丁**：`HookWidgetSetFrame` 对右下按钮增加「未对齐 + 中心落在屏高 25%–70%」的 frame/center **写入拒绝**。复验发现 app 既不改 hidden 也不改 alpha，只是把视图从屏幕外移到可见位置 —— 四条显示通道全部漏过，`setFrame:` 是唯一必经之路 |
+| W1g | **0.9.13 补丁**：兜底显示前**先验位置** —— 五轮复验数据共同指向：裸露总发生在启动后 2.0-2.5s，即 `ColdTicks > 12` 兜底开闸时刻。兜底只管显示不管位置，若此刻 `CachedRight` 还是 nil，按钮就以原生中部位置现身（0.9.12 复验：2.45-2.47s，2 帧/33ms）。在中部（屏高 25%-70%）的成员继续藏，交给 `AlignCornerWidgets` 摆位；30 拍硬底线保留 |
 | W2 | 新增 `WINAJXCombinedWidgetView -setAlpha:` 拦截（防透明度淡入绕过）|
 | W3 | `WINDeviceInterconnectWidget` 同样补 `setHidden:` / `setAlpha:` 两条拦截 |
 | W4 | `AlignOneWidget` 与 `ColdTicks>12` 兜底补 **alpha 恢复**（W2/W3 的自伤点）|
-| W5 | 版本 0.9.12 + control |
+| W5 | 版本 0.9.13 + control |
 
 **教训**：
 1. **「先隐藏、对齐后再显示」必须覆盖所有显示路径**。只挂 `layoutSubviews` 等于只堵了一条门；
@@ -900,7 +901,8 @@ app 走 `setHidden:NO` 这条路时直接绕过 → 按钮以原生位置露出�
 | 0.9.9 | 右下按钮冷启动位置 | 修复未生效：仍裸露 21 帧（getItemTag 时序）|
 | 0.9.10 | 右下按钮冷启动位置 | 仍未归零：14 帧（window 前置条件与几何判定双重失效）|
 | 0.9.11 | 右下按钮冷启动位置 | 未归零：4 帧（67ms）—— app 只改 frame，不改 hidden/alpha |
-| 0.9.12 | 右下按钮冷启动位置 | 补 setFrame:/setCenter: 拦截后待逐帧复验 |
+| 0.9.12 | 右下按钮冷启动位置 | 未归零：2 帧（33ms）—— 裸露源是兜底开闸，非 app 写入 |
+| 0.9.13 | 右下按钮冷启动位置 | 兜底验位后待逐帧复验 |
 
 > 本表只收录**有明确记录**的条目；0.8.0–0.9.7 各版的逐版真机结论未逐条回填。
 
@@ -1007,15 +1009,15 @@ deb 打包用 `scripts/mkdeb.py`（Python 写 `ar` 归档，不需要 `dpkg-deb`
 
 装完 `sbreload` 或重启用户空间。
 
-### 本包产物（0.9.12）
+### 本包产物（0.9.13）
 
 | 文件 | 说明 |
 |:--|:--|
 | `dist/GaodeClean-arm64.dylib` | 201,632 B · arm64 · chained fixups + adhoc 签名（**TrollFools 注入用**） |
 | `dist/GaodeClean-arm64e.dylib` | 203,136 B · arm64e · dyld_info 绑定 + adhoc 签名（cpusubtype 已修正为 `0x2`） |
-| `dist/com.jibamao.gaodeclean_0.9.12_iphoneos-arm64.deb` | 63,168 B · rootless（载荷 `/var/jb/Library/MobileSubstrate/…`） |
-| `dist/com.jibamao.gaodeclean_0.9.12_iphoneos-arm64e-roothide.deb` | 62,626 B · RootHide（载荷 `/Library/…`，`Depends` 含 `oldabi`） |
-| `dist/GaodeClean-0.9.12-Source.zip` | · 完整源码（src + control + scripts + tools + Makefile） |
+| `dist/com.jibamao.gaodeclean_0.9.13_iphoneos-arm64.deb` | 63,308 B · rootless（载荷 `/var/jb/Library/MobileSubstrate/…`） |
+| `dist/com.jibamao.gaodeclean_0.9.13_iphoneos-arm64e-roothide.deb` | 62,744 B · RootHide（载荷 `/Library/…`，`Depends` 含 `oldabi`） |
+| `dist/GaodeClean-0.9.13-Source.zip` | · 完整源码（src + control + scripts + tools + Makefile） |
 
 > 产物体积随代码增长而变；以 `make` 的实际输出与 `dist/SHA256SUMS.txt` 为准。
 
@@ -1082,7 +1084,8 @@ cmp <(ar p dist/*.deb data.tar.gz | tar xzO ./var/jb/.../GaodeClean.dylib) dist/
 0.9.9   冷启动右下按钮「屏幕中部裸奔」修复（显示路径全覆盖）
 0.9.10  右下按钮拦截补几何兜底（getItemTag 晚写入导致 W1 失效）
 0.9.11  显示路径补齐：纯类名判定 + didMoveToWindow（四条通道全覆盖）
-0.9.12  拦截 setFrame:/setCenter: 中部写入（app 只挪位置时的唯一通道）  ← 当前（采用）
+0.9.12  拦截 setFrame:/setCenter: 中部写入（app 只挪位置时的唯一通道）
+0.9.13  兜底显示前验位置（裸露源=兜底开闸而非 app 写入）  ← 当前（采用）
 ```
 
 ---
@@ -1102,5 +1105,5 @@ strings GaodeClean.dylib | grep -i jibamao
 启动输出：
 
 ```
-[GaodeClean] GaodeClean v0.9.12 | jibamao | https://gan-jibamao.github.io/
+[GaodeClean] GaodeClean v0.9.13 | jibamao | https://gan-jibamao.github.io/
 ```

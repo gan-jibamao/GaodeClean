@@ -1,5 +1,0 @@
-8b247c4c8f5509ba5cc4997f18c0e47aebde254bf7967c42da6a8a41b4aa5626  GaodeClean-arm64.dylib
-a13d8fe6e7e38432eb73c22b4f34e1ee43b50b20c47b133101caf894ae0806fd  GaodeClean-arm64e.dylib
-21435423cb67272d4ecc0f06fa4865ce4691e8fb35f6120f9223a4cf3e8aaaea  com.jibamao.gaodeclean_0.9.12_iphoneos-arm64.deb
-604df8436a62126bea5cac61c932ff0bc3baa132ad4155d213ee4bff6ee2be8e  com.jibamao.gaodeclean_0.9.12_iphoneos-arm64e-roothide.deb
-19d1d856051d4c55d1e44e2fd238060fbccc8f13e0554fedb431f6c0f72c4956  GaodeClean-0.9.12-Source.zip
