@@ -18,7 +18,7 @@
 static NSString *const kGCAuthor      = @"jibamao";
 static NSString *const kGCRepo        = @"https://gan-jibamao.github.io/";
 static NSString *const kGCSection     = @"jibamao-Tweaks";
-static NSString *const kGCVersion     = @"0.9.10";
+static NSString *const kGCVersion     = @"0.9.11";
 static NSString *const kGCSignature   = @"GaodeClean by jibamao";
 
 // 对外签名（供 log / 诊断 / 二次核对使用）
@@ -1564,11 +1564,13 @@ static BOOL IsRightBottomWidget(UIView *v) {
 static BOOL GCCLooksLikeRightBottomWidget(UIView *v) {
     if (!v || ![NSStringFromClass(v.class) isEqualToString:@"WINAJXCombinedWidgetView"]) return NO;
     if (IsRightBottomWidget(v)) return YES;          // tag 已写入时用精确判定
-    UIWindow *w = v.window;
-    if (!w) return NO;
-    CGRect r = [v convertRect:v.bounds toView:w];
-    return CGRectGetMidX(r) > w.bounds.size.width * 0.6
-        && CGRectGetMidY(r) > w.bounds.size.height * 0.25;
+    // 0.9.10（W1c）：tag 未写入时**直接按类名认定**。
+    // 0.9.10 首版曾用几何兜底（右半侧 + 不在顶部），但复验仍有 14 帧裸奔：
+    // app 常在 addSubview **之前**就设好 hidden/alpha，此时 v.window == nil，
+    // 几何算不出来、原条件直接 return NO → 拦截整段失效。
+    // WINAJXCombinedWidgetView 在本工程只承载右下「定位+路线」组合按钮，
+    // 类名匹配已经足够；真正的实例选择由 CachedRight 的精确 tag 判定负责。
+    return YES;
 }
 
 static void AlignOneWidget(UIView *bar, UIView *w, CGFloat barTop) {
@@ -2774,6 +2776,17 @@ static void InstallMinimalHome(void) {
             view.hidden = YES; [ColdWidgets addObject:view];
         }
     });
+    // 0.9.10（W1d）：**最可靠的一条**。视图上窗的那一帧就触发，早于首次渲染；
+    // 无论 app 是走 setHidden:/setAlpha: 还是直接 addSubview（默认可见），
+    // 这里都能在它被画出来之前压住。四条通道合起来才算「显示路径全覆盖」：
+    //   setHidden: / setAlpha: / didMoveToWindow / layoutSubviews
+    HookVoid(@"WINAJXCombinedWidgetView", @"didMoveToWindow", ^(UIView *view) {
+        if (view.window && !objc_getAssociatedObject(view, &AlignedKey)
+            && GCCLooksLikeRightBottomWidget(view)) {
+            view.hidden = YES;
+            [ColdWidgets addObject:view];
+        }
+    });
     // 0.4.41：车机圆钮冷启动先隐藏，对齐后再显示，消除跳动
     HookVoid(@"WINDeviceInterconnectWidget", @"layoutSubviews", ^(UIView *w) {
         if (w.window && !objc_getAssociatedObject(w, &AlignedKey)) { w.hidden = YES; [ColdWidgets addObject:w]; }
@@ -2842,7 +2855,9 @@ static void InstallMinimalHome(void) {
             //   1.47s 出现 → 1.47-1.77s 裸奔 19 帧(310ms) → 1.80s 才被
             //   AlignOneWidget 瞬移到底部（y 1370-1556，位移 301pt）。
             // 这里把「显示」这条路也堵上：没打过 AlignedKey 一律压回 hidden。
-            if (!hidden && self.window && GCCLooksLikeRightBottomWidget(self)
+            // 0.9.10（W1c）：**不能**要求 self.window —— app 常在 addSubview 前
+            // 就设好 hidden，那时 window 还是 nil，条件会被整段跳过。
+            if (!hidden && GCCLooksLikeRightBottomWidget(self)
                 && !objc_getAssociatedObject(self, &AlignedKey)) {
                 hidden = YES;
                 [ColdWidgets addObject:self];
@@ -2859,7 +2874,8 @@ static void InstallMinimalHome(void) {
             IMP ao = method_getImplementation(am);
             const char *at = method_getTypeEncoding(am);
             Replace(cls, al, imp_implementationWithBlock(^(UIView *self, CGFloat a) {
-                if (a > 0.01 && self.window && GCCLooksLikeRightBottomWidget(self)
+                // 同理：alpha 写入常发生在上窗之前，不能拿 window 当前置条件。
+                if (a > 0.01 && GCCLooksLikeRightBottomWidget(self)
                     && !objc_getAssociatedObject(self, &AlignedKey)) {
                     a = 0;
                     [ColdWidgets addObject:self];
