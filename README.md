@@ -4,7 +4,7 @@
 
 | | |
 |:--|:--|
-| **版本** | `0.9.8`（审计修复 15 项：崩溃面 / 兜底失效 / 热路径 / 构建链） |
+| **版本** | `0.9.9`（冷启动右下按钮「屏幕中部裸奔」修复） |
 | **门禁** | arm64 / arm64e 双架构 **0 警告**；旧版本串残留 0；arm64e cpusubtype `0x2` |
 | **Author** | **jibamao** |
 | **Repo** | <https://gan-jibamao.github.io/> · Section `jibamao-Tweaks` |
@@ -42,6 +42,7 @@
 | 回归修复：LOGO 搬运叠压天气（搬运面收归单一） | 0.9.6 | ✅ |
 | 200米比例尺误关修复（首次释放后封网 + 位置门槛） | 0.9.7 | ✅ |
 | 审计修复 15 项（崩溃面 · 兜底失效 · 热路径 · 构建链） | 0.9.8 | ✅ |
+| 冷启动右下按钮「屏幕中部裸奔」修复（显示路径全覆盖） | 0.9.9 | ✅ |
 
 正式包**零诊断埋点** —— 不再写 `Documents/GaodeClean-*.txt`，源文件零磁盘 I/O。
 需要取证时可用环境变量 `GAODECLEAN_DEBUG_HOOKS=1`（列出被签名守卫跳过的 Hook）
@@ -74,7 +75,7 @@
 | arm64 cpusubtype | 应为 `0x0` | `0x0` |
 | arm64e cpusubtype | 应为 `0x2` | `0x2`（fixarch 重算 50 页签名哈希）|
 | 载荷路径 | rootless `/var/jb`、RootHide `/Library` | 解包逐条核验通过 |
-| `Installed-Size` | 按真实载荷计算 | 181 / 199 KB |
+| `Installed-Size` | 按真实载荷计算 | 198 / 199 KB |
 
 ---
 
@@ -193,7 +194,8 @@ arm64e 切片有两个坑：lld 不支持它的 `-fixup_chains`（改走经典 `
 0.9.5   冷启动 LOGO 中屏闪现修复（半件 130ms → 0）
 0.9.6   回归修复：LOGO 叠压天气（搬运面收归单一）
 0.9.7   200米比例尺误关修复（封网 + 位置门槛）
-0.9.8   审计修复 15 项（崩溃面 / 兜底失效 / 热路径 / 构建链）   ← 当前（采用）
+0.9.8   审计修复 15 项（崩溃面 / 兜底失效 / 热路径 / 构建链）
+0.9.9   冷启动右下按钮「屏幕中部裸奔」修复（显示路径全覆盖）   ← 当前（采用）
 ```
 
 ---
@@ -210,4 +212,4 @@ strings GaodeClean.dylib | grep -i jibamao
 # GaodeClean by jibamao
 ```
 
-启动输出：`[GaodeClean] GaodeClean v0.9.8 | jibamao | https://gan-jibamao.github.io/`
+启动输出：`[GaodeClean] GaodeClean v0.9.9 | jibamao | https://gan-jibamao.github.io/`

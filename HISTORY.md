@@ -5,7 +5,7 @@
 
 | | |
 |:--|:--|
-| **当前版本** | `0.9.8` |
+| **当前版本** | `0.9.9` |
 | **Author** | **jibamao** — <https://gan-jibamao.github.io/> · Section `jibamao-Tweaks` |
 | **目标** | 高德地图 / AMap `com.autonavi.amap`（**版本限制已取消，全版本自适应**） |
 | **架构** | `arm64`（rootless / TrollFools 注入）· `arm64e`（RootHide） |
@@ -843,6 +843,42 @@ arm64e cpusubtype `0x2`（fixarch 重算 50 页签名哈希）；载荷路径与
 
 **教训**：见 §五 第 11、12 条（群体标志不可作兜底门控；守卫不得静默拒绝签名）。
 
+### W. 冷启动「右下按钮在屏幕中部裸奔」修复（0.9.9，当前采用）
+
+**现象**（60fps 逐帧，真机视频）：冷启动 **1.47s**，右下角「定位 + 路线」按钮首次出现，
+位置在**屏幕右侧中部**（原图 y 768–958，约屏高 40–50%）；停留 **19 帧（310ms）** 后，
+**1.80s 一帧瞬移**到底部正确位置（y 1370–1556），**位移 301pt**。
+
+**根因**：0.4.41 的「未对齐先按住」只挂在 `-layoutSubviews` 一个入口：
+
+```c
+HookVoid(@"WINAJXCombinedWidgetView", @"layoutSubviews", ^(UIView *view) {
+    ...
+    view.hidden = YES; [ColdWidgets addObject:view];
+});
+```
+
+而它的 `setHidden:` 钩子只处理「广告推广」，**没有拦住「未对齐就想显示」**。
+app 走 `setHidden:NO` 这条路时直接绕过 → 按钮以原生位置露出来，
+直到 1.80s `AlignOneWidget` 把它搬到下方。
+
+**修复（0.9.9）**：
+
+| 项 | 改动 |
+|---|---|
+| W1 | `WINAJXCombinedWidgetView -setHidden:` 增加「未对齐拒绝显示」（压回 hidden + 登记 `ColdWidgets`）|
+| W2 | 新增 `WINAJXCombinedWidgetView -setAlpha:` 拦截（防透明度淡入绕过）|
+| W3 | `WINDeviceInterconnectWidget` 同样补 `setHidden:` / `setAlpha:` 两条拦截 |
+| W4 | `AlignOneWidget` 与 `ColdTicks>12` 兜底补 **alpha 恢复**（W2/W3 的自伤点）|
+| W5 | 版本 0.9.9 + control |
+
+**教训**：
+1. **「先隐藏、对齐后再显示」必须覆盖所有显示路径**。只挂 `layoutSubviews` 等于只堵了一条门；
+   `setHidden:` / `setAlpha:` 都是 app 的合法显示入口，漏一条就会裸奔。
+2. **任何「压 alpha」的拦截，放行时必须同时恢复 alpha 与 hidden**。
+   只恢复 `hidden` 而 alpha 仍是 0，控件会变成「逻辑可见、视觉全透明」——
+   比不修更难查（W2/W3 的自伤点，已在 W4 补上）。
+
 ## 三、跨版本验证汇总
 
 | 版本 | 项目 | 结果 |
@@ -856,7 +892,8 @@ arm64e cpusubtype `0x2`（fixarch 重算 50 页签名哈希）；载荷路径与
 | 0.6.9 | 切页后地图区残差 | 0 帧超阈（原 50 帧）**通过** |
 | 0.7.1 | 开屏广告 | 待真机确认 |
 | 0.9.8 | 构建门禁（静态） | 双架构 0 警告 · 旧版本串残留 0 · cpusubtype `0x2` · 载荷路径与 `Depends` 解包核验 **通过** |
-| 0.9.8 | 运行时（真机） | 待验收（清单见 Release notes 与 `README.md`）|
+| 0.9.8 | 运行时（真机） | 冷启动右下按钮裸奔已定位（见 §W），其余待验收 |
+| 0.9.9 | 右下按钮冷启动位置 | 1.47–1.77s 屏幕中部裸露 19 帧；修复后待逐帧复验 |
 
 > 本表只收录**有明确记录**的条目；0.8.0–0.9.7 各版的逐版真机结论未逐条回填。
 
@@ -902,6 +939,11 @@ arm64e cpusubtype `0x2`（fixarch 重算 50 页签名哈希）；载荷路径与
     4 参返回对象的构造器钩子就**从未装上**，而且一声不响。任何「不匹配就 return」
     的守卫都必须留痕，否则等于把 bug 藏起来（0.9.8 A4：`initWithFrame:model:` 的
     「重复点首页」清理从未执行）。
+13. **「先隐藏、对齐后再显示」必须覆盖所有显示路径** —— 只挂 `layoutSubviews` 等于只堵一条门；
+    `setHidden:` / `setAlpha:` 都是 app 的合法显示入口，漏一条就会以原生位置裸奔
+    （0.9.9 §W：右下按钮在屏幕中部裸露 310ms 后瞬移 301pt）。
+14. **压 alpha 的拦截，放行时必须同时恢复 alpha 与 hidden** —— 只恢复 `hidden`、alpha 仍是 0，
+    控件会「逻辑可见、视觉全透明」，比不修更难查（0.9.9 W2/W3 的自伤点，W4 补齐）。
 
 ---
 
@@ -958,15 +1000,15 @@ deb 打包用 `scripts/mkdeb.py`（Python 写 `ar` 归档，不需要 `dpkg-deb`
 
 装完 `sbreload` 或重启用户空间。
 
-### 本包产物（0.9.8）
+### 本包产物（0.9.9）
 
 | 文件 | 说明 |
 |:--|:--|
-| `dist/GaodeClean-arm64.dylib` | 184,912 B · arm64 · chained fixups + adhoc 签名（**TrollFools 注入用**） |
-| `dist/GaodeClean-arm64e.dylib` | 202,944 B · arm64e · dyld_info 绑定 + adhoc 签名（cpusubtype 已修正为 `0x2`） |
-| `dist/com.jibamao.gaodeclean_0.9.8_iphoneos-arm64.deb` | 61,810 B · rootless（载荷 `/var/jb/Library/MobileSubstrate/…`） |
-| `dist/com.jibamao.gaodeclean_0.9.8_iphoneos-arm64e-roothide.deb` | 61,556 B · RootHide（载荷 `/Library/…`，`Depends` 含 `oldabi`） |
-| `dist/GaodeClean-0.9.8-Source.zip` | 97,922 B · 完整源码（src + control + scripts + tools + Makefile） |
+| `dist/GaodeClean-arm64.dylib` | 201,632 B · arm64 · chained fixups + adhoc 签名（**TrollFools 注入用**） |
+| `dist/GaodeClean-arm64e.dylib` | 203,136 B · arm64e · dyld_info 绑定 + adhoc 签名（cpusubtype 已修正为 `0x2`） |
+| `dist/com.jibamao.gaodeclean_0.9.9_iphoneos-arm64.deb` | 62,644 B · rootless（载荷 `/var/jb/Library/MobileSubstrate/…`） |
+| `dist/com.jibamao.gaodeclean_0.9.9_iphoneos-arm64e-roothide.deb` | 62,212 B · RootHide（载荷 `/Library/…`，`Depends` 含 `oldabi`） |
+| `dist/GaodeClean-0.9.9-Source.zip` | · 完整源码（src + control + scripts + tools + Makefile） |
 
 > 产物体积随代码增长而变；以 `make` 的实际输出与 `dist/SHA256SUMS.txt` 为准。
 
@@ -1029,7 +1071,8 @@ cmp <(ar p dist/*.deb data.tar.gz | tar xzO ./var/jb/.../GaodeClean.dylib) dist/
 0.9.5   冷启动 LOGO 中屏闪现修复（半件 130ms → 0）
 0.9.6   回归修复：LOGO 搬运叠压天气（搬运面收归单一）
 0.9.7   200米比例尺误关修复（首次释放后封网 + 位置门槛）
-0.9.8   审计修复 15 项：崩溃面 / 兜底失效 / 6 条热路径 / 构建链       ← 当前（采用）
+0.9.8   审计修复 15 项：崩溃面 / 兜底失效 / 6 条热路径 / 构建链
+0.9.9   冷启动右下按钮「屏幕中部裸奔」修复（显示路径全覆盖）      ← 当前（采用）
 ```
 
 ---
@@ -1049,5 +1092,5 @@ strings GaodeClean.dylib | grep -i jibamao
 启动输出：
 
 ```
-[GaodeClean] GaodeClean v0.9.8 | jibamao | https://gan-jibamao.github.io/
+[GaodeClean] GaodeClean v0.9.9 | jibamao | https://gan-jibamao.github.io/
 ```

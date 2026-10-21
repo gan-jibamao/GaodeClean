@@ -18,7 +18,7 @@
 static NSString *const kGCAuthor      = @"jibamao";
 static NSString *const kGCRepo        = @"https://gan-jibamao.github.io/";
 static NSString *const kGCSection     = @"jibamao-Tweaks";
-static NSString *const kGCVersion     = @"0.9.8";
+static NSString *const kGCVersion     = @"0.9.9";
 static NSString *const kGCSignature   = @"GaodeClean by jibamao";
 
 // 对外签名（供 log / 诊断 / 二次核对使用）
@@ -649,6 +649,9 @@ static void Schedule(void) {
                 if (![w isKindOfClass:UIView.class]) continue;
                 if (objc_getAssociatedObject(w, &AlignedKey)) continue;
                 objc_setAssociatedObject(w, &AlignedKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+                // 0.9.9（A2/A3 配套）：兜底同样要恢复 alpha，否则被压成 0 的控件
+                // 即使 hidden=NO 也不可见。
+                if (w.alpha < 0.01) w.alpha = 1.0;
                 w.hidden = NO;
             }
         }
@@ -1566,6 +1569,9 @@ static void AlignOneWidget(UIView *bar, UIView *w, CGFloat barTop) {
     }
     // 逐 widget 对齐标记：对齐过才显示，避免冷启动在原生位置(如 {0,0})闪现
     objc_setAssociatedObject(w, &AlignedKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    // 0.9.9（A2/A3 配套）：setAlpha: 拦截会把未对齐时的 alpha 压到 0，
+    // 这里必须一并恢复 —— 否则 hidden 放行了、按钮仍然全透明（A2/A3 的自伤点）。
+    if (w.alpha < 0.01) w.alpha = 1.0;
     if (w.hidden) w.hidden = NO;
     // 0.9.8（A8）：原来的 HomeSettled = YES 已删除 —— 它的语义（任一 widget 对齐
     // 即「首页稳定」）与实际不符，而且解耦后无人读取。稳定性改由每个成员自身的
@@ -2755,6 +2761,41 @@ static void InstallMinimalHome(void) {
     HookVoid(@"WINDeviceInterconnectWidget", @"layoutSubviews", ^(UIView *w) {
         if (w.window && !objc_getAssociatedObject(w, &AlignedKey)) { w.hidden = YES; [ColdWidgets addObject:w]; }
     });
+    // 0.9.9（A3）：车机钮同理 —— 0.4.41 只在 -layoutSubviews 里按住，
+    // app 走 setHidden:NO / setAlpha: 时会以原生位置裸奔。两条显示路径都补上拦截。
+    {
+        Class dc = NSClassFromString(@"WINDeviceInterconnectWidget");
+        if (dc) {
+            SEL sh = @selector(setHidden:);
+            Method sm = class_getInstanceMethod(dc, sh);
+            if (sm) {
+                IMP so = method_getImplementation(sm);
+                const char *st = method_getTypeEncoding(sm);
+                Replace(dc, sh, imp_implementationWithBlock(^(UIView *self, BOOL hidden) {
+                    if (!hidden && self.window
+                        && !objc_getAssociatedObject(self, &AlignedKey)) {
+                        hidden = YES;
+                        [ColdWidgets addObject:self];
+                    }
+                    ((void (*)(id, SEL, BOOL))so)(self, sh, hidden);
+                }), st);
+            }
+            SEL al = @selector(setAlpha:);
+            Method am = class_getInstanceMethod(dc, al);
+            if (am) {
+                IMP ao = method_getImplementation(am);
+                const char *at = method_getTypeEncoding(am);
+                Replace(dc, al, imp_implementationWithBlock(^(UIView *self, CGFloat a) {
+                    if (a > 0.01 && self.window
+                        && !objc_getAssociatedObject(self, &AlignedKey)) {
+                        a = 0;
+                        [ColdWidgets addObject:self];
+                    }
+                    ((void (*)(id, SEL, CGFloat))ao)(self, al, a);
+                }), at);
+            }
+        }
+    }
     // 0.4.47：拦截两圆钮 setFrame:，对齐后 y 钉死，杜绝 app 挪回原生位置闪跳
     HookWidgetSetFrame(@"WINDeviceInterconnectWidget");
     HookWidgetSetFrame(@"WINAJXCombinedWidgetView");
@@ -2777,8 +2818,38 @@ static void InstallMinimalHome(void) {
     if (method) {
         IMP original = method_getImplementation(method);
         Replace(cls, sel, imp_implementationWithBlock(^(UIView *self, BOOL hidden) {
+            // 0.9.9（A1）：未对齐的右下按钮**拒绝显示**。
+            // 0.4.41 的「未对齐先按住」只挂在 -layoutSubviews 上；app 走
+            // setHidden:NO 这条路径时直接绕过，按钮就以原生位置
+            // （屏幕右侧中部 y≈768-958）露出来。真机逐帧实测：
+            //   1.47s 出现 → 1.47-1.77s 裸奔 19 帧(310ms) → 1.80s 才被
+            //   AlignOneWidget 瞬移到底部（y 1370-1556，位移 301pt）。
+            // 这里把「显示」这条路也堵上：没打过 AlignedKey 一律压回 hidden。
+            if (!hidden && self.window && IsRightBottomWidget(self)
+                && !objc_getAssociatedObject(self, &AlignedKey)) {
+                hidden = YES;
+                [ColdWidgets addObject:self];
+            }
             ((void (*)(id, SEL, BOOL))original)(self, sel, hidden || IsHiddenMapPromo(self));
         }), method_getTypeEncoding(method));
+    }
+    // 0.9.9（A2）：app 也可能用透明度淡入绕过 setHidden:（与天气行 0.9.5 的教训同源）。
+    // 未对齐时把 alpha 压到 0 并登记，对齐后由 AlignOneWidget 的 hidden=NO 带出来。
+    {
+        SEL al = @selector(setAlpha:);
+        Method am = class_getInstanceMethod(cls, al);
+        if (am) {
+            IMP ao = method_getImplementation(am);
+            const char *at = method_getTypeEncoding(am);
+            Replace(cls, al, imp_implementationWithBlock(^(UIView *self, CGFloat a) {
+                if (a > 0.01 && self.window && IsRightBottomWidget(self)
+                    && !objc_getAssociatedObject(self, &AlignedKey)) {
+                    a = 0;
+                    [ColdWidgets addObject:self];
+                }
+                ((void (*)(id, SEL, CGFloat))ao)(self, al, a);
+            }), at);
+        }
     }
     // 0.5.3：彻底去掉「重复点击首页」的所有触发链。
     // app 有两个注册入口（GDMapHomeTabBarControl / WINAmapHomeVAppService），
