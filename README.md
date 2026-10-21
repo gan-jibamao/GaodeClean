@@ -4,7 +4,7 @@
 
 | | |
 |:--|:--|
-| **版本** | `0.9.11`（冷启动右下按钮「屏幕中部裸奔」修复 · 显示路径四通道） |
+| **版本** | `0.9.12`（冷启动右下按钮「屏幕中部裸奔」修复 · 五通道含 setFrame:） |
 | **门禁** | arm64 / arm64e 双架构 **0 警告**；旧版本串残留 0；arm64e cpusubtype `0x2` |
 | **Author** | **jibamao** |
 | **Repo** | <https://gan-jibamao.github.io/> · Section `jibamao-Tweaks` |
@@ -42,7 +42,7 @@
 | 回归修复：LOGO 搬运叠压天气（搬运面收归单一） | 0.9.6 | ✅ |
 | 200米比例尺误关修复（首次释放后封网 + 位置门槛） | 0.9.7 | ✅ |
 | 审计修复 15 项（崩溃面 · 兜底失效 · 热路径 · 构建链） | 0.9.8 | ✅ |
-| 冷启动右下按钮「屏幕中部裸奔」修复（显示路径四通道全覆盖） | 0.9.11 | ✅ |
+| 冷启动右下按钮「屏幕中部裸奔」修复（五通道 · 含 setFrame: 拒绝） | 0.9.12 | ✅ |
 
 正式包**零诊断埋点** —— 不再写 `Documents/GaodeClean-*.txt`，源文件零磁盘 I/O。
 需要取证时可用环境变量 `GAODECLEAN_DEBUG_HOOKS=1`（列出被签名守卫跳过的 Hook）
@@ -197,7 +197,8 @@ arm64e 切片有两个坑：lld 不支持它的 `-fixup_chains`（改走经典 `
 0.9.8   审计修复 15 项（崩溃面 / 兜底失效 / 热路径 / 构建链）
 0.9.9   冷启动右下按钮「屏幕中部裸奔」修复（显示路径全覆盖）
 0.9.10  右下按钮拦截补几何兜底（getItemTag 晚写入）
-0.9.11  显示路径补齐：纯类名判定 + didMoveToWindow   ← 当前（采用）
+0.9.11  显示路径补齐：纯类名判定 + didMoveToWindow
+0.9.12  拦截 setFrame:/setCenter: 中部写入   ← 当前（采用）
 ```
 
 ---
@@ -214,4 +215,4 @@ strings GaodeClean.dylib | grep -i jibamao
 # GaodeClean by jibamao
 ```
 
-启动输出：`[GaodeClean] GaodeClean v0.9.11 | jibamao | https://gan-jibamao.github.io/`
+启动输出：`[GaodeClean] GaodeClean v0.9.12 | jibamao | https://gan-jibamao.github.io/`

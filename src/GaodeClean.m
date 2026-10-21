@@ -18,7 +18,7 @@
 static NSString *const kGCAuthor      = @"jibamao";
 static NSString *const kGCRepo        = @"https://gan-jibamao.github.io/";
 static NSString *const kGCSection     = @"jibamao-Tweaks";
-static NSString *const kGCVersion     = @"0.9.11";
+static NSString *const kGCVersion     = @"0.9.12";
 static NSString *const kGCSignature   = @"GaodeClean by jibamao";
 
 // 对外签名（供 log / 诊断 / 二次核对使用）
@@ -1691,11 +1691,32 @@ static void AlignCornerWidgets(UIView *bar) {
 static void HookWidgetSetFrame(NSString *className) {
     Class cls = NSClassFromString(className);
     if (!cls) return;
+    // 0.9.12（W1f）：右下按钮专用 —— 未对齐时拒绝「把中心放到屏幕中部」的写入。
+    BOOL isRightBtn = [className isEqualToString:@"WINAJXCombinedWidgetView"];
     SEL fs = @selector(setFrame:);
     Method fm = class_getInstanceMethod(cls, fs);
     IMP fo = fm ? method_getImplementation(fm) : NULL;
     if (fm) {
         Replace(cls, fs, imp_implementationWithBlock(^(UIView *self, CGRect rect) {
+            // 0.9.12（W1f）：真机复验 0.9.11 仍有 4 帧（67ms）中部裸露 —— 2.00s 时右侧
+            // 控件「一次性全部出现」，而 1.98s 之前一个都没有。说明 app 既没调
+            // setHidden: 也没调 setAlpha:，只是**把视图从屏幕外移到可见位置**，
+            // 四条显示通道（setHidden/setAlpha/didMoveToWindow/layoutSubviews）全都漏过。
+            // setFrame: 是唯一必经之路：未对齐时把「落在屏幕中部」的写入直接拒掉。
+            if (isRightBtn && !objc_getAssociatedObject(self, &AlignedKey)) {
+                UIView *sv = self.superview;
+                UIWindow *w = self.window;
+                if (sv && w) {
+                    CGPoint p = [sv convertPoint:rect.origin toView:w];
+                    CGFloat midY = p.y + rect.size.height * 0.5;
+                    CGFloat h = w.bounds.size.height;
+                    if (midY > h * 0.25 && midY < h * 0.70) {
+                        self.hidden = YES;
+                        [ColdWidgets addObject:self];
+                        return;                 // 丢弃这次写入，等 AlignOneWidget 摆位
+                    }
+                }
+            }
             // 0.5.1：底边对齐钳位——不管 44/88 高，底边都贴在搜索框上方 8pt
             if (SearchBarSettled && objc_getAssociatedObject(self, &AlignedKey)) {
                 UIView *sv = self.superview;
@@ -1715,6 +1736,22 @@ static void HookWidgetSetFrame(NSString *className) {
     if (cm) {
         IMP co = method_getImplementation(cm);
         Replace(cls, cs, imp_implementationWithBlock(^(UIView *self, CGPoint center) {
+            // 0.9.12（W1f）：与 setFrame: 同策略 —— app 也可能走 center 把按钮摆到中部
+            if (isRightBtn && !objc_getAssociatedObject(self, &AlignedKey)) {
+                UIView *sv = self.superview;
+                UIWindow *w = self.window;
+                if (sv && w) {
+                    CGPoint p = [sv convertPoint:CGPointMake(0, center.y - self.bounds.size.height * 0.5)
+                                          toView:w];
+                    CGFloat midY = p.y + self.bounds.size.height * 0.5;
+                    CGFloat h = w.bounds.size.height;
+                    if (midY > h * 0.25 && midY < h * 0.70) {
+                        self.hidden = YES;
+                        [ColdWidgets addObject:self];
+                        return;
+                    }
+                }
+            }
             if (SearchBarSettled && objc_getAssociatedObject(self, &AlignedKey)) {
                 UIView *sv = self.superview;
                 if (sv && self.window) {
