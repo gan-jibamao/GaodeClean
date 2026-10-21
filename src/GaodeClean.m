@@ -18,7 +18,7 @@
 static NSString *const kGCAuthor      = @"jibamao";
 static NSString *const kGCRepo        = @"https://gan-jibamao.github.io/";
 static NSString *const kGCSection     = @"jibamao-Tweaks";
-static NSString *const kGCVersion     = @"0.9.12";
+static NSString *const kGCVersion     = @"0.9.13";
 static NSString *const kGCSignature   = @"GaodeClean by jibamao";
 
 // 对外签名（供 log / 诊断 / 二次核对使用）
@@ -648,6 +648,22 @@ static void Schedule(void) {
             for (UIView *w in ColdWidgets.allObjects) {
                 if (![w isKindOfClass:UIView.class]) continue;
                 if (objc_getAssociatedObject(w, &AlignedKey)) continue;
+                // 0.9.13（W1g）：兜底显示前先验位置。
+                // 五轮复验数据显示裸露总是发生在启动后 2.0-2.5s —— 这正是本兜底
+                // 开闸的时刻（12 拍 × 200ms ≈ 2.4s）。兜底只管显示、不管位置：
+                // 若此刻 getItemTag 还没写入、CachedRight 还是 nil，
+                // AlignOneWidget 从没碰过按钮，它的 frame 仍停在 app 的原生中部
+                // 位置（屏高 25%-70%）—— 兜底一开闸按钮就以错误位置现身
+                // （0.9.12 复验：2.45-2.47s，2 帧）。在错误位就继续藏着，
+                // 交给 AlignCornerWidgets 摆位；摆好时它自己会 hidden=NO。
+                // ColdTicks > 30 仍硬显示，避免搜索栏长期未就绪导致永久隐藏。
+                BOOL safe = YES;
+                if (w.superview && w.window) {
+                    CGPoint p = [w.superview convertPoint:w.center toView:w.window];
+                    CGFloat h = w.window.bounds.size.height;
+                    if (p.y > h * 0.25 && p.y < h * 0.70) safe = NO;
+                }
+                if (!safe && ColdTicks <= 30) continue;
                 objc_setAssociatedObject(w, &AlignedKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
                 // 0.9.9（A2/A3 配套）：兜底同样要恢复 alpha，否则被压成 0 的控件
                 // 即使 hidden=NO 也不可见。
