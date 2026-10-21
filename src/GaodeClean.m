@@ -18,7 +18,7 @@
 static NSString *const kGCAuthor      = @"jibamao";
 static NSString *const kGCRepo        = @"https://gan-jibamao.github.io/";
 static NSString *const kGCSection     = @"jibamao-Tweaks";
-static NSString *const kGCVersion     = @"0.9.9";
+static NSString *const kGCVersion     = @"0.9.10";
 static NSString *const kGCSignature   = @"GaodeClean by jibamao";
 
 // 对外签名（供 log / 诊断 / 二次核对使用）
@@ -1556,6 +1556,21 @@ static BOOL IsRightBottomWidget(UIView *v) {
     return [t containsString:@"rightbottom"] || [t containsString:@"locate"] || [t containsString:@"location"];
 }
 
+// 0.9.9（W1b）：IsRightBottomWidget 依赖 getItemTag，而那是 AJX 的**数据字段**，
+// 可能晚于视图创建/上屏才写入。真机逐帧实测：1.42s 按钮已经可见，但 getItemTag
+// 还没值 → 判定返回 NO → setHidden:/setAlpha: 的拦截整段失效，按钮在屏幕中部
+// 裸奔 350ms（21 帧），1.80s 才被对齐。
+// 这里补几何兜底：类名匹配 + 位于窗口右半侧且不在顶部，即认定为右下组合按钮。
+static BOOL GCCLooksLikeRightBottomWidget(UIView *v) {
+    if (!v || ![NSStringFromClass(v.class) isEqualToString:@"WINAJXCombinedWidgetView"]) return NO;
+    if (IsRightBottomWidget(v)) return YES;          // tag 已写入时用精确判定
+    UIWindow *w = v.window;
+    if (!w) return NO;
+    CGRect r = [v convertRect:v.bounds toView:w];
+    return CGRectGetMidX(r) > w.bounds.size.width * 0.6
+        && CGRectGetMidY(r) > w.bounds.size.height * 0.25;
+}
+
 static void AlignOneWidget(UIView *bar, UIView *w, CGFloat barTop) {
     if (!w.window) return;
     UIWindow *win = bar.window;
@@ -1650,6 +1665,8 @@ static void AlignCornerWidgets(UIView *bar) {
             [queue addObjectsFromArray:v.subviews];
             NSString *cn = NSStringFromClass(v.class);
             if ([cn isEqualToString:@"WINDeviceInterconnectWidget"]) CachedCar = v;
+            // 0.9.9：CachedRight 仍用**精确 tag** 判定 —— 1.80s 时 getItemTag 已写入，
+            // 精确判定能找到；几何兜底只用于「显示拦截」这条更早的路径，避免误选实例。
             else if (IsRightBottomWidget(v)) CachedRight = v;
             else if ([cn isEqualToString:@"WINRouteLineWidgetView"]) CachedRoute = v;
             if (CachedCar && CachedRight && CachedRoute) break;
@@ -2753,7 +2770,7 @@ static void InstallMinimalHome(void) {
     }
     HookVoid(@"WINAJXCombinedWidgetView", @"layoutSubviews", ^(UIView *view) {
         if (IsHiddenMapPromo(view)) [view setHidden:YES];
-        else if (view.window && !objc_getAssociatedObject(view, &AlignedKey) && IsRightBottomWidget(view)) {
+        else if (view.window && !objc_getAssociatedObject(view, &AlignedKey) && GCCLooksLikeRightBottomWidget(view)) {
             view.hidden = YES; [ColdWidgets addObject:view];
         }
     });
@@ -2825,7 +2842,7 @@ static void InstallMinimalHome(void) {
             //   1.47s 出现 → 1.47-1.77s 裸奔 19 帧(310ms) → 1.80s 才被
             //   AlignOneWidget 瞬移到底部（y 1370-1556，位移 301pt）。
             // 这里把「显示」这条路也堵上：没打过 AlignedKey 一律压回 hidden。
-            if (!hidden && self.window && IsRightBottomWidget(self)
+            if (!hidden && self.window && GCCLooksLikeRightBottomWidget(self)
                 && !objc_getAssociatedObject(self, &AlignedKey)) {
                 hidden = YES;
                 [ColdWidgets addObject:self];
@@ -2842,7 +2859,7 @@ static void InstallMinimalHome(void) {
             IMP ao = method_getImplementation(am);
             const char *at = method_getTypeEncoding(am);
             Replace(cls, al, imp_implementationWithBlock(^(UIView *self, CGFloat a) {
-                if (a > 0.01 && self.window && IsRightBottomWidget(self)
+                if (a > 0.01 && self.window && GCCLooksLikeRightBottomWidget(self)
                     && !objc_getAssociatedObject(self, &AlignedKey)) {
                     a = 0;
                     [ColdWidgets addObject:self];
