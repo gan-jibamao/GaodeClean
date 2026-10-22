@@ -106,6 +106,8 @@ static __weak UIView *SearchBarView;   // 0.5.58   // 0.5.55：用于判断当�
 static void UpdateMask(UIView *page);
 static void Schedule(void);
 static void GCNarrowOneBar(UIView *bar);   // 0.9.22（A1）搜索栏/底栏缩窄
+static void GCNarrowSetDirty(void);        // 0.9.23（A1）标脏：下一拍重扫条带
+static void GCNarrowRecheck(void);         // 0.9.23（A1）每拍轻量复核
 static void LayoutMinimalHome(id handler);
 static void AlignCornerWidgets(UIView *bar);
 static BOOL FixingHintText;

@@ -1592,6 +1592,20 @@ Amap 私有类名（`WINPermanentCompassView`/`WINLiteWidgetGroupView`/…）与
 - 反例 **6/6 不动**：根内容视图、过大面板（高 130 > 110）、窄条（200pt）、非居中、条带外（屏幕中部）、横向出屏
 - 小屏/大屏：320pt → 272pt 宽；430pt → 382pt 宽（两侧恒为 24pt）
 
+**★ 施工中抓到的两个真问题（都当场修）**
+
+1. **构建实际失败、而 `make check` 给了假绿灯（P1，门禁缺陷）**
+   v2 模块定义在 tick 之后，tick 里对它俩的首次引用成了隐式声明 ⇒ 真实构建 4 个 error。
+   但 `make -f Makefile.local check` 报「静态门禁通过」—— 根因：check 只 `grep -q 'warning:'`，
+   **从不检查 clang 的退出码**，于是「有 error、无 warning」被判为通过。
+   修法：`out=$(clang …); rc=$?; if [ $rc -ne 0 ]; then … FAIL: 编译未通过（exit=$rc）… fi`。
+   **双向自测**：对坏源码 → `FAIL: 编译未通过（exit=1）`；补前置声明后 → 通过。
+2. **v2 函数用在该文件更早位置 ⇒ 需前置声明**：在既有前置声明区补
+   `GCNarrowSetDirty()` / `GCNarrowRecheck()`，修复后真实构建通过。
+
+**教训（补入 §五）**：静态门禁必须以**退出码**为准，只看日志关键字必然假绿灯；
+文案/门禁类改动做完必须跑一次**真实构建**（`make`），不能只信 `check`。
+
 **版本**：0.9.23；`control` 与 `kGCVersion` 同步；细节页更新日志改用户语言
 （「底栏（首页 / 我的）也可缩窄了：修 0.9.22 只有搜索栏生效的问题」）。
 
@@ -1625,6 +1639,7 @@ Amap 私有类名（`WINPermanentCompassView`/`WINLiteWidgetGroupView`/…）与
     控件会「逻辑可见、视觉全透明」，比不修更难查（0.9.9 W2/W3 的自伤点，W4 补齐）。
 
 ---
+15. **静态门禁必须判退出码**：只 grep 日志关键字（如 `warning:`）会把「有 error、无 warning」判成通过（0.9.23 实测假绿灯）；文案/门禁改动后必须跑一次真实构建。
 
 ## 六、构建与产物
 
