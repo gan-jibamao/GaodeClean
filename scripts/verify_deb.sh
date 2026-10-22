@@ -106,11 +106,23 @@ case "$SLICES" in
   *) bad "缺 arm64 切片" ;;
 esac
 
-# --- 5. FINALPACKAGE 剥离哨兵 ---
-# 注意：正式包**故意保留 8 处 NSLog**（启动横幅与关键路径），所以不能拿 "[GaodeClean] "
-# 当哨兵（会把正确包判失败）。哨兵必须取**只出现在 GCLog 里的文案**。
+# --- 5. FINALPACKAGE 剥离哨兵（0.9.20 A2 改口径：零日志、零探针）---
+# 0.9.14~0.9.19 的口径是「GCLog 剥空 + 故意保留 8 处 NSLog」；
+# 0.9.20 起把 8 处 NSLog 也清除，正式包内**不允许**再出现任何 `[GaodeClean] ` 日志串。
+# 哨兵仍取「只出现在 GCLog 里的文案」，另外补一组探针专属串（诊断模块/环境开关/右列 dump）。
 GC_LOGONLY='blocked tab guide lottie|page=%ld anchor=pending|splash ad hidden|weather row released|fog sweep hides'
+GC_PROBEONLY='gaodeclean-diag|GAODECLEAN_DEBUG|GAODECLEAN_DIAG_LOG|WINSplash classes at runtime|hook SKIPPED|splash guard hooked|ad-window blacklist SKIPPED'
 NLOG=$(strings -a "$DYL" | grep -cF '[GaodeClean] ' || true)
+PROBEHIT=$(strings -a "$DYL" | grep -cE "$GC_PROBEONLY" || true)
+if [ "${PROBEHIT:-0}" -gt 0 ]; then
+  if [ "$IS_DEBUG_PKG" = "1" ]; then
+    say "  [skip] 调试包：按设计保留探针（命中 ${PROBEHIT} 条）"
+  else
+    bad "正式包残留诊断探针串（命中 ${PROBEHIT} 条）：${GC_PROBEONLY}"
+  fi
+else
+  ok "无诊断探针串残留（模块/环境开关/右列 dump 均不在包内）"
+fi
 # ★ 断言一律「先取值再比较」，不要 `strings | grep -q`：
 #   本脚本开了 `set -o pipefail`，grep -q 命中即退出会让 strings 吃到 SIGPIPE(141)，
 #   管线状态变非零 ⇒ 把「命中」误判成「未命中」（剥离去向错则变成**假通过**）。
@@ -124,7 +136,14 @@ if [ "${GCLOGHIT:-0}" -gt 0 ]; then
     say "  [note] 非正式构建，保留 GCLog 诊断串（正常）"
   fi
 else
-  ok "GCLog 诊断串已剥空（保留的 NSLog 计数 ${NLOG}；单切片 8，fat 双切片为 16）"
+  ok "GCLog 诊断串已剥空"
+  if [ "${NLOG:-0}" -eq 0 ]; then
+    ok "自定义日志零残留（[GaodeClean] 计数 0）"
+  elif [ "$IS_DEBUG_PKG" = "1" ]; then
+    say "  [skip] 调试包保留自定义日志（计数 ${NLOG}）"
+  else
+    bad "正式包仍残留自定义日志串（[GaodeClean] 计数 ${NLOG}，0.9.20 起应为 0）"
+  fi
 fi
 
 # --- 6. 版本串一致性（0.9.17 A6 新增）---
@@ -144,7 +163,37 @@ else
   ok "无同族旧版本串残留"
 fi
 
-# --- 7. 注入过滤器 ---
+# --- 7. 加固与混淆（0.9.20 A2 新增）---
+# 7a 抽样断言：这些明文（Amap 私有类名 / 中文关键词）不得出现在正式包内。
+GC_OBF_PROBE='WINPermanentCompassView|WINAJXCombinedWidgetView|WINLiteWidgetGroupView|WINDeviceInterconnectWidget|WINGroupMapWidget|amap_bundle_quickservice'
+OBFHIT=$(strings -a "$DYL" | grep -cE "$GC_OBF_PROBE" || true)
+if [ "${OBFHIT:-0}" -eq 0 ]; then
+  ok "字符串混淆生效（抽样 6 类敏感明文命中 0）"
+else
+  bad "明文未混淆：命中 ${OBFHIT} 条（$GC_OBF_PROBE）"
+fi
+# 7b 中文关键词按 UTF-16 形状核验（Objective-C 中文字面量编成 UTF-16）
+CNHIT=0
+for w in 酒店 加油站 超市 停车场; do
+  if [ "$(LC_ALL=C grep -c . /dev/null)" ]; then :; fi
+  if strings -a -e l "$DYL" 2>/dev/null | grep -qF "$w"; then CNHIT=$((CNHIT+1)); fi
+done
+if [ "$CNHIT" -eq 0 ]; then
+  ok "中文关键词无明文残留"
+else
+  bad "中文关键词仍有明文（${CNHIT} 个）"
+fi
+# 7c 本地符号应被链接期剥离（-Wl,-x）
+if command -v nm >/dev/null 2>&1; then
+  LOCALSYM=$(nm -a "$DYL" 2>/dev/null | awk '$2=="t"||$2=="s"' | wc -l | tr -d ' ')
+  if [ "${LOCALSYM:-1}" -le 2 ]; then
+    ok "本地符号已剥离（残留 ${LOCALSYM}）"
+  else
+    bad "本地符号未剥离（残留 ${LOCALSYM}）"
+  fi
+fi
+
+# --- 8. 注入过滤器 ---
 PL=$(find "$TMP/root" -name 'GaodeClean.plist' | head -1)
 if [ -n "$PL" ]; then
   plutil -p "$PL" 2>/dev/null | grep -q 'com.autonavi.amap' \

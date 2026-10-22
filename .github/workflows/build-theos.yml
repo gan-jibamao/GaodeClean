@@ -1,9 +1,8 @@
 name: Build GaodeClean
 
 # 正式发布包一律由本工作流构建（macos-14 + theos，双架构）。
-#   分支 push / 手动触发 → 只出包 + 校验（产物在 artifact）
-#   打 v* tag           → 额外把 deb×2 / dylib×2 / Source.zip / SHA256SUMS 发到 Release
-#   workflow_dispatch + diag=true → 出真机取证包（<ver>+diag3，不剥离诊断，不发 Release）
+#   分支 push → 只出包 + 校验（产物在 artifact）
+#   打 v* tag → 额外把 deb×2 / dylib×2 / Source.zip / SHA256SUMS 发到 Release
 # 说明：本机 iSH 的 clang 链（Makefile.local）仅供临时验证，不作为发布来源。
 
 on:
@@ -15,11 +14,6 @@ on:
       - '**/*.md'
       - 'tools/**'
   workflow_dispatch:
-    inputs:
-      diag:
-        description: '构建真机取证包（内容 = 未剥离 + GAODECLEAN_DIAG_LOG）'
-        type: boolean
-        default: false
 
 permissions:
   contents: write
@@ -58,26 +52,23 @@ jobs:
           brew install ldid dpkg
           echo "THEOS=$THEOS" >> $GITHUB_ENV
 
-      - name: Build (${{ matrix.scheme }}${{ inputs.diag && ' / diag' || '' }})
-        env:
-          DIAG: ${{ inputs.diag && '1' || '0' }}
+      - name: Build (${{ matrix.scheme }})
         run: |
           set -e
           export THEOS=$HOME/theos
-          if [ "$DIAG" = "1" ]; then
-            # 取证包：版本改写为 <base>+diag3（包名自带），不剥离诊断
-            BASE=$(grep -m1 '^Version:' control | awk '{print $2}')
-            sed -i '' "s/^Version: .*/Version: ${BASE}+diag3/" control
-            echo "== diag 版本：$(grep -m1 '^Version:' control)"
-            make clean >/dev/null 2>&1 || true
-            make package FINALPACKAGE=0 DIAG=1 THEOS_PACKAGE_SCHEME=${{ matrix.scheme }}
-          else
-            make clean >/dev/null 2>&1 || true
-            make package FINALPACKAGE=1 DIAG=0 THEOS_PACKAGE_SCHEME=${{ matrix.scheme }}
-          fi
+          make clean >/dev/null 2>&1 || true
+          make package FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=${{ matrix.scheme }}
           mkdir -p out
           find packages -name '*.deb' -exec cp {} out/ \;
           ls -l out/
+
+      - name: Obfuscation round-trip self-test (${{ matrix.scheme }})
+        run: |
+          set -e
+          # 用与运行时完全同一份解码数学（src/GCObfMath.h）在 CI 上把全部混淆串
+          # 解回明文，逐条与 scripts/obf_strings.txt 比对并校验头内 FNV 摘要。
+          clang -O2 -Wall -Wextra -I src -o /tmp/obf_selftest scripts/obf_selftest.c
+          /tmp/obf_selftest scripts/obf_strings.txt
 
       - name: Inspect payload (${{ matrix.scheme }})
         run: |
@@ -89,9 +80,7 @@ jobs:
             dpkg-deb -c "$d"
           done
 
-      - name: Verify payload (${{ matrix.scheme }}${{ inputs.diag && ' / diag' || '' }})
-        env:
-          FINALPACKAGE: ${{ inputs.diag && '0' || '1' }}
+      - name: Verify payload (${{ matrix.scheme }})
         run: |
           set -e
           chmod +x scripts/verify_deb.sh
@@ -117,7 +106,7 @@ jobs:
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: GaodeClean-${{ matrix.scheme }}${{ inputs.diag && '-diag' || '' }}
+          name: GaodeClean-${{ matrix.scheme }}
           path: out/*
           if-no-files-found: error
 
@@ -141,6 +130,8 @@ jobs:
           VER=$(grep -m1 '^Version:' control | awk '{print $2}')
           git archive HEAD --prefix=GaodeClean-${VER}/ | tar -x
           rm -rf GaodeClean-${VER}/dist GaodeClean-${VER}/packages GaodeClean-${VER}/.theos
+          # 0.9.20：混淆明文清单留在私有仓库，刻意不随源码包分发
+          rm -f GaodeClean-${VER}/scripts/obf_strings.txt
           zip -qr "artifacts/GaodeClean-${VER}-Source.zip" "GaodeClean-${VER}"
           rm -rf "GaodeClean-${VER}"
           ls -l artifacts/
@@ -158,9 +149,43 @@ jobs:
           files: artifacts/*
           generate_release_notes: false
           body: |
-            由 GitHub Actions（macos-14 + theos）构建的双架构正式包。
+            > 高德地图 UI 精简 · 纯运行时 hook · 不抓网络、不改 IPA
 
-            - `*_iphoneos-arm64.deb`：rootless / Dopamine（载荷 `/var/jb/Library/MobileSubstrate/DynamicLibraries/`）
-            - `*_iphoneos-arm64e.deb`：RootHide / roothide（载荷 `/Library/MobileSubstrate/DynamicLibraries/`）
+            ## 这个版本装哪个
 
-            安装前请核对 `SHA256SUMS.txt`；源码包为 `git archive` 生成的干净快照（不含 dist/ 与构建产物）。
+            | 你的越狱环境 | 下载这个 |
+            | --- | --- |
+            | **RootHide / roothide**（隐根） | `*_iphoneos-arm64e.deb` |
+            | **rootless / Dopamine** | `*_iphoneos-arm64.deb` |
+
+            两个架构**不要同时装**。装完请注销（sbreload）或重启用户空间再打开高德。
+
+            ## 0.9.20 —— 清探针 · 清日志
+
+            功能已验收完成，本版做发布收尾，行为与 0.9.19 一致：
+
+            - **移除全部诊断探针**：删掉真机取证模块、开屏类清单枚举、两个 `GAODECLEAN_DEBUG_*` 环境开关
+            - **移除全部自定义日志**：启动横幅、hook 跳过提示、广告窗黑名单提示、开屏守卫命中提示全部清除；
+              正式包内不再有任何以 `[GaodeClean]` 开头的字符串
+            - **构建链同步精简**：`Makefile` 去掉 `DIAG` 分支，工作流去掉取证包入口（取证包今后从 git 历史取用）
+            - 功能零改动：底栏引导/白雾、顶部模糊带、首页白块、搜索栏与天气行归位、连接车机位置、
+              2D/3D 位置、切页与切 2D/3D 不跳动 —— 全部保持上一版已验证状态
+
+            ## 功能一览
+
+            - 根除底栏「上拉发现」引导提示与上拉白雾/闪白
+            - 去顶部高斯模糊带、去首页白块
+            - 搜索栏、天气行、连接车机、2D/3D、定位/路线胶囊按原生关系归位
+            - 切页与切换 2D/3D 不再跳动；冷启动不在屏幕中部闪出按钮
+            - 版本限制已取消：全版本自适应（按类名与几何特征判定，不依赖具体版本号）
+
+            ## 校验
+
+            安装前请核对本页的 `SHA256SUMS.txt`。附件中的 `Source.zip` 是 `git archive` 生成的干净快照，
+            不含 `dist/`、`packages/`、`.theos/` 等构建产物。
+
+            ## 构建说明
+
+            由 GitHub Actions 构建：`macos-14` + roothide theos（commit 固定）+ iPhoneOS SDK（commit 固定），
+            `FINALPACKAGE=1` 双架构各出一包，并跑 `scripts/verify_deb.sh` 门禁
+            （载荷路径 / 架构切片 / 依赖 / 过滤器 / 版本串一致性 / 日志与探针零残留）。
