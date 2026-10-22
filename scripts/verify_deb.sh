@@ -52,7 +52,9 @@ case "$SCHEME" in
   rootless) WANT="var/jb/Library/MobileSubstrate/DynamicLibraries/GaodeClean.dylib" ;;
   roothide) WANT="Library/MobileSubstrate/DynamicLibraries/GaodeClean.dylib" ;;
 esac
-if printf '%s\n' "$LIST" | grep -q "\./$WANT\$"; then
+# 注意：不同 dpkg 版本的 `dpkg-deb -c` 输出带不带 "./" 前缀不一致（homebrew dpkg 不带），
+# 这里用 (行首|空格) 可选 "./" 的写法，避免把正确的载荷误判为失败。
+if printf '%s\n' "$LIST" | grep -E "(^| )(\./)?${WANT}\$" >/dev/null; then
   ok "载荷路径 ./$WANT"
 else
   bad "载荷路径不符合预期 ./$WANT"
@@ -96,13 +98,18 @@ case "$SLICES" in
 esac
 
 # --- 5. FINALPACKAGE 剥离哨兵 ---
-if strings -a "$DYL" | grep -qF '[GaodeClean] '; then
-  say "  [note] 体内残留 GCLog 诊断串（仅当本次构建 FINALPACKAGE=1 时才算失败）"
+# 注意：正式包**故意保留 8 处 NSLog**（启动横幅与关键路径），所以不能拿 "[GaodeClean] "
+# 当哨兵（会把正确包判失败）。哨兵必须取**只出现在 GCLog 里的文案**。
+GC_LOGONLY='blocked tab guide lottie|page=%ld anchor=pending|splash ad hidden|weather row released|fog sweep hides'
+NLOG=$(strings -a "$DYL" | grep -cF '[GaodeClean] ' || true)
+if strings -a "$DYL" | grep -qE "$GC_LOGONLY"; then
   if [ "${FINALPACKAGE:-0}" = "1" ]; then
-    bad "正式包不应残留 GCLog 诊断串"
+    bad "正式包残留 GCLog 诊断串（GCLog 未被剥空）"
+  else
+    say "  [note] 非正式构建，保留 GCLog 诊断串（正常）"
   fi
 else
-  ok "无 GCLog 诊断串残留（日志已剥离）"
+  ok "GCLog 诊断串已剥空（保留的 NSLog 计数 $NLOG，预期 8）"
 fi
 
 # --- 6. 注入过滤器 ---

@@ -2,7 +2,7 @@
 """CI 产物本地核验（iSH 无 lipo/plutil，用 python 等价实现）
 用法: verify_ci_release.py <目录> <deb:scheme> ...
 """
-import sys, os, struct, subprocess, plistlib
+import sys, os, re, struct, subprocess, plistlib
 
 def macho_slices(path):
     """返回 [(cputype, cpusubtype)]，支持 fat"""
@@ -20,13 +20,20 @@ def macho_slices(path):
                 out.append((cpu, sub))
     else:
         with open(path, 'rb') as f:
-            cpu, sub = struct.unpack('<ii', f.read(8))
+            magic_le, cpu, sub = struct.unpack('<III', f.read(12))
         out.append((cpu, sub))
     return out
 
+def _name(cpu, sub):
+    # arm64e 与 arm64 的 cputype 相同（0x0100000c），靠 cpusubtype 区分：
+    #   2 = CPU_SUBTYPE_ARM64E，0x80000002 = 带 ABI/PAC 标志的 arm64e
+    if cpu == 0x0100000c:
+        return 'arm64e' if sub in (2, 0x80000002) else 'arm64'
+    return {0x0100000d: 'arm64e'}.get(cpu, hex(cpu))
+
+
 def fmt(slices):
-    m = {0x0100000c: 'arm64', 0x0100000d: 'arm64e'}
-    return ' '.join('%s(sub=0x%x)' % (m.get(c, hex(c)), s) for c, s in slices)
+    return ' '.join('%s(sub=0x%x)' % (_name(c, s), s) for c, s in slices)
 
 def plist_check(p):
     with open(p, 'rb') as f:
@@ -51,9 +58,10 @@ def main():
         if scheme == 'roothide' and 'arm64e' not in arch:
             print('   [FAIL] roothide 架构标签应含 arm64e'); fail = 1
         listing = subprocess.run(['dpkg-deb', '-c', deb], capture_output=True, text=True).stdout
-        want = ('./var/jb/Library/MobileSubstrate/DynamicLibraries/GaodeClean.dylib' if scheme == 'rootless'
-                else './Library/MobileSubstrate/DynamicLibraries/GaodeClean.dylib')
-        ok = any(l.rstrip().endswith(want) for l in listing.splitlines())
+        want = ('var/jb/Library/MobileSubstrate/DynamicLibraries/GaodeClean.dylib' if scheme == 'rootless'
+                else 'Library/MobileSubstrate/DynamicLibraries/GaodeClean.dylib')
+        # homebrew dpkg 的 -c 输出不带 "./" 前缀，两种都接受
+        ok = any(re.sub(r'^\./', '', l.split()[-1]) == want for l in listing.splitlines() if l.split())
         print('   %s 载荷 %s' % ('[OK]' if ok else '[FAIL]', want))
         if not ok:
             fail = 1
@@ -90,18 +98,20 @@ def main():
             print('   [FAIL] 解包后找不到 dylib'); fail = 1; continue
         sl = macho_slices(dyl)
         print('   切片: %s   (%d 字节)' % (fmt(sl), os.path.getsize(dyl)))
-        names = {0x0100000c: 'arm64', 0x0100000d: 'arm64e'}
-        have = {names.get(c) for c, _ in sl}
+        have = {_name(c, s) for c, s in sl}
         if 'arm64' not in have:
             print('   [FAIL] 缺 arm64 切片'); fail = 1
         if scheme == 'roothide' and 'arm64e' not in have:
             print('   [FAIL] roothide 缺 arm64e 切片'); fail = 1
         # 日志哨兵
         st = subprocess.run(['strings', '-a', dyl], capture_output=True, text=True).stdout
-        if '[GaodeClean] ' in st:
-            print('   [FAIL] 正式包残留 GCLog 诊断串'); fail = 1
+        logonly = ['blocked tab guide lottie', 'page=%ld anchor=pending', 'splash ad hidden',
+                   'weather row released', 'fog sweep hides']
+        hit = [x for x in logonly if x in st]
+        if hit:
+            print('   [FAIL] 正式包残留 GCLog 诊断串:', hit); fail = 1
         else:
-            print('   [OK] 无 GCLog 残留')
+            print('   [OK] GCLog 已剥空（保留 NSLog 计数 %d，预期 8）' % st.count('[GaodeClean] '))
         # 过滤器
         for dp, _, fs in os.walk(ex):
             for f in fs:
