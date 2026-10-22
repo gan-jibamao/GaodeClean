@@ -18,7 +18,7 @@
 // ---- jibamao 个人标识（编译进 dylib，可用 strings 核对）----
 static NSString *const kGCAuthor      = @"jibamao";
 static NSString *const kGCRepo        = @"https://gan-jibamao.github.io/";
-static NSString *const kGCVersion     = @"0.9.21";
+static NSString *const kGCVersion     = @"0.9.22";
 
 // 0.9.18（A1）：底边间隙**按控件分开**，对表原生（搜索栏白底顶边 = 702.6pt）
 //   车机钮（连接车机 · WINDeviceInterconnectWidget）：原生底 652 → 间隙 50.6 → 取 50
@@ -105,6 +105,7 @@ static __weak id CachedTabs;
 static __weak UIView *SearchBarView;   // 0.5.58   // 0.5.55：用于判断当前是否「首页」选中
 static void UpdateMask(UIView *page);
 static void Schedule(void);
+static void GCNarrowOneBar(UIView *bar);   // 0.9.22（A1）搜索栏/底栏缩窄
 static void LayoutMinimalHome(id handler);
 static void AlignCornerWidgets(UIView *bar);
 static BOOL FixingHintText;
@@ -640,6 +641,10 @@ static void Schedule(void) {
         // 不会因提前返回而断。重试链只剩副作用：非活跃时额外 10 次/秒空转唤醒。
         if (UIApplication.sharedApplication.applicationState != UIApplicationStateActive) return;
         TickCount++;
+        if (TickCount % 5 == 0) {   // 0.9.22（A1）缩窄兜底：每 ~0.5s 重认一次可见层
+            GCNarrowOneBar(SearchBarView);
+            GCNarrowOneBar(CachedTabBar);
+        }
         for (id tabs in TabControllers.allObjects) {
             id selected = ObjectGetter(tabs, GCStrAt(71));
             id params = ObjectGetter(tabs, GCStrAt(38));
@@ -814,6 +819,102 @@ static void HookVoid(NSString *name, NSString *methodName, void (^after)(id)) {
         after(self);
     });
     Replace(cls, sel, imp, method_getTypeEncoding(m));
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 0.9.22（A1）搜索栏 / 底栏「缩窄」—— 两侧各留 24pt，居中收窄，其余一概不动
+// ───────────────────────────────────────────────────────────────────────────
+// 依据（对老大给的原生截图逐像素量得；1179px @3x = 393×852pt）：
+//   搜索栏可见白胶囊：x = 10.7 → 382.3pt（宽 371.6pt，两侧各 ≈10.7pt）
+//   底栏（首页/我的）可见胶囊：同口径 ≈10pt
+//   右侧地图控件（+ / 图层 / 定位）：x = 353 → 383pt（宽 30pt，右侧 10pt）
+// 目标视觉：两条栏对称内收，两侧各 24pt → 宽 345pt（比原生窄 ≈27pt / 7.2%），
+//   与地图控件（10pt）拉开「内容层 vs 控件层」的层次；两条栏彼此同宽同边距。
+//
+// 取哪一层：容器可能是「全宽的透明容器 + 内嵌可见胶囊子视图」，也可能本身就是胶囊。
+//   故运行时自适应：优先取「宽度 ≥ 屏宽-60 的直接子视图」作可见层，取不到就退化为
+//   容器自身 —— 两种情况都能收窄。规则是**绝对宽度**（幂等），重复应用不会越收越窄。
+// 防回弹：给被判定的那一层挂 setFrame: 钳位 —— 无论 App 自己还是我们自己的布局代码
+//   再写一次，都被同一条规则夹回目标宽度，不会出现 100ms 级的撑开/回缩抖动。
+//
+// 安全边界（避免误伤整屏容器）：只处理「被我们捕获的那条栏」及其**直接子视图**；
+//   且必须同时满足：居中、两端都在屏内 40pt 以内、宽度 ≥ 屏宽-60、高度 ∈ [20, 屏宽×0.35]，
+//   并排除窗口自身与其 rootViewController 视图。
+static const CGFloat GCBarInset = 24.0;   // 两侧留白（pt）：调大 = 更窄，调小 = 更宽
+static NSMutableSet *GCNarrowHooked;      // 已挂钳位的类名（防止重复 Hook）
+
+static CGFloat GCNarrowScreenW(UIView *v) {
+    UIWindow *w = v.window;
+    return w ? w.bounds.size.width : 0;
+}
+
+// 「这是一条贴边宽栏」→ 收窄；否则原样返回
+static CGRect GCNarrowClamp(UIView *v, CGRect f) {
+    UIWindow *w = v.window;
+    CGFloat screenW = w ? w.bounds.size.width : 0;
+    if (screenW < 200 || !w) return f;
+    if (v == (UIView *)w) return f;
+    if (w.rootViewController && v == w.rootViewController.view) return f;
+    CGFloat target = screenW - 2 * GCBarInset;
+    if (f.size.width <= target + 0.5) return f;          // 已不比目标宽：不碰（幂等）
+    if (f.size.width < screenW - 60) return f;           // 不够宽，不是这两条栏
+    UIView *sup = v.superview;
+    CGRect win = sup ? [sup convertRect:f toView:w] : f;
+    CGFloat h = win.size.height;
+    if (h < 20 || h > screenW * 0.35) return f;          // 高度不像一条栏 → 放行
+    if (win.origin.x < -1 || CGRectGetMaxX(win) > screenW + 1) return f;    // 超出屏
+    if (win.origin.x > 40 || screenW - CGRectGetMaxX(win) > 40) return f;   // 端头太靠里
+    if (fabs(CGRectGetMidX(win) - screenW * 0.5) > 4) return f;             // 不居中
+    f.origin.x += GCBarInset - win.origin.x;             // 左端对齐到 24pt
+    f.size.width = target;                               // 宽度锁到 345pt
+    return f;
+}
+
+static void GCNarrowHookClass(Class cls) {
+    if (!cls) return;
+    if (!GCNarrowHooked) GCNarrowHooked = [NSMutableSet set];
+    NSString *name = NSStringFromClass(cls);
+    if ([name length] == 0 || [GCNarrowHooked containsObject:name]) return;
+    SEL sel = NSSelectorFromString(@"setFrame:");
+    Method m = class_getInstanceMethod(cls, sel);
+    if (!m) return;
+    [GCNarrowHooked addObject:name];
+    IMP orig = method_getImplementation(m);
+    IMP imp = imp_implementationWithBlock(^(UIView *self, CGRect f) {
+        ((void (*)(id, SEL, CGRect))orig)(self, sel, GCNarrowClamp(self, f));
+    });
+    Replace(cls, sel, imp, method_getTypeEncoding(m));
+}
+
+// 这条栏「可见的那一层」：最宽的直接子视图（够宽才算），没有就用它自己
+static UIView *GCNarrowVisibleLayer(UIView *bar) {
+    CGFloat screenW = GCNarrowScreenW(bar);
+    if (screenW < 200) return bar;
+    UIView *best = nil;
+    CGFloat bw = 0;
+    for (UIView *sub in bar.subviews) {
+        if (sub.hidden || sub.alpha < 0.05) continue;
+        CGRect wr = [sub convertRect:sub.bounds toView:bar.window];
+        CGFloat wh = wr.size.height;
+        if (wr.size.width < screenW - 60) continue;      // 不够宽：不是可见胶囊
+        if (wh < 20 || wh > screenW * 0.35) continue;    // 高度不像一条栏
+        if (wr.size.width > bw) { bw = wr.size.width; best = sub; }
+    }
+    return best ?: bar;
+}
+
+static void GCNarrowOneBar(UIView *bar) {
+    if (!bar || !bar.window || !Visible(bar)) return;
+    CGFloat screenW = GCNarrowScreenW(bar);
+    if (screenW < 200) return;
+    UIView *layer = GCNarrowVisibleLayer(bar);
+    GCNarrowHookClass([layer class]);                    // 先防回弹，再立刻夹一次
+    if (layer != bar) GCNarrowHookClass([bar class]);
+    CGRect f = layer.frame, g = GCNarrowClamp(layer, f);
+    if (!CGRectEqualToRect(f, g)) {
+        layer.frame = g;
+        [layer setNeedsLayout];
+    }
 }
 
 // 0.9.4：删除 IsBlurOverlayView / GCCColorStr / GCCScreenMapMean
@@ -1440,6 +1541,7 @@ static void LayoutMinimalHome(id handler) {
     id tabs = ObjectGetter(handler, GCStrAt(125));
     if (tabs) CachedTabs = tabs;
     if ([bar isKindOfClass:UIView.class]) SearchBarView = bar;
+        GCNarrowOneBar(bar);
     id selected = ObjectGetter(tabs, GCStrAt(71));
     if (![bar isKindOfClass:UIView.class] || ![sheet isKindOfClass:UIView.class] || !sheet.superview) return;
     BOOL home = [NSStringFromClass([selected class]) isEqualToString:GCStrAt(122)];
@@ -2649,7 +2751,7 @@ static void InstallSplashAdGuard(void) {
 static void InstallMinimalHome(void) {
     // 0.7.0：开屏广告移除
     InstallSplashAdGuard();
-    HookVoid(GCStrAt(88), GCStrAt(91), ^(UIView *bar) { CachedTabBar = bar; CenterTabButtons(bar); SweepTabBarHints(bar); });
+    HookVoid(GCStrAt(88), GCStrAt(91), ^(UIView *bar) { CachedTabBar = bar; GCNarrowOneBar(bar); CenterTabButtons(bar); SweepTabBarHints(bar); });
     InstallTabBarHintHooks();
     // 0.9.1：「上拉发现」引导 Lottie 拦截（17.01.1 GuideLottie 机制）
     InstallTabBarGuideLottieBlock();
@@ -3072,6 +3174,7 @@ static void InstallMinimalHome(void) {
         // method_setImplementation —— 后装的那次会把先装的顶掉（CenterTabButtons 失效）。
         // 两条路径各自带上，谁后装都不丢功能。
         CachedTabBar = bar;
+        GCNarrowOneBar(bar);
         CenterTabButtons(bar);
         SweepTabBarHints(bar);
         for (id item in (ObjectGetter(bar, GCStrAt(161)) ?: @[])) {
