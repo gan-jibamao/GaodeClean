@@ -18,6 +18,9 @@ static NSTimeInterval GCDiagT0 = 0;
 static int GCDiagLines = 0;
 static int GCDiagFrameBudget = 300;
 static BOOL GCDiagSampling = YES;
+// 0.9.15（A6）：必须**持有强引用**。0.9.14 把它写成函数局部变量，ARC 下出作用域即释放，
+// 采样定时器一次都没触发（真机日志里 0 条 Sxx 行，只能靠录屏反推 —— 这是取证的失误）。
+static dispatch_source_t GCDiagTimer = NULL;
 
 static void GCDiagOpen(void) {
     if (GCDiagFP) return;
@@ -233,11 +236,11 @@ static void GCDiagInstall(void) {
             }), types);
         }
     }
-    // 采样定时器（200ms）
-    dispatch_source_t t = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, dispatch_get_main_queue());
-    dispatch_source_set_event_handler(t, ^{ GCDiagSample(); });
-    dispatch_source_set_timer(t, dispatch_time(DISPATCH_TIME_NOW, 200 * NSEC_PER_MSEC),
+    // 采样定时器（200ms）—— 必须存进文件级变量持住，否则 ARC 立即释放
+    GCDiagTimer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, dispatch_get_main_queue());
+    dispatch_source_set_event_handler(GCDiagTimer, ^{ GCDiagSample(); });
+    dispatch_source_set_timer(GCDiagTimer, dispatch_time(DISPATCH_TIME_NOW, 200 * NSEC_PER_MSEC),
                               200 * NSEC_PER_MSEC, 20 * NSEC_PER_MSEC);
-    dispatch_resume(t);
+    dispatch_resume(GCDiagTimer);
     GCDiag(@"采样定时器已启动（200ms x 75 = 15s）");
 }

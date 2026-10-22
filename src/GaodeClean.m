@@ -18,7 +18,7 @@
 static NSString *const kGCAuthor      = @"jibamao";
 static NSString *const kGCRepo        = @"https://gan-jibamao.github.io/";
 static NSString *const kGCSection     = @"jibamao-Tweaks";
-static NSString *const kGCVersion     = @"0.9.14";
+static NSString *const kGCVersion     = @"0.9.15";
 static NSString *const kGCSignature   = @"GaodeClean by jibamao";
 
 // 对外签名（供 log / 诊断 / 二次核对使用）
@@ -69,6 +69,9 @@ static BOOL Scheduled, Applying;
 static CGFloat SearchBarSettledY;
 static BOOL SearchBarSettled;
 static NSInteger BarStableTicks;
+// 0.9.15：搜索栏「上一拍」的位置 —— 稳定性计数改为与上一拍比较，
+// 不再与「已锁定的目标值」比较（旧写法在锚点迁移时会自我循环，见 §Y）
+static CGFloat BarLastY = -1;
 static BOOL BarShownOnce;      // 0.9.2：搜索栏在正确位置显示过至少一次（冷启动防闪断标记）
 // 0.9.14（A8 回退）：HomeSettled 恢复。它是 0.4.41 兜底的**唯一门控** ——
 // 「任一控件对齐成功」= 首页布局已稳定 = 兜底无需再跑。
@@ -666,10 +669,15 @@ static void Schedule(void) {
         //   在那一刻还没配对，AlignOneWidget 没碰过它，frame 仍停在 app 原生中部
         //   位置，于是「一开闸就以错误位置现身」。逐帧铁证：0.9.7 = 0 帧裸露、
         //   0.9.8 = 19 帧；之后 0.9.9~0.9.13 五层显示路径拦截全是在打这个症状。
-        //   恢复后：任一控件对齐成功（车机钮 ~1.3s）即封门，兜底只在「整套对齐
-        //   机制都失败」时跑一次。
+        //   恢复后：任一控件对齐成功即封门，兜底只在「整套对齐机制都失败」时跑一次。
+        // 0.9.15（A2 配套）：锚点（搜索栏）未定格前 AlignCornerWidgets 会直接返回，
+        //   因此「对齐成功」最早发生在搜索栏稳定 3 拍之后 —— 封门时刻相应后移，
+        //   这正好让兜底与真机启动节奏对齐（见 A4 的阈值调整）。
         ColdTicks++;
-        if (!HomeSettled && ColdTicks > 12) {
+        if (!HomeSettled && ColdTicks > 16) {
+            // 0.9.15（A4）：阈值 12 → 16。A2 的锚点闸门保证「最早也要 ColdTicks>=15
+            // 才认领」—— 12 拍开闸会**先**把控件按 app 原始位置强显（中部位），
+            // 等于把刚堵上的裸露从兜底这条路重新放出来。16 拍确保闸门先跑。
             HomeSettled = YES;
             for (UIView *w in ColdWidgets.allObjects) {
                 if (![w isKindOfClass:UIView.class]) continue;
@@ -1516,14 +1524,31 @@ static void LayoutMinimalHome(id handler) {
             AlignWeatherRow(CachedRow);
         }
     }
-    // ===== 0.4.19 首帧锁定：缓存最终 y，state 机/原生布局再拉也立即弹回
-    if (!SearchBarSettled) {
+    // ===== 0.9.15：锚点目标改为「定格后才锁定」，并在启动窗口内自愈重锁
+    //   真机铁证（diag 日志 + 逐帧录屏，见 HISTORY §Y）：
+    //   搜索栏是**跟随 tab 栏**定位的（want = tabFrame.origin.y - 高度 - 12），
+    //   而冷启动时 tab 栏自己还在迁移 —— 搜索栏先停在 y≈436（原生槽位附近），
+    //   最终停在 y≈701（tab 栏上方 12pt）。
+    //   0.4.19 的「首帧锁定」把 436 当成了最终位置，于是：
+    //     ① 控件钳位目标 = 436-8 = 428 → 右下钮被**稳稳钉在屏高 40% 的中部**
+    //        （逐帧实测裸露框 y768-958 = 窗口系 340-428，与该目标完全吻合）
+    //     ② 搜索栏自身的回钉钩子也一直往 436 拉，与这里的 want(701) 对打
+    //   现在：连续 3 拍位置不变才认；ColdTicks<30 内若又稳定停到新位置则重锁。
+    // 0.9.15（A1 硬化）：目标位置必须落在容器**底部 30%** —— 这是「搜索栏在 tab 栏上方」
+    //   的几何不变量。启动期 tab 栏自身还在迁移，算出来的 want 会落在屏高 ~51%
+    //   （实测 436/852），那只是过渡值；此时既不能锁锚点，更不能显示它的伴随控件。
+    //   纯计时判据（稳定 N 拍）会被「过渡值恰好稳定 600ms」骗过，几何判据不会。
+    BOOL targetLooksFinal = (want.origin.y > parent.bounds.size.height * 0.70);
+    if (fabs(bar.frame.origin.y - BarLastY) < 0.5) BarStableTicks++;
+    else { BarStableTicks = 0; BarLastY = bar.frame.origin.y; }
+    BOOL anchorMoved = (SearchBarSettled && ColdTicks < 30 && BarStableTicks >= 3
+                        && fabs(bar.frame.origin.y - SearchBarSettledY) > 0.5);
+    if ((!SearchBarSettled || anchorMoved) && (BarStableTicks >= 3 || ColdTicks >= 20)
+        && (targetLooksFinal || ColdTicks >= 20)) {
         SearchBarSettledY = bar.frame.origin.y;
         SearchBarSettled = YES;
     }
     // 0.4.45：连续稳定 3 轮(~0.6s)后才显示，避免 app 中途把搜索栏拉回原生(447)造成闪跳
-    if (fabs(bar.frame.origin.y - SearchBarSettledY) < 0.5) BarStableTicks++;
-    else BarStableTicks = 0;
     bar.hidden = (BarStableTicks < 3 && ColdTicks < 15);
     if (!bar.hidden) BarShownOnce = YES;   // 0.9.2：记下「已显示过」——冷启动后段防瞬时隐藏
     LayingOutHome = NO;
@@ -1664,6 +1689,15 @@ static void AlignCornerWidgets(UIView *bar) {
     UIWindow *win = bar.window;
     CGFloat barTop = [bar convertPoint:CGPointZero toView:win].y;
     if (barTop < 40) return;                                 // 搜索框尚未就位（0.4.6: 80→40）
+    // 0.9.15（A2）：锚点（搜索栏）**还没有定格**时，一律不摆位、不认领、不显示。
+    //   真机日志铁证：0.9.14 时本函数在右下钮出生后约 40ms 就按搜索栏**当时的瞬态
+    //   位置**（superview 系 y=436，对应窗口系 447 原生槽位）把它摆到屏高 40% 并显示，
+    //   同时打上 AlignedKey —— 此后 layoutSubviews / setHidden: / didMoveToWindow
+    //   全部「未对齐才隐藏」的钩子因 AlignedKey 已置而**集体跳过**，控件就此稳定可见
+    //   21 帧/350ms，直到搜索栏落到最终 701 才被拉到底部（那一下「瞬移」）。
+    //   此期间控件保持隐藏（由 layoutSubviews / didMoveToWindow 两条钩子按住），
+    //   与搜索栏同一判据（BarStableTicks>=3）解除 —— 二者同时出现、位置都是最终值。
+    if (!SearchBarSettled) return;
 
     // 0.5.0：缓存圆钮实例，每轮直接对齐，只有实例失效时才重扫窗口树
     if (!CachedCar || !CachedCar.window) CachedCar = nil;
@@ -2792,6 +2826,17 @@ static void InstallMinimalHome(void) {
             view.hidden = YES; [ColdWidgets addObject:view];
         }
     });
+    // 0.9.15（A3）：**出生即藏** —— 只挂 layoutSubviews 还差一截。
+    //   diag 日志铁证：1.187s 上窗那一刻 tag 已是 template_mainmapRightBottom，
+    //   而 app 在同一毫秒内就把 frame 摆到 (339,281)=窗口系(339,340)；
+    //   首次 layoutSubviews 要等到 1.229s —— 中间 42ms（≈2.5 帧）足以渲染。
+    //   这条钩子在上窗瞬间按住它：判定用**精确 tag**，不会误伤同类的
+    //   「+/图层」圆钮（日志里那是 template_mainmapRightTop，不上屏就摆位不同）。
+    HookVoid(@"WINAJXCombinedWidgetView", @"didMoveToWindow", ^(UIView *view) {
+        if (view.window && !objc_getAssociatedObject(view, &AlignedKey) && IsRightBottomWidget(view)) {
+            view.hidden = YES; [ColdWidgets addObject:view];
+        }
+    });
     // 0.4.41：车机圆钮冷启动先隐藏，对齐后再显示，消除跳动
     HookVoid(@"WINDeviceInterconnectWidget", @"layoutSubviews", ^(UIView *w) {
         if (w.window && !objc_getAssociatedObject(w, &AlignedKey)) { w.hidden = YES; [ColdWidgets addObject:w]; }
@@ -2981,6 +3026,7 @@ __attribute__((constructor)) static void Initialize(void) {
             SearchBarSettled = NO;
             SearchBarSettledY = 0;
             BarStableTicks = 0;
+            BarLastY = -1;      // 0.9.15：稳定性基线一并清掉，下一拍按新宽度重新计数
             CachedCar = nil;
             CachedRight = nil;
             CachedRoute = nil;
