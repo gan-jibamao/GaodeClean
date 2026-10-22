@@ -109,7 +109,7 @@ if strings -a "$DYL" | grep -qE "$GC_LOGONLY"; then
     say "  [note] 非正式构建，保留 GCLog 诊断串（正常）"
   fi
 else
-  ok "GCLog 诊断串已剥空（保留的 NSLog 计数 $NLOG，预期 8）"
+  ok "GCLog 诊断串已剥空（保留的 NSLog 计数 ${NLOG}，预期 8）"
 fi
 
 # --- 6. 注入过滤器 ---
