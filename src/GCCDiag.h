@@ -181,6 +181,21 @@ static void GCDiagSample(void) {
                            hit ? @"★" : @"", chain]];
         }
         if (ri.count) GCDiag(@"   RIGHT: %@", [ri componentsJoinedByString:@" "]);
+        // 0.9.19（A4）：2D/3D 按钮识别结果（含命中档位）—— 一眼看出识别器是否命中、摆到哪
+        {
+            UIView *mt = (CachedRight && CachedRight.window) ? GCCFindMapTypeButton(win, CachedRight) : nil;
+            if (mt) {
+                CGRect r = [mt convertRect:mt.bounds toView:win];
+                CGRect cap = [CachedRight convertRect:CachedRight.bounds toView:win];
+                GCDiag(@"   MAPTYPE: tier=%ld %@(%.0f,%.0f,%.0fx%.0f) 目标底=%.0f",
+                       (long)GCReportedMapTypeTier, NSStringFromClass(mt.class),
+                       r.origin.x, r.origin.y, r.size.width, r.size.height,
+                       CGRectGetMinY(cap) - GCGapMapType);
+            } else {
+                GCDiag(@"   MAPTYPE: 未识别到（CachedRight=%@ settled=%d）",
+                       CachedRight ? NSStringFromClass(CachedRight.class) : @"nil", SearchBarSettled);
+            }
+        }
     }
     GCDiag(@"S%02d tick=%ld H=%d SB=%d(y=%.0f) | W%lu: %@ | mid=%s[%@]",
            n, (long)ColdTicks, HomeSettled, SearchBarSettled, SearchBarSettledY,
