@@ -2874,6 +2874,11 @@ static void InstallMinimalHome(void) {
 //  内部均有存在性检查），未知版本照常安装全部可用钩子。
 // ---------------------------------------------------------------------------
 
+// 0.9.14-diag：真机事实采集模块（仅 -DGAODECLEAN_DIAG_LOG=1 时编译进去）
+#ifdef GAODECLEAN_DIAG_LOG
+#include "GCCDiag.h"
+#endif
+
 __attribute__((constructor)) static void Initialize(void) {
     @autoreleasepool {
         NSString *appVer = [NSBundle.mainBundle objectForInfoDictionaryKey:@"CFBundleShortVersionString"] ?: @"?";
@@ -2989,5 +2994,8 @@ __attribute__((constructor)) static void Initialize(void) {
             GCCArmTick();
         });
         NSLog(@"[GaodeClean] loaded %@ (no version limit; appVer=%@)", kGCVersion, appVer);
+#ifdef GAODECLEAN_DIAG_LOG
+        GCDiagInstall();
+#endif
     }
 }
