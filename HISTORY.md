@@ -1093,6 +1093,31 @@ if (!SearchBarSettled) { SearchBarSettledY = bar.frame.origin.y; SearchBarSettle
 
 ---
 
+### §Y · 0.9.15 —— 锚点「定格后才锁定」（思路正确，但真凶不是它）
+
+**现象**：0.9.14（完整回退到 0.9.7 语义）真机**仍裸露 18–22 帧**。
+diag 日志给出关键事实：`tag=template_mainmapRightBottom`、`精确判定=1` ⇒ 六轮「tag 不匹配 / 时序」
+猜测全部作废；按钮实例**零次**被 app 隐藏，出生即可见。
+
+**当时的假设**：`SearchBarSettledY` 锁的是**第一帧**而非定格值。搜索栏跟随 tab 栏定位
+（`tabFrame.origin.y - height - 12`），启动期 tab 栏在迁移（498→763），搜索栏先停 y≈436、
+最终停 701 —— 锁定 436 ⇒ 钳位目标 `436-8 = 428` 恰好等于 App 原生中位槽，双方一致，
+按钮被稳钉在屏高 40%。
+
+**施工（A1–A6）**：A1 锚点改为**定格后才锁定** + 几何不变量（目标须落容器底部 30%，
+`ColdTicks<30` 允许自愈重锁）；A2 锚点未定格时 `AlignCornerWidgets` 直接 return；
+A3 新增 `didMoveToWindow` 精确 tag 钩子；A4 兜底阈值 12→16；A5 版本与文档；
+A6 修 diag 定时器在 ARC 下被释放（`dispatch_source_t` 必须文件级强引用）。
+
+**结果**：**真机仍裸露 22 帧 / 367 ms** ⇒ 假设被推翻，交给 §Z 定案。
+0.9.15 录屏实测中部裸露帧为 F0150–F0171、`y=384px`（= win 系 340），与日志逐位吻合，
+成为 §Z 结论的对照基线。
+
+**关键代码位置**：`src/GaodeClean.m` 锚点锁定段（`SearchBarSettledY` 赋值处）、
+`AlignCornerWidgets` 入口守卫、`AlignOneWidget` 几何不变量；`src/GCCDiag.h` 定时器持有。
+
+---
+
 ### §Z · 0.9.16 —— 七轮误靶的终点：中部裸露的真身是 App 原生控件
 
 **现象**：冷启动约 2.5s，屏幕右侧中部（win系 y≈340，即屏高 40%）出现 ⊙+↰ 白色胶囊，
@@ -1155,6 +1180,46 @@ WINLiteWidgetGroupView(339,340,44x88)   ← 原生「轻量控件组」容器（
 **关键代码位置**：`src/GaodeClean.m` 按钮钩子区（A1 两钩子 + `GCCIsLiteGroupCapsule()`）、
 `AlignCornerWidgets` 扫描段（`CachedLiteGroup`）、`AlignOneWidget` 放行段（A2）、
 tick 链安全网；`src/GCCDiag.h`（A3 探针）。
+
+**真机复验（2026-10-22，录屏 `video_DB2D22B5.mp4` 逐帧）**：中部裸露 **0 帧**
+（0.9.14 18–22 帧 / 0.9.15 22 帧 367ms → 0.9.16 **0 帧 0ms**）。
+模板匹配全画面扫描（归一化互相关，阈值 0.55）**唯一命中点 (384,684)**，
+首现 F0199 = 3.300s，与搜索栏**同帧**出现；右上「+/图层」胶囊 2.617s 起全程在屏未被误伤。
+
+---
+
+### §AA · 构建通道迁移：正式 deb 一律由 GitHub CI 构建（2026-10-22）
+
+**背景**：此前正式包全部由本机 iSH 自研 clang 链产出（`clang` + `/tmp/sdk165` +
+`-fuse-ld=lld` + `scripts/fixarch.py` + `scripts/mkdeb.py`）。该链路有三个硬伤：
+① 只存在于本机，任何人拿到仓库都无法一键重建；② 与 Darwin 工具链二进制不同源，无法在
+macOS runner 复现；③ 人工上传大文件到 Release 易断。
+
+**新约定（用户 2026-10-22 下达）**：**所有项目的正式 deb 一律由 GitHub Actions 构建**；
+本地自研链降级为「临时验证」，产出物不得作为发布资产。与既有的「RootHide 一律 GitHub CI」
+合并为「**全部架构一律 CI**」。
+
+**改造（A1–A5，源码零改动）**
+
+| 项 | 内容 |
+|:--|:--|
+| A1 | 原自定义 Makefile → `Makefile.local`（本地临时验证，含 `check`/`dev`/`diagdebs`）；新增 theos 版 `Makefile`（根）：`ARCHS = arm64 arm64e`、`TARGET = iphone:clang:16.5:15.0`、`INSTALL_TARGET_PROCESSES = AMap`、`FINALPACKAGE=1` 时注入 `-DGAODECLEAN_STRIP_LOGS=1` |
+| A2 | 新增 `.github/workflows/build-theos.yml`：`macos-14` + theos（roothide fork，pinned `cfba89a…`）+ sdks（pinned `0222fd5…`）+ `brew install ldid dpkg`，matrix `[rootless, roothide]`，`make package FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=<scheme>` |
+| A3 | 新增 `scripts/verify_deb.sh` 核验门禁：包名/版本/架构标签、载荷前缀（`/var/jb/...` vs `/Library/...`）、dylib 切片（`lipo -info`）、维护脚本路径、**GCLog 诊断串残留哨兵**（`strings \| grep -F '[GaodeClean] '`）、过滤器 `com.autonavi.amap` |
+| A4 | 打 `v*` tag 时自动发布 Release：deb×2 + dylib×2 + `git archive` 生成的干净 `Source.zip`（剔除 `dist/`、`.theos/`、`packages/`）+ `SHA256SUMS.txt`（release job 跑 `ubuntu-latest`，不耗 macOS 额度） |
+| A5 | 版本号不变（源码 = 真机已验收的 0.9.16 同源），README/HISTORY 同步说明 |
+
+**可行性已核实**：本工程源码仅 `UIKit/Foundation/objc runtime` + `NSClassFromString` 私有类，
+**不含 substrate/logos**（唯一 hook 手段 `method_setImplementation` + `__attribute__((constructor))`），
+无私有头依赖 ⇒ theos 化零风险。
+
+**额度约束（实测）**：GitHub Free 私有仓库每月 2,000 min，macOS 按 **×10** 计。
+2026-10 已用 Linux 496 min + macOS 431.8 min（≈4,318）⇒ **超 2,814**，
+私有仓库 macOS job 会被拒（steps=0，注解「recent account payments have failed or your spending limit needs to be increased」）。
+`11-01` 重置后约可跑 60–100 次双架构构建（本工程双 job 预估 ≈3 macOS min）。
+发布前若额度不足，需：临时转公开（窗口约 3 分钟）／等重置／提额。
+
+**关键文件**：根 `Makefile`、`Makefile.local`、`.github/workflows/build-theos.yml`、`scripts/verify_deb.sh`。
 
 ## 五、教训
 
@@ -1325,7 +1390,9 @@ cmp <(ar p dist/*.deb data.tar.gz | tar xzO ./var/jb/.../GaodeClean.dylib) dist/
 0.9.12  拦截 setFrame:/setCenter: 中部写入（app 只挪位置时的唯一通道）
 0.9.13  兜底显示前验位置（裸露源=兜底开闸而非 app 写入）—— 系列失败，已回退
 0.9.14  回退 W 系列，恢复 0.9.7 显示语义（真根因：HomeSettled 门控被拆）—— 真机仍裸露，见 §Y
-0.9.16  锚点「定格后才锁定」+ 几何不变量 + 未定格不摆位（真根因：SearchBarSettledY 锁了第一帧）  ← 当前（采用）
+0.9.15  锚点「定格后才锁定」+ 几何不变量 + 未定格不摆位（假设：SearchBarSettledY 锁了第一帧）—— 真机仍裸露 22 帧，见 §Z
+0.9.16  §Z：真凶是 App 原生 WINLiteWidgetGroupView —— 出生即藏 + 未定格按住 + 定格后同刻放行  ← 当前（采用）
+0.9.16+§AA  构建通道迁移：正式 deb 一律由 GitHub Actions（macos-14 + theos）构建，本地链降级为临时验证
 ```
 
 ---

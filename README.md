@@ -90,12 +90,15 @@
 src/GaodeClean.m          当前源码（0.9.16）
 src/GCCDiag.h             真机取证模块（仅 -DGAODECLEAN_DIAG_LOG=1 编译）
 src/GCCGeometry.h         几何辅助头
-Makefile                  一键构建（arm64 + arm64e + deb + 0 警告门禁）
-scripts/mkdeb.py          不依赖 dpkg-deb 的打包脚本（版本/路径全参数化）
-scripts/fixarch.py        arm64e cpusubtype 修正 + 签名页哈希重算
+Makefile                  ★ 正式构建入口（theos 工程，GitHub Actions 使用）
+Makefile.local            本地临时验证构建入口（iSH clang 链，不产出发布资产）
+.github/workflows/build-theos.yml  ★ CI：macos-14 + theos，双架构出包 + 门禁 + 打 tag 自动发 Release
+scripts/verify_deb.sh     deb 核验门禁（载荷前缀 / 架构切片 / 日志剥离 / 过滤器）
+scripts/mkdeb.py          不依赖 dpkg-deb 的打包脚本（本地链专用，版本/路径全参数化）
+scripts/fixarch.py        arm64e cpusubtype 修正 + 签名页哈希重算（本地链专用）
 scripts/make-roothide.sh  【已废弃】历史脚本，打包请直接用 mkdeb.py
 tools/                    逆向分析工具箱（高德升级应对流程，见 tools/README.md）
-dist/                     构建产物（当前版本）
+dist/                     本机临时验证产物（★ 正式发布包见 Release，由 CI 构建）
 HISTORY.md                功能清单 / 版本链 / 根因分析 / 构建配方
 ```
 
@@ -103,17 +106,38 @@ HISTORY.md                功能清单 / 版本链 / 根因分析 / 构建配方
 
 ## 构建
 
-### 一键（0.9.8 起）
+> **★ 2026-10-22 起：所有正式 deb 一律由 GitHub Actions 构建**（`.github/workflows/build-theos.yml`，
+> macos-14 + theos，matrix `rootless`/`roothide`）。本地链降级为**临时验证**，产出物不得作为发布资产。
 
-需要 theos 的 SDK：<https://github.com/theos/sdks> → `iPhoneOS16.5.sdk`
+### 正式发布（GitHub CI）
 
 ```bash
-make SDK=/path/to/iPhoneOS16.5.sdk        # arm64 + arm64e + 两个 deb
-make check SDK=/path/to/iPhoneOS16.5.sdk  # 只跑 0 警告门禁
-make clean
+# 推 main / 手动触发：只出包 + 核验，产物在 Actions artifact
+git push origin main
+gh workflow run "Build GaodeClean"
+
+# 发版：打 tag 后自动构建并把资产挂到 Release
+git tag v0.9.16 && git push origin v0.9.16
 ```
 
-等价的手工命令（`make` 内部就是这两条）：
+CI 内部等价于：
+
+```bash
+make package FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=rootless   # → iphoneos-arm64
+make package FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=roothide   # → iphoneos-arm64e
+scripts/verify_deb.sh <deb> <scheme>                        # 门禁，失败即红
+```
+
+### 本地临时验证（iSH clang 链，不用于发布）
+
+```bash
+make -f Makefile.local check             # 剥离/不剥离 双跑 0 警告门禁
+make -f Makefile.local deb               # 本地临时包
+make -f Makefile.local diagdebs          # 真机取证包
+make -f Makefile.local SDK=/path/to/iPhoneOS16.5.sdk
+```
+
+等价的手工命令（`Makefile.local` 内部就是这两条）：
 
 ```bash
 SDK=/path/to/iPhoneOS16.5.sdk
@@ -136,10 +160,10 @@ $CLANG -target arm64e-apple-ios15.0 -isysroot $SDK \
 python3 scripts/fixarch.py dist/GaodeClean-arm64e.dylib 2
 ```
 
-### 打包 deb
+### 打包 deb（本地链，仅临时验证）
 
 ```bash
-make deb
+make -f Makefile.local deb
 # 等价：python3 scripts/mkdeb.py --dist dist --control control \
 #         --plist GaodeClean.plist \
 #         --dylib-arm64 dist/GaodeClean-arm64.dylib \
