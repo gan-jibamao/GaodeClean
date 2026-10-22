@@ -62,6 +62,16 @@ jobs:
           find packages -name '*.deb' -exec cp {} out/ \;
           ls -l out/
 
+      - name: Inspect payload (${{ matrix.scheme }})
+        run: |
+          set -e
+          for d in out/*.deb; do
+            echo "== $d"
+            dpkg-deb -f "$d" Package Version Architecture Depends Installed-Size
+            echo "--- 载荷 ---"
+            dpkg-deb -c "$d"
+          done
+
       - name: Verify payload (${{ matrix.scheme }})
         env:
           FINALPACKAGE: "1"
