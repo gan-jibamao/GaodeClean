@@ -18,7 +18,7 @@
 static NSString *const kGCAuthor      = @"jibamao";
 static NSString *const kGCRepo        = @"https://gan-jibamao.github.io/";
 static NSString *const kGCSection     = @"jibamao-Tweaks";
-static NSString *const kGCVersion     = @"0.9.13";
+static NSString *const kGCVersion     = @"0.9.14";
 static NSString *const kGCSignature   = @"GaodeClean by jibamao";
 
 // 对外签名（供 log / 诊断 / 二次核对使用）
@@ -32,6 +32,20 @@ const char *GaodeCleanSignature(void) {
     });
     return buf;
 }
+
+// ============================================================================
+// 0.9.14（A9）：诊断日志编译期分档
+//
+//   正式包（Makefile 注入 -DGAODECLEAN_STRIP_LOGS=1）下 GCLog 展开为无副作用的
+//   空操作 —— 每次启动省下十余条运行时写日志的 I/O，定制行为的字符串也不再进入
+//   发布二进制。开关类/版本类的日志仍走 NSLog：装机后要能在 Console 里核对
+//   「装的是哪一版、哪些钩子装上/跳过了」，这是验收依赖，不可剥。
+// ============================================================================
+#ifdef GAODECLEAN_STRIP_LOGS
+#define GCLog(...) do { } while (0)
+#else
+#define GCLog(...) NSLog(__VA_ARGS__)
+#endif
 
 // 0.8.0：迁移边界缓存键随「当前已识别版本」变化，跨版本不再串味
 static NSString *GCBoundaryKey(void) {
@@ -56,7 +70,15 @@ static CGFloat SearchBarSettledY;
 static BOOL SearchBarSettled;
 static NSInteger BarStableTicks;
 static BOOL BarShownOnce;      // 0.9.2：搜索栏在正确位置显示过至少一次（冷启动防闪断标记）
-// 0.9.8（A8）：HomeSettled 已删除（只写不读，且语义错误）。
+// 0.9.14（A8 回退）：HomeSettled 恢复。它是 0.4.41 兜底的**唯一门控** ——
+// 「任一控件对齐成功」= 首页布局已稳定 = 兜底无需再跑。
+// 0.9.8 把这条门控拆掉后，兜底从「一次性」变成「每拍跑」，于是启动 2.4s 起
+// 每 200ms 把 ColdWidgets 里尚未对齐的控件 hidden=NO —— 右下定位钮就以
+// 原生中部位置（屏高 25%-70%）现身。真机逐帧铁证：0.9.7 = 0 帧裸露，
+// 0.9.8 = 19 帧；0.9.9~0.9.13 用五层显示路径拦截去打这个症状，反而造出
+// 「alpha 卡 0 / 丢弃 frame / 兜底抢 AlignedKey」等新自锁，数据在
+// 19→21→14→4→2→14 之间钟摆，从未归零。
+static BOOL HomeSettled;
 static NSHashTable<UIView *> *ColdWidgets;
 static NSInteger ColdTicks;
 static char AlignedKey;
@@ -475,7 +497,7 @@ static void CleanPage(UIView *page, BOOL full) {
         // A recycled/offscreen anchor does not mean that the recommendation boundary vanished.
         ApplyLimits(state);
         if (!state.reportedMiss) {
-            NSLog(@"[GaodeClean] page=%ld anchor=pending", (long)kind);
+            GCLog(@"[GaodeClean] page=%ld anchor=pending", (long)kind);
             state.reportedMiss = YES;
         }
         return;
@@ -499,7 +521,7 @@ static void CleanPage(UIView *page, BOOL full) {
     }
     BindBoundary(page, anchor, peer, boundary, state);
     if (!state.reportedMatch) {
-        NSLog(@"[GaodeClean] page=%ld anchor=matched limitedScrolls=%lu", (long)kind, (unsigned long)state.scrolls.count);
+        GCLog(@"[GaodeClean] page=%ld anchor=matched limitedScrolls=%lu", (long)kind, (unsigned long)state.scrolls.count);
         state.reportedMatch = YES;
     }
 }
@@ -637,36 +659,22 @@ static void Schedule(void) {
             StripTabBarGestures();
         }
         // 0.4.41 冷启动兜底：定位超时(约 2.4s)仍未完成则强制显示，避免卡在隐藏态
-        // 0.9.8（A8）：兜底与 HomeSettled 解耦。
-        //   原来只要**任一** widget 对齐成功就置 HomeSettled=YES，这条兜底便再也不跑 ——
-        //   其余仍在 ColdWidgets 里被隐藏的控件（典型：右下定位钮，其 getItemTag 判据
-        //   在 0.9.7 取消版本限制后完全可能不再匹配）就永久停在 hidden=YES，
-        //   用户看到的是「右下角按钮凭空消失，杀进程重开才可能回来」。
-        //   现在逐成员补显示，已对齐（打过 AlignedKey）的不重复写，天然幂等。
+        // 0.9.14（A8 回退）：恢复 0.9.7 的**一次性**语义（HomeSettled 门控）。
+        //   0.9.8 把门控拆掉后，这条兜底从「最后保险」变成了「每拍的显示通道」：
+        //   启动 2.4s 起每 200ms 把 ColdWidgets 里尚未对齐的控件 hidden=NO。
+        //   右下定位钮首当其冲 —— 它的 getItemTag 精确判据（IsRightBottomWidget）
+        //   在那一刻还没配对，AlignOneWidget 没碰过它，frame 仍停在 app 原生中部
+        //   位置，于是「一开闸就以错误位置现身」。逐帧铁证：0.9.7 = 0 帧裸露、
+        //   0.9.8 = 19 帧；之后 0.9.9~0.9.13 五层显示路径拦截全是在打这个症状。
+        //   恢复后：任一控件对齐成功（车机钮 ~1.3s）即封门，兜底只在「整套对齐
+        //   机制都失败」时跑一次。
         ColdTicks++;
-        if (ColdTicks > 12) {
+        if (!HomeSettled && ColdTicks > 12) {
+            HomeSettled = YES;
             for (UIView *w in ColdWidgets.allObjects) {
                 if (![w isKindOfClass:UIView.class]) continue;
-                if (objc_getAssociatedObject(w, &AlignedKey)) continue;
-                // 0.9.13（W1g）：兜底显示前先验位置。
-                // 五轮复验数据显示裸露总是发生在启动后 2.0-2.5s —— 这正是本兜底
-                // 开闸的时刻（12 拍 × 200ms ≈ 2.4s）。兜底只管显示、不管位置：
-                // 若此刻 getItemTag 还没写入、CachedRight 还是 nil，
-                // AlignOneWidget 从没碰过按钮，它的 frame 仍停在 app 的原生中部
-                // 位置（屏高 25%-70%）—— 兜底一开闸按钮就以错误位置现身
-                // （0.9.12 复验：2.45-2.47s，2 帧）。在错误位就继续藏着，
-                // 交给 AlignCornerWidgets 摆位；摆好时它自己会 hidden=NO。
-                // ColdTicks > 30 仍硬显示，避免搜索栏长期未就绪导致永久隐藏。
-                BOOL safe = YES;
-                if (w.superview && w.window) {
-                    CGPoint p = [w.superview convertPoint:w.center toView:w.window];
-                    CGFloat h = w.window.bounds.size.height;
-                    if (p.y > h * 0.25 && p.y < h * 0.70) safe = NO;
-                }
-                if (!safe && ColdTicks <= 30) continue;
                 objc_setAssociatedObject(w, &AlignedKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-                // 0.9.9（A2/A3 配套）：兜底同样要恢复 alpha，否则被压成 0 的控件
-                // 即使 hidden=NO 也不可见。
+                // 兜底同样要恢复 alpha，否则被压成 0 的控件即使 hidden=NO 也不可见。
                 if (w.alpha < 0.01) w.alpha = 1.0;
                 w.hidden = NO;
             }
@@ -861,7 +869,7 @@ static void SweepFogOverlay(void) {
             static NSInteger GCCTealsSweepLogs = 0;
             if (GCCTealsSweepLogs < 10) {
                 GCCTealsSweepLogs++;
-                NSLog(@"[GaodeClean] fog sweep hides %@ a=%.2f", NSStringFromClass(v.class), a);
+                GCLog(@"[GaodeClean] fog sweep hides %@ a=%.2f", NSStringFromClass(v.class), a);
             }
             v.hidden = YES;
         }
@@ -1164,7 +1172,7 @@ static BOOL GCWeatherHoldRow(UIView *v) {
         static NSInteger GCWeatherHoldLogs = 0;
         if (GCWeatherHoldLogs < 5) {
             GCWeatherHoldLogs++;
-            NSLog(@"[GaodeClean] weather row held (cold start, anchor not ready): %@",
+            GCLog(@"[GaodeClean] weather row held (cold start, anchor not ready): %@",
                   NSStringFromClass(v.class));
         }
     }
@@ -1192,7 +1200,7 @@ static void GCWeatherReleaseHeld(void) {
         // 搬运权收归单一链路：tick 选行 / WINGroupMapWidget 布局钩子（0.9.4 验收行为）。
     }
     GCWeatherDoneOnce = YES;   // 0.9.7：本轮冷启动扣留使命完成，此后不再重开窗
-    NSLog(@"[GaodeClean] weather row released (%lu)", (unsigned long)all.count);
+    GCLog(@"[GaodeClean] weather row released (%lu)", (unsigned long)all.count);
 }
 
 static void AlignWeatherRow(UIView *row) {
@@ -1572,23 +1580,6 @@ static BOOL IsRightBottomWidget(UIView *v) {
     return [t containsString:@"rightbottom"] || [t containsString:@"locate"] || [t containsString:@"location"];
 }
 
-// 0.9.9（W1b）：IsRightBottomWidget 依赖 getItemTag，而那是 AJX 的**数据字段**，
-// 可能晚于视图创建/上屏才写入。真机逐帧实测：1.42s 按钮已经可见，但 getItemTag
-// 还没值 → 判定返回 NO → setHidden:/setAlpha: 的拦截整段失效，按钮在屏幕中部
-// 裸奔 350ms（21 帧），1.80s 才被对齐。
-// 这里补几何兜底：类名匹配 + 位于窗口右半侧且不在顶部，即认定为右下组合按钮。
-static BOOL GCCLooksLikeRightBottomWidget(UIView *v) {
-    if (!v || ![NSStringFromClass(v.class) isEqualToString:@"WINAJXCombinedWidgetView"]) return NO;
-    if (IsRightBottomWidget(v)) return YES;          // tag 已写入时用精确判定
-    // 0.9.10（W1c）：tag 未写入时**直接按类名认定**。
-    // 0.9.10 首版曾用几何兜底（右半侧 + 不在顶部），但复验仍有 14 帧裸奔：
-    // app 常在 addSubview **之前**就设好 hidden/alpha，此时 v.window == nil，
-    // 几何算不出来、原条件直接 return NO → 拦截整段失效。
-    // WINAJXCombinedWidgetView 在本工程只承载右下「定位+路线」组合按钮，
-    // 类名匹配已经足够；真正的实例选择由 CachedRight 的精确 tag 判定负责。
-    return YES;
-}
-
 static void AlignOneWidget(UIView *bar, UIView *w, CGFloat barTop) {
     if (!w.window) return;
     UIWindow *win = bar.window;
@@ -1606,9 +1597,11 @@ static void AlignOneWidget(UIView *bar, UIView *w, CGFloat barTop) {
     // 这里必须一并恢复 —— 否则 hidden 放行了、按钮仍然全透明（A2/A3 的自伤点）。
     if (w.alpha < 0.01) w.alpha = 1.0;
     if (w.hidden) w.hidden = NO;
-    // 0.9.8（A8）：原来的 HomeSettled = YES 已删除 —— 它的语义（任一 widget 对齐
-    // 即「首页稳定」）与实际不符，而且解耦后无人读取。稳定性改由每个成员自身的
-    // AlignedKey + Schedule 里的逐成员兜底共同保证。
+    // 0.9.14（A8 回退）：恢复 0.9.7 的「对齐即封门」。
+    // 有任一控件对齐成功，就说明首页布局已稳定、兜底无存在必要 ——
+    // 这正是 0.9.7 零裸露的机制：车机钮 ~1.3s 对齐 → HomeSettled=YES →
+    // 2.4s 的一次性兜底根本不跑，右下钮只能由本函数在**正确位置**显示。
+    HomeSettled = YES;
 }
 
 
@@ -1707,32 +1700,15 @@ static void AlignCornerWidgets(UIView *bar) {
 static void HookWidgetSetFrame(NSString *className) {
     Class cls = NSClassFromString(className);
     if (!cls) return;
-    // 0.9.12（W1f）：右下按钮专用 —— 未对齐时拒绝「把中心放到屏幕中部」的写入。
-    BOOL isRightBtn = [className isEqualToString:@"WINAJXCombinedWidgetView"];
     SEL fs = @selector(setFrame:);
     Method fm = class_getInstanceMethod(cls, fs);
     IMP fo = fm ? method_getImplementation(fm) : NULL;
     if (fm) {
         Replace(cls, fs, imp_implementationWithBlock(^(UIView *self, CGRect rect) {
-            // 0.9.12（W1f）：真机复验 0.9.11 仍有 4 帧（67ms）中部裸露 —— 2.00s 时右侧
-            // 控件「一次性全部出现」，而 1.98s 之前一个都没有。说明 app 既没调
-            // setHidden: 也没调 setAlpha:，只是**把视图从屏幕外移到可见位置**，
-            // 四条显示通道（setHidden/setAlpha/didMoveToWindow/layoutSubviews）全都漏过。
-            // setFrame: 是唯一必经之路：未对齐时把「落在屏幕中部」的写入直接拒掉。
-            if (isRightBtn && !objc_getAssociatedObject(self, &AlignedKey)) {
-                UIView *sv = self.superview;
-                UIWindow *w = self.window;
-                if (sv && w) {
-                    CGPoint p = [sv convertPoint:rect.origin toView:w];
-                    CGFloat midY = p.y + rect.size.height * 0.5;
-                    CGFloat h = w.bounds.size.height;
-                    if (midY > h * 0.25 && midY < h * 0.70) {
-                        self.hidden = YES;
-                        [ColdWidgets addObject:self];
-                        return;                 // 丢弃这次写入，等 AlignOneWidget 摆位
-                    }
-                }
-            }
+            // 0.9.14（A5 回退）：W1f 的「中部写入拒绝」已移除。它丢弃写入并把视图
+            // 压回 hidden，而 AlignOneWidget 的精确 tag 判定未必找得到实例 ⇒ 按钮
+            // 卡死在 hidden，最后靠 W1g 兜底在错误位置硬显示（0.9.13 实测反弹回
+            // 14 帧）。0.9.7 语义：位置写入一律放行，只在已对齐后做底边钳位。
             // 0.5.1：底边对齐钳位——不管 44/88 高，底边都贴在搜索框上方 8pt
             if (SearchBarSettled && objc_getAssociatedObject(self, &AlignedKey)) {
                 UIView *sv = self.superview;
@@ -1752,22 +1728,7 @@ static void HookWidgetSetFrame(NSString *className) {
     if (cm) {
         IMP co = method_getImplementation(cm);
         Replace(cls, cs, imp_implementationWithBlock(^(UIView *self, CGPoint center) {
-            // 0.9.12（W1f）：与 setFrame: 同策略 —— app 也可能走 center 把按钮摆到中部
-            if (isRightBtn && !objc_getAssociatedObject(self, &AlignedKey)) {
-                UIView *sv = self.superview;
-                UIWindow *w = self.window;
-                if (sv && w) {
-                    CGPoint p = [sv convertPoint:CGPointMake(0, center.y - self.bounds.size.height * 0.5)
-                                          toView:w];
-                    CGFloat midY = p.y + self.bounds.size.height * 0.5;
-                    CGFloat h = w.bounds.size.height;
-                    if (midY > h * 0.25 && midY < h * 0.70) {
-                        self.hidden = YES;
-                        [ColdWidgets addObject:self];
-                        return;
-                    }
-                }
-            }
+            // 0.9.14（A5 回退）：与 setFrame: 同策略，W1f 的 center 中部拒绝一并移除。
             if (SearchBarSettled && objc_getAssociatedObject(self, &AlignedKey)) {
                 UIView *sv = self.superview;
                 if (sv && self.window) {
@@ -2000,7 +1961,7 @@ static void InstallTabBarGuideLottieBlock(void) {
                                             __unused NSInteger viewState) {
         if (GCGuideLottieBlocked < 20) {
             GCGuideLottieBlocked++;
-            NSLog(@"[GaodeClean] blocked tab guide lottie (viewState=%ld)", (long)viewState);
+            GCLog(@"[GaodeClean] blocked tab guide lottie (viewState=%ld)", (long)viewState);
         }
         // 不调用原实现：整个「上拉发现」渲染链在此掐断
     });
@@ -2168,7 +2129,7 @@ static void GCCHideSplashAd(UIView *v, NSString *why) {
     if (!v) return;
     UIWindow *w = v.window;
     v.hidden = YES;
-    NSLog(@"[GaodeClean] splash ad hidden [%@] view=%@ win=%@",
+    GCLog(@"[GaodeClean] splash ad hidden [%@] view=%@ win=%@",
           why, NSStringFromClass(v.class), NSStringFromClass(w.class));
 
     // 0.7.5(B1)：同上的二次确认 —— 只有确认不是 App UI 宿主才连窗口一起收
@@ -2196,7 +2157,7 @@ static void GCCHideAdWindows(void) {
         GCCSplashWindow = w;
         GCCSplashUntil = TickCount + 300;                    // 0.7.5(B2)：60s 后自动失效
         w.hidden = YES;
-            NSLog(@"[GaodeClean] splash ad window hidden: %@", wcn);
+            GCLog(@"[GaodeClean] splash ad window hidden: %@", wcn);
     }
 }
 
@@ -2405,7 +2366,7 @@ static void GCReportSplashClasses(void) {
         if ([cn hasPrefix:@"WINSplash"] || [cn hasPrefix:@"WINRealtimeSplash"]) [hit addObject:cn];
     }
     free(all);
-    NSLog(@"[GaodeClean] WINSplash classes at runtime: %lu [%@]",
+    GCLog(@"[GaodeClean] WINSplash classes at runtime: %lu [%@]",
           (unsigned long)hit.count, [hit componentsJoinedByString:@","]);
 }
 
@@ -2764,7 +2725,7 @@ static void InstallMinimalHome(void) {
             static NSInteger GCBarReattach = 0;
             if (GCBarReattach < 5) {
                 GCBarReattach++;
-                NSLog(@"[GaodeClean] re-attached search bar (cold start, shown-once)");
+                GCLog(@"[GaodeClean] re-attached search bar (cold start, shown-once)");
             }
         }
         KickBarFix();                               // 0.5.57：被动到就立刻进快修，不等 100ms tick
@@ -2802,7 +2763,7 @@ static void InstallMinimalHome(void) {
                                 static NSInteger GCBarHideRefused = 0;
                                 if (GCBarHideRefused < 5) {
                                     GCBarHideRefused++;
-                                    NSLog(@"[GaodeClean] refused search bar hide (cold start, shown-once)");
+                                    GCLog(@"[GaodeClean] refused search bar hide (cold start, shown-once)");
                                 }
                             }
                             h = NO;
@@ -2825,60 +2786,21 @@ static void InstallMinimalHome(void) {
     }
     HookVoid(@"WINAJXCombinedWidgetView", @"layoutSubviews", ^(UIView *view) {
         if (IsHiddenMapPromo(view)) [view setHidden:YES];
-        else if (view.window && !objc_getAssociatedObject(view, &AlignedKey) && GCCLooksLikeRightBottomWidget(view)) {
+        // 0.9.14（A4 回退）：恢复 0.9.7 的精确 tag 判定。纯类名（W1c）过宽，
+        // 非 WINAJXCombinedWidgetView 实例也被拦了。
+        else if (view.window && !objc_getAssociatedObject(view, &AlignedKey) && IsRightBottomWidget(view)) {
             view.hidden = YES; [ColdWidgets addObject:view];
-        }
-    });
-    // 0.9.10（W1d）：**最可靠的一条**。视图上窗的那一帧就触发，早于首次渲染；
-    // 无论 app 是走 setHidden:/setAlpha: 还是直接 addSubview（默认可见），
-    // 这里都能在它被画出来之前压住。四条通道合起来才算「显示路径全覆盖」：
-    //   setHidden: / setAlpha: / didMoveToWindow / layoutSubviews
-    HookVoid(@"WINAJXCombinedWidgetView", @"didMoveToWindow", ^(UIView *view) {
-        if (view.window && !objc_getAssociatedObject(view, &AlignedKey)
-            && GCCLooksLikeRightBottomWidget(view)) {
-            view.hidden = YES;
-            [ColdWidgets addObject:view];
         }
     });
     // 0.4.41：车机圆钮冷启动先隐藏，对齐后再显示，消除跳动
     HookVoid(@"WINDeviceInterconnectWidget", @"layoutSubviews", ^(UIView *w) {
         if (w.window && !objc_getAssociatedObject(w, &AlignedKey)) { w.hidden = YES; [ColdWidgets addObject:w]; }
     });
-    // 0.9.9（A3）：车机钮同理 —— 0.4.41 只在 -layoutSubviews 里按住，
-    // app 走 setHidden:NO / setAlpha: 时会以原生位置裸奔。两条显示路径都补上拦截。
-    {
-        Class dc = NSClassFromString(@"WINDeviceInterconnectWidget");
-        if (dc) {
-            SEL sh = @selector(setHidden:);
-            Method sm = class_getInstanceMethod(dc, sh);
-            if (sm) {
-                IMP so = method_getImplementation(sm);
-                const char *st = method_getTypeEncoding(sm);
-                Replace(dc, sh, imp_implementationWithBlock(^(UIView *self, BOOL hidden) {
-                    if (!hidden && self.window
-                        && !objc_getAssociatedObject(self, &AlignedKey)) {
-                        hidden = YES;
-                        [ColdWidgets addObject:self];
-                    }
-                    ((void (*)(id, SEL, BOOL))so)(self, sh, hidden);
-                }), st);
-            }
-            SEL al = @selector(setAlpha:);
-            Method am = class_getInstanceMethod(dc, al);
-            if (am) {
-                IMP ao = method_getImplementation(am);
-                const char *at = method_getTypeEncoding(am);
-                Replace(dc, al, imp_implementationWithBlock(^(UIView *self, CGFloat a) {
-                    if (a > 0.01 && self.window
-                        && !objc_getAssociatedObject(self, &AlignedKey)) {
-                        a = 0;
-                        [ColdWidgets addObject:self];
-                    }
-                    ((void (*)(id, SEL, CGFloat))ao)(self, al, a);
-                }), at);
-            }
-        }
-    }
+    // 0.9.14（A6 回退）：0.9.9（A3）给车机圆钮补的 setHidden:/setAlpha: 两条拦截已移除。
+    //   与右下钮同源的「未对齐拒绝显示」逻辑 —— 车机钮虽然靠类名能被 CachedCar 稳定找到
+    //   （不像右下钮依赖 getItemTag），但压 alpha 的自伤点（A2/A3 时报过「hidden 放行了、
+    //   控件仍全透明」）与拦截带来的显示时序扰动没有存在必要。0.9.7 只挂 layoutSubviews
+    //   一条，实测无跳动、无裸奔，恢复原样。
     // 0.4.47：拦截两圆钮 setFrame:，对齐后 y 钉死，杜绝 app 挪回原生位置闪跳
     HookWidgetSetFrame(@"WINDeviceInterconnectWidget");
     HookWidgetSetFrame(@"WINAJXCombinedWidgetView");
@@ -2901,41 +2823,12 @@ static void InstallMinimalHome(void) {
     if (method) {
         IMP original = method_getImplementation(method);
         Replace(cls, sel, imp_implementationWithBlock(^(UIView *self, BOOL hidden) {
-            // 0.9.9（A1）：未对齐的右下按钮**拒绝显示**。
-            // 0.4.41 的「未对齐先按住」只挂在 -layoutSubviews 上；app 走
-            // setHidden:NO 这条路径时直接绕过，按钮就以原生位置
-            // （屏幕右侧中部 y≈768-958）露出来。真机逐帧实测：
-            //   1.47s 出现 → 1.47-1.77s 裸奔 19 帧(310ms) → 1.80s 才被
-            //   AlignOneWidget 瞬移到底部（y 1370-1556，位移 301pt）。
-            // 这里把「显示」这条路也堵上：没打过 AlignedKey 一律压回 hidden。
-            // 0.9.10（W1c）：**不能**要求 self.window —— app 常在 addSubview 前
-            // 就设好 hidden，那时 window 还是 nil，条件会被整段跳过。
-            if (!hidden && GCCLooksLikeRightBottomWidget(self)
-                && !objc_getAssociatedObject(self, &AlignedKey)) {
-                hidden = YES;
-                [ColdWidgets addObject:self];
-            }
+            // 0.9.14（A1 回退）：W1 系列的「未对齐拒绝显示」已全量移除。
+            // 六轮复验 + 0.9.7 对照实证：拦截与 app 布局打仗是裸露根源，
+            // 0.9.7「不干预 + AlignOneWidget 找到才搬」才是正确语义。
+            // setHidden: 直通，只保留 IsHiddenMapPromo 强制隐藏。
             ((void (*)(id, SEL, BOOL))original)(self, sel, hidden || IsHiddenMapPromo(self));
         }), method_getTypeEncoding(method));
-    }
-    // 0.9.9（A2）：app 也可能用透明度淡入绕过 setHidden:（与天气行 0.9.5 的教训同源）。
-    // 未对齐时把 alpha 压到 0 并登记，对齐后由 AlignOneWidget 的 hidden=NO 带出来。
-    {
-        SEL al = @selector(setAlpha:);
-        Method am = class_getInstanceMethod(cls, al);
-        if (am) {
-            IMP ao = method_getImplementation(am);
-            const char *at = method_getTypeEncoding(am);
-            Replace(cls, al, imp_implementationWithBlock(^(UIView *self, CGFloat a) {
-                // 同理：alpha 写入常发生在上窗之前，不能拿 window 当前置条件。
-                if (a > 0.01 && GCCLooksLikeRightBottomWidget(self)
-                    && !objc_getAssociatedObject(self, &AlignedKey)) {
-                    a = 0;
-                    [ColdWidgets addObject:self];
-                }
-                ((void (*)(id, SEL, CGFloat))ao)(self, al, a);
-            }), at);
-        }
     }
     // 0.5.3：彻底去掉「重复点击首页」的所有触发链。
     // app 有两个注册入口（GDMapHomeTabBarControl / WINAmapHomeVAppService），
@@ -3031,7 +2924,7 @@ __attribute__((constructor)) static void Initialize(void) {
                 IMP original = method_getImplementation(m);
                 IMP imp = imp_implementationWithBlock(^(id self, Class provider) {
                     if (![@[@"GDMainTabBarConfigProvider", @"GDMineTabBarConfigProvider"] containsObject:NSStringFromClass(provider) ?: @""]) {
-                        NSLog(@"[GaodeClean] removed tab provider %@", NSStringFromClass(provider));
+                        GCLog(@"[GaodeClean] removed tab provider %@", NSStringFromClass(provider));
                         return;
                     }
                     ((void (*)(id, SEL, Class))original)(self, sel, provider);

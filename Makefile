@@ -5,11 +5,12 @@
 #  编译参数只存在于历史对话里，任何人拿到仓库都无法一键重建。
 #
 #  用法：
-#    make            # arm64 + arm64e + 两个 deb
+#    make            # arm64 + arm64e + 两个 deb（正式包，日志已剥离）
 #    make arm64      # 只出 rootless 切片
 #    make arm64e     # 只出 RootHide 切片
 #    make deb        # 只打包（需先有 dist/*.dylib）
-#    make check      # 只做语法/警告门禁（0 警告才算过）
+#    make check      # 语法/警告门禁：剥离开 + 剥离关 两遍都必须 0 警告
+#    make dev        # 带诊断日志的调试包（不剥离，自己真机排查用）
 #    make clean
 #
 #  SDK 默认 /tmp/sdk165/iPhoneOS16.5.sdk，可用 SDK=... 覆盖。
@@ -22,8 +23,16 @@ OUT        ?= dist
 SRC        := src/GaodeClean.m
 HDR        := src/GCCGeometry.h
 
+# 0.9.14（A9）：正式包剥离诊断日志（GCLog → 空操作）。
+RELEASE    ?= 1
+ifeq ($(RELEASE),1)
+STRIPFLAGS := -DGAODECLEAN_STRIP_LOGS=1
+else
+STRIPFLAGS :=
+endif
+
 COMMON := -isysroot $(SDK) -fobjc-arc -fmodules -O2 \
-          -Wall -Wextra -Wno-unused-parameter -I src
+          -Wall -Wextra -Wno-unused-parameter -I src $(STRIPFLAGS)
 LINK   := -dynamiclib \
           -install_name /Library/MobileSubstrate/DynamicLibraries/GaodeClean.dylib \
           -framework UIKit -framework Foundation -fuse-ld=lld -Wl,-adhoc_codesign
@@ -56,12 +65,22 @@ deb: $(DYLIB64) $(DYLIB64E)
 	python3 scripts/mkdeb.py --dist $(OUT) --control control --plist GaodeClean.plist \
 	  --dylib-arm64 $(DYLIB64) --dylib-arm64e $(DYLIB64E)
 
-# 门禁：必须 0 警告（与 0.9.7 基线一致）
+# 门禁：两遍都必须 0 警告 —— ① 正式包（日志剥离）② 调试包（日志保留）：
+#   剥离后若某变量只在被剥掉的 GCLog 里用过，会产生 unused-variable 警告，
+#   必须在这里就暴露，而不是等真机出问题。
 check:
-	@out=$$($(CLANG) -target arm64-apple-ios$(TARGET_IOS) $(COMMON) -fsyntax-only $(SRC) 2>&1); \
-	if echo "$$out" | grep -q 'warning:'; then \
-	  echo "$$out"; echo "FAIL: 存在警告"; exit 1; \
-	fi; echo "OK: 0 warnings"
+	@for mode in 1 0; do \
+	  flag=$$([ $$mode = 1 ] && echo -DGAODECLEAN_STRIP_LOGS=1); \
+	  out=$$($(CLANG) -target arm64-apple-ios$(TARGET_IOS) $(COMMON) $$flag -fsyntax-only $(SRC) 2>&1); \
+	  if echo "$$out" | grep -q 'warning:'; then \
+	    echo "STRIP=$$mode"; echo "$$out"; echo "FAIL: 存在警告"; exit 1; \
+	  fi; \
+	  echo "OK: 0 warnings (STRIP=$$mode)"; \
+	done
+	@echo "check: 全部通过"
+
+# 0.9.14：带诊断日志的调试包（不发版，真机排查用；Makefile 里不带 -D 剥离宏）
+dev: ; $(MAKE) RELEASE=0 deb
 
 clean:
 	rm -f $(DYLIB64) $(DYLIB64E) $(OUT)/*.deb

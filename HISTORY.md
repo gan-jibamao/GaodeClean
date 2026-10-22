@@ -5,7 +5,7 @@
 
 | | |
 |:--|:--|
-| **当前版本** | `0.9.13` |
+| **当前版本** | `0.9.14` |
 | **Author** | **jibamao** — <https://gan-jibamao.github.io/> · Section `jibamao-Tweaks` |
 | **目标** | 高德地图 / AMap `com.autonavi.amap`（**版本限制已取消，全版本自适应**） |
 | **架构** | `arm64`（rootless / TrollFools 注入）· `arm64e`（RootHide） |
@@ -843,7 +843,7 @@ arm64e cpusubtype `0x2`（fixarch 重算 50 页签名哈希）；载荷路径与
 
 **教训**：见 §五 第 11、12 条（群体标志不可作兜底门控；守卫不得静默拒绝签名）。
 
-### W. 冷启动「右下按钮在屏幕中部裸奔」修复（0.9.9 → 0.9.13，当前采用）
+### W. 冷启动「右下按钮在屏幕中部裸奔」修复（0.9.9 → 0.9.13，**已回退**）
 
 **现象**（60fps 逐帧，真机视频）：冷启动 **1.47s**，右下角「定位 + 路线」按钮首次出现，
 位置在**屏幕右侧中部**（原图 y 768–958，约屏高 40–50%）；停留 **19 帧（310ms）** 后，
@@ -884,6 +884,79 @@ app 走 `setHidden:NO` 这条路时直接绕过 → 按钮以原生位置露出�
    只恢复 `hidden` 而 alpha 仍是 0，控件会变成「逻辑可见、视觉全透明」——
    比不修更难查（W2/W3 的自伤点，已在 W4 补上）。
 
+**⚠️ 六轮结论：本系列（W1/W1b/W1c/W1d/W1f/W1g/W2/W3/W4）全线失败，已在 0.9.14 整体回退。**
+逐帧复验数据从未收敛，且在 0.9.13 反弹：
+
+| 版本 | 中部裸露 | 说明 |
+|:--|:--|:--|
+| **0.9.7** | **0 帧** | 用户实测 —— 无任何显示路径拦截，零裸露 |
+| 0.9.8 | 19 帧 | `HomeSettled` 门控被拆（A8），兜底从「一次性」变「每拍跑」|
+| 0.9.9 | 21 帧 | W1 拦截（越修越差）|
+| 0.9.10 | 14 帧 | W1b/W1c |
+| 0.9.11 | 4 帧 | W1c/W1d |
+| 0.9.12 | 2 帧 | W1f |
+| 0.9.13 | **14 帧（反弹）** | W1g |
+
+19 → 21 → 14 → 4 → 2 → **14** 这种钟摆曲线本身就说明：**拦截不是在修 bug，而是在造 bug**。
+每加一层显示路径拦截，就多一处自锁（alpha 卡 0 / 丢弃 frame 写入 / 兜底抢 `AlignedKey`），
+而 app 布局时序在每次启动的抖动又让「哪一层先赢」随机化 —— 数值只能乱跳，永远到不了 0。
+真根因见 §X。
+
+### X. 0.9.14 —— 回退 W 系列，恢复 0.9.7 显示语义（当前采用）
+
+**定位方法**：不再猜测，直接 `git show ed01450:src/GaodeClean.m`（0.9.7）与当前源码
+做**函数级归一化逐字比对**（去注释、压缩空白），差异清单就是唯一嫌疑：
+
+```
+✅ 逐字相同  IsRightBottomWidget
+✅ 逐字相同  HookWidgetSetFrame
+✅ 逐字相同  WINAJXCombinedWidgetView setHidden 钩子
+✅ 逐字相同  WINAJXCombinedWidgetView layoutSubviews 钩子
+✅ 逐字相同  WINDeviceInterconnectWidget layoutSubviews 钩子
+⚠️ 差异      AlignOneWidget      → 仅多一行 alpha 恢复；HomeSettled = YES 已恢复
+⚠️ 差异      兜底 ColdTicks 块    → 仅 guard 写法等价改写 + alpha 恢复；门控已恢复
+```
+
+**根因（唯一实测差异）**：`AlignOneWidget` 末尾的 `HomeSettled = YES;`
+
+| 版本 | `AlignOneWidget` 末句 | 兜底门控 | 结果 |
+|:--|:--|:--|:--|
+| **0.9.7** | `HomeSettled = YES` ✅ | `if (!HomeSettled && ColdTicks > 12)` | 车机钮 ~1.3s 对齐即**封门** → 兜底永不跑 → 右下钮只由 `AlignOneWidget` 在**正确位置**显示 = **0 帧裸露** |
+| 0.9.8+ | 已删除 ❌ | `if (ColdTicks > 12)` **每拍跑** | 启动 2.4s 起每 200ms 把未对齐控件 `hidden = NO`；此刻 `CachedRight`（精确 `getItemTag` 判据）尚未配对，按钮 frame 仍是 app 原生中部位 → **一开闸就以错误位置现身** = 19 帧 |
+
+0.9.8 拆门控的动机是「防某控件永远对齐不上而永久隐藏」，但它把一条**最后保险**
+改成了**每拍的显示通道** —— 于是「保险」变成了「裸露源」。
+
+**施工（A1-A10，全部回退到 0.9.7 语义）**：
+
+| 项 | 改动 | 位置 |
+|:--|:--|:--|
+| A1 | `WINAJXCombinedWidgetView -setHidden:` 移除「未对齐拒绝显示」，恢复直通（仅留 `IsHiddenMapPromo`）| 按钮钩子区 |
+| A2 | 删除同类的 `-setAlpha:` 拦截整块 | 按钮钩子区 |
+| A3 | 删除 `-didMoveToWindow` 拦截整块 | 按钮钩子区 |
+| A4 | `-layoutSubviews` 判定由纯类名回到**精确 tag** `IsRightBottomWidget(v)` | 按钮钩子区 |
+| A5 | `HookWidgetSetFrame` 删除 `setFrame:` / `setCenter:` 的「中部写入拒绝」（W1f）| 对齐辅助函数 |
+| A6 | `WINDeviceInterconnectWidget` 的 `setHidden:` / `setAlpha:` 两条拦截移除，只留 0.4.41 `layoutSubviews` | 按钮钩子区 |
+| A7 | 删除 `GCCLooksLikeRightBottomWidget`（纯类名兜底，已无引用）| 按钮钩子区 |
+| A8 | 兜底恢复 **`HomeSettled` 一次性门控** + `AlignOneWidget` 恢复置门 | tick 链 / 对齐函数 |
+| A9 | 12 处「每事件级」诊断日志改 `GCLog`，正式包（`-DGAODECLEAN_STRIP_LOGS=1`）展开为空操作；装机核对必需的 8 处（signature/version/loaded/hook SKIPPED/blacklist SKIPPED/splash guard hooked）保留 `NSLog` | 全文 |
+| A10 | `control` 版本 0.9.14；`Installed-Size` 由 `mkdeb.py` 按真实载荷重算（181 / 183 KB）；`Makefile` 支持 `RELEASE=0` 出调试包、`make check` 双跑门禁（剥离开/关都须 0 警告）| control / Makefile |
+
+**影响范围与验证方法**：
+- **影响**：仅冷启动 2.4s 内的右边控件显示时序；天气行扣留、上拉白雾、底栏引导、
+  搜索栏归位、开屏广告、比例尺等全部链条**未触碰**（比对确认逐字相同）。
+- **防回归门禁**：`python3 /tmp/gcc_regress.py` 式函数级比对 —— 按钮链 5 个函数与 0.9.7
+  逐字相同；另 2 个差异仅为防御性 alpha 恢复与等价 guard 改写。
+- **真机验收标准**：冷启动录屏逐帧扫描 `y 768–958`（原图 x 820），
+  **中部裸露帧数必须 = 0**（0.9.7 基线），且按钮最终位置与 0.9.13 一致（贴搜索栏上方 8pt）。
+
+**教训（新增）**：
+3. **最后保险不能变成常规通道**。「一次性 + 封门」的兜底一旦改成「每拍跑」，
+   它就从「防永久隐藏」变成「主动显示错误位置」—— 兜底的触发条件必须稀缺。
+4. **修 bug 前先与已知良好版本的代码做逐字/diff 比对**。六轮里每轮都在「解释现象」，
+   却没人把 0.9.7 的函数拉出来对一遍；真根因只是一行 `HomeSettled = YES;`。
+   现象驱动的层层加码，会把一个 1 行回归滚成 8 条拦截 + 6 个版本。
+
 ## 三、跨版本验证汇总
 
 | 版本 | 项目 | 结果 |
@@ -902,7 +975,9 @@ app 走 `setHidden:NO` 这条路时直接绕过 → 按钮以原生位置露出�
 | 0.9.10 | 右下按钮冷启动位置 | 仍未归零：14 帧（window 前置条件与几何判定双重失效）|
 | 0.9.11 | 右下按钮冷启动位置 | 未归零：4 帧（67ms）—— app 只改 frame，不改 hidden/alpha |
 | 0.9.12 | 右下按钮冷启动位置 | 未归零：2 帧（33ms）—— 裸露源是兜底开闸，非 app 写入 |
-| 0.9.13 | 右下按钮冷启动位置 | 兜底验位后待逐帧复验 |
+| 0.9.13 | 右下按钮冷启动位置 | **仍未归零：14 帧（233ms，较 0.9.12 反弹）** → 系列整体回退 |
+| 0.9.14 | 构建门禁（静态） | 双架构 0 警告（剥离开/关**双跑**）· 0.9.13 版本串残留 0 · cpusubtype `0x2` · 载荷路径与 `Depends` 解包核验 · 按钮链与 0.9.7 **函数级逐字比对通过** **通过** |
+| 0.9.14 | 右下按钮冷启动位置 | 待真机逐帧复验（验收标准：中部裸露 = 0 帧） |
 
 > 本表只收录**有明确记录**的条目；0.8.0–0.9.7 各版的逐版真机结论未逐条回填。
 
@@ -1009,15 +1084,19 @@ deb 打包用 `scripts/mkdeb.py`（Python 写 `ar` 归档，不需要 `dpkg-deb`
 
 装完 `sbreload` 或重启用户空间。
 
-### 本包产物（0.9.13）
+### 本包产物（0.9.14）
 
 | 文件 | 说明 |
 |:--|:--|
-| `dist/GaodeClean-arm64.dylib` | 201,632 B · arm64 · chained fixups + adhoc 签名（**TrollFools 注入用**） |
-| `dist/GaodeClean-arm64e.dylib` | 203,136 B · arm64e · dyld_info 绑定 + adhoc 签名（cpusubtype 已修正为 `0x2`） |
-| `dist/com.jibamao.gaodeclean_0.9.13_iphoneos-arm64.deb` | 63,308 B · rootless（载荷 `/var/jb/Library/MobileSubstrate/…`） |
-| `dist/com.jibamao.gaodeclean_0.9.13_iphoneos-arm64e-roothide.deb` | 62,744 B · RootHide（载荷 `/Library/…`，`Depends` 含 `oldabi`） |
-| `dist/GaodeClean-0.9.13-Source.zip` | · 完整源码（src + control + scripts + tools + Makefile） |
+| `dist/GaodeClean-0.9.14.dylib`（arm64）| 184,896 B · rootless / Dopamine |
+| `dist/GaodeClean-0.9.14-arm64e.dylib` | 186,352 B · RootHide（`cpusubtype 0x2` 已由 `fixarch.py` 修正）|
+| `dist/com.jibamao.gaodeclean_0.9.14_iphoneos-arm64.deb` | 61,376 B · rootless（载荷 `/var/jb/Library/MobileSubstrate/…`，`Installed-Size 181`）|
+| `dist/com.jibamao.gaodeclean_0.9.14_iphoneos-arm64e-roothide.deb` | 60,892 B · RootHide（载荷 `/Library/…`，`Depends` 含 `oldabi`，`Installed-Size 183`）|
+| `dist/GaodeClean-0.9.14-Source.zip` | 完整源码（src + control + scripts + tools + Makefile）|
+
+**0.9.14 日志分档**：正式包由 Makefile 注入 `-DGAODECLEAN_STRIP_LOGS=1`，
+12 处每事件级 `GCLog` 在编译期展开为空操作（`strings` 已验证全部消失）；
+装机核对所需的 8 处 `NSLog` 保留。需真机排查时用 `make dev` 出带日志的调试包。
 
 > 产物体积随代码增长而变；以 `make` 的实际输出与 `dist/SHA256SUMS.txt` 为准。
 
@@ -1085,7 +1164,8 @@ cmp <(ar p dist/*.deb data.tar.gz | tar xzO ./var/jb/.../GaodeClean.dylib) dist/
 0.9.10  右下按钮拦截补几何兜底（getItemTag 晚写入导致 W1 失效）
 0.9.11  显示路径补齐：纯类名判定 + didMoveToWindow（四条通道全覆盖）
 0.9.12  拦截 setFrame:/setCenter: 中部写入（app 只挪位置时的唯一通道）
-0.9.13  兜底显示前验位置（裸露源=兜底开闸而非 app 写入）  ← 当前（采用）
+0.9.13  兜底显示前验位置（裸露源=兜底开闸而非 app 写入）—— 系列失败，已回退
+0.9.14  回退 W 系列，恢复 0.9.7 显示语义（真根因：HomeSettled 门控被拆）  ← 当前（采用）
 ```
 
 ---
@@ -1105,5 +1185,5 @@ strings GaodeClean.dylib | grep -i jibamao
 启动输出：
 
 ```
-[GaodeClean] GaodeClean v0.9.13 | jibamao | https://gan-jibamao.github.io/
+[GaodeClean] GaodeClean v0.9.14 | jibamao | https://gan-jibamao.github.io/
 ```
