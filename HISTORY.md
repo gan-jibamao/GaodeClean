@@ -1487,6 +1487,31 @@ Amap 私有类名（`WINPermanentCompassView`/`WINLiteWidgetGroupView`/…）与
 **实测（本地链，双架构）**：双跑编译 **0 警告**；混淆回环 **295/295 PASS**；
 两包门禁各 **14 项全 OK**（含 7a/7b/7c）；arm64 dylib 190,416 B / arm64e 191,072 B。
 
+### §AH · 0.9.21 —— 面向用户的详情文案「只讲功能」（并补做爱源地址）
+
+**起因**：老大指出做爱源详情页与包描述里塞的是**构建内幕**（`-Wl,-x`、295 条字符串加密、
+混淆自证、清探针清日志）——用户看不懂、也不关心，而真正的卖点（去白雾、2D·3D 归位、
+冷启动不闪）被埋到第二屏。要求「只介绍功能，优化文案」，并追加「把做爱源地址加到详情内容」。
+
+**A1 详情页重写**（`depictions/com.jibamao.gaodeclean.json`，由 `workspace/gaodesrc/build_dep.py` 生成）
+
+| 原状 | 改后 |
+|:--|:--|
+| 「0.9.20 更新」整段讲编译链接参数、加密条数、自证结果 | 小节化：**插件描述 → 主要功能（界面精简 / 位置归位 / 稳定不闪）→ 适配与兼容 → 安装说明 → 信息表** |
+| 更新日志写「清探针清日志 / 字符串混淆」 | 改用户语言：「2D·3D 按钮回到定位·路线胶囊正上方」等可感知结果 |
+| 无源地址 | 安装说明首句给「在 Sileo 添加源 `https://gan-jibamao.github.io`」+ 信息表新增「源地址」行 |
+
+**A2 包描述同步**：`control` 的 `Description` 删掉「已加固：链接期剥离全部本地符号…」段落，
+换成功能分项 + 加源指引；`Version` 0.9.20 → **0.9.21**，`kGCVersion` 同步（两处必须同改，
+否则门禁版本串一致性直接报错）。体积 1073 → 1379 B。
+
+**A3 踩坑（脚本自检）**：生成脚本内置「内幕字样扫描」（混淆/加固/符号/剥离/加密/探针/自证/`-Wl`/FNV 必须命中 0），
+首版把 tab 名「更新**日志**」里的「日志」误判成内幕 ⇒ 扫描范围由整个 JSON 收窄为 `tabs[*].views`（只扫正文，UI 标签不算）。
+
+**实测**：`make -f Makefile.local check` 全绿（0 警告 + 混淆回环 295/295 PASS）；
+本地双包门禁 **15/16 项 [OK]、exit 0**；体内版本串 `0.9.21` ×1、`0.9.20` 残留 **0**；
+敏感明文 0、本地符号 0（加固不回退）。
+
 ## 五、教训
 
 1. **视图「不见了」按三个通道依次排除** — `hidden` → `alpha` → `removeFromSuperview`；
@@ -1663,13 +1688,14 @@ cmp <(ar p dist/*.deb data.tar.gz | tar xzO ./var/jb/.../GaodeClean.dylib) dist/
 0.9.18  §AC：车机钮 / 天气行 / 2D·3D 三项对表原生（间隙按类分离 + 天气行左对齐钮下方）
 0.9.19  §AE：2D/3D 真身 `WINPermanentCompassView`（三级识别 + 直钩 layout/didMoveToWindow）
 0.9.20  §AF 清探针清日志 + §AG 最高级加固：全量字符串混淆加密 + 链接期符号剥离  ← 当前（采用）
+0.9.21  §AH：面向用户的详情文案「只讲功能」+ 补做爱源地址（功能与 0.9.20 一致）  ← 当前（采用）
 ```
 
 ---
 
 ## 八、标识
 
-**0.9.20 起（加固后）**：镜像内**不再**出现作者/仓库标识。原因有二：
+**0.9.20 起（加固后，0.9.21 同口径）**：镜像内**不再**出现作者/仓库标识。原因有二：
 
 1. `GaodeCleanSignature()` 在 0.9.20 清日志后已无调用者，被 `-Wl,-dead_strip` 整段移除，
    其引用的 `jibamao` / `gan-jibamao.github.io` / `GaodeClean by jibamao` 一并消失；
@@ -1681,7 +1707,7 @@ cmp <(ar p dist/*.deb data.tar.gz | tar xzO ./var/jb/.../GaodeClean.dylib) dist/
 # ① 安装路径标识（必须叫 GaodeClean.dylib，无法也不该隐藏）
 strings GaodeClean.dylib | grep -i gaodeclean        # /Library/.../GaodeClean.dylib
 # ② 版本串（门禁与装机核对依赖；由构造函数内存屏障钉住）
-strings GaodeClean.dylib | grep -F 0.9.20            # 0.9.20  ×1
+strings GaodeClean.dylib | grep -F 0.9.21            # 0.9.21  ×1
 ```
 
 **无任何自定义日志**：0.9.20 起 `[GaodeClean]` 前缀命中 **0**，启动不再打印版本行。
