@@ -5,7 +5,7 @@
 
 | | |
 |:--|:--|
-| **当前版本** | `0.9.15` |
+| **当前版本** | `0.9.16` |
 | **Author** | **jibamao** — <https://gan-jibamao.github.io/> · Section `jibamao-Tweaks` |
 | **目标** | 高德地图 / AMap `com.autonavi.amap`（**版本限制已取消，全版本自适应**） |
 | **架构** | `arm64`（rootless / TrollFools 注入）· `arm64e`（RootHide） |
@@ -957,7 +957,7 @@ app 走 `setHidden:NO` 这条路时直接绕过 → 按钮以原生位置露出�
    却没人把 0.9.7 的函数拉出来对一遍；真根因只是一行 `HomeSettled = YES;`。
    现象驱动的层层加码，会把一个 1 行回归滚成 8 条拦截 + 6 个版本。
 
-### Y. 0.9.14 → 0.9.15 —— 真机取证定位「裸露」真凶：锚点「首帧锁定」（当前采用）
+### Y. 0.9.14 → 0.9.16 —— 真机取证定位「裸露」真凶：锚点「首帧锁定」（当前采用）
 
 **为什么还要一轮取证**：0.9.14 已把按钮显示链**函数级逐字**恢复成 0.9.7 语义（比对 5/5
 通过），真机却仍裸露 18-21 帧 —— 说明「0.9.7 无此问题」这条口头基线、或裸露的真正成因，
@@ -1025,7 +1025,7 @@ if (!SearchBarSettled) { SearchBarSettledY = bar.frame.origin.y; SearchBarSettle
 | A2 | `AlignCornerWidgets`：锚点未定格前 `if (!SearchBarSettled) return;` —— 不摆位、不认领、不显示；控件与搜索栏用**同一判据**（`BarStableTicks>=3`）解除，二者同时出现、位置都是最终值 |
 | A3 | 新增 `WINAJXCombinedWidgetView -didMoveToWindow` 钩子（**精确 tag** 判定）：上窗瞬间即隐藏 —— 日志显示 app 在 addSubview 同一毫秒内就把 frame 摆到中部，而首次 `layoutSubviews` 要等 42ms（≈2.5 帧） |
 | A4 | 兜底阈值 `ColdTicks > 12` → `> 16`，避免它抢在 A2 的闸门（≥15）之前把控件按原始位置强显 |
-| A5 | 版本 0.9.15 + control；文档同步 |
+| A5 | 版本 0.9.16 + control；文档同步 |
 | A6 | 修诊断模块定时器：`dispatch_source_t` 原来是函数局部变量，ARC 下出作用域即释放 ⇒ 采样一次都没跑（本次取证的失误，日志里 0 条 `Sxx` 行）；改为文件级强引用 |
 
 **影响范围与验证方法**：
@@ -1068,9 +1068,9 @@ if (!SearchBarSettled) { SearchBarSettledY = bar.frame.origin.y; SearchBarSettle
 | 0.9.13 | 右下按钮冷启动位置 | **仍未归零：14 帧（233ms，较 0.9.12 反弹）** → 系列整体回退 |
 | 0.9.14 | 构建门禁（静态） | 双架构 0 警告（剥离开/关**双跑**）· 0.9.13 版本串残留 0 · cpusubtype `0x2` · 载荷路径与 `Depends` 解包核验 · 按钮链与 0.9.7 **函数级逐字比对通过** **通过** |
 | 0.9.14 | 右下按钮冷启动位置 | **仍未归零：18-21 帧（350ms）** → 触发取证包（见 §Y） |
-| 0.9.15 | 锚点逻辑（仿真） | 按真机数值逐拍仿真：旧逻辑 3 拍落中部、新逻辑 **0 拍** **通过** |
-| 0.9.15 | 构建门禁（静态） | 双架构 0 警告（剥离开/关**双跑**）· 0.9.14 版本串残留 0 · `cpusubtype 0x2` · 载荷路径与 `Depends` 核验 · 载荷与交付 dylib 逐字节一致 **通过** |
-| 0.9.15 | 右下按钮冷启动位置 | 待真机逐帧复验（验收：中部裸露 = 0 帧 且 按钮不早于搜索栏出现） |
+| 0.9.16 | 锚点逻辑（仿真） | 按真机数值逐拍仿真：旧逻辑 3 拍落中部、新逻辑 **0 拍** **通过** |
+| 0.9.16 | 构建门禁（静态） | 双架构 0 警告（剥离开/关**双跑**）· 0.9.14 版本串残留 0 · `cpusubtype 0x2` · 载荷路径与 `Depends` 核验 · 载荷与交付 dylib 逐字节一致 **通过** |
+| 0.9.16 | 右下按钮冷启动位置 | 待真机逐帧复验（验收：中部裸露 = 0 帧 且 按钮不早于搜索栏出现） |
 
 > 本表只收录**有明确记录**的条目；0.8.0–0.9.7 各版的逐版真机结论未逐条回填。
 
@@ -1092,6 +1092,69 @@ if (!SearchBarSettled) { SearchBarSettledY = bar.frame.origin.y; SearchBarSettle
   （app 重建视图树时标记会丢）。
 
 ---
+
+### §Z · 0.9.16 —— 七轮误靶的终点：中部裸露的真身是 App 原生控件
+
+**现象**：冷启动约 2.5s，屏幕右侧中部（win系 y≈340，即屏高 40%）出现 ⊙+↰ 白色胶囊，
+约 0.35s 后瞬移到底部搜索栏上方。用户录屏逐帧可复现。
+
+**七轮修复史（全部无效）**
+
+| 版本 | 手段 | 中部裸露帧数 |
+|:--|:--|:--|
+| 0.9.7 | （基线，未干预） | 用户当时反馈「无问题」 |
+| 0.9.8 | A8 兜底解耦 | 19 帧 |
+| 0.9.9 | W1a `setHidden:` 拦截 | 21 帧 |
+| 0.9.10 | W1b/W1c 几何+纯类名 | 14 帧 |
+| 0.9.11 | W1d `didMoveToWindow` | 4 帧 |
+| 0.9.12 | W1f `setFrame:`/`setCenter:` 中部拒绝 | 2 帧 |
+| 0.9.13 | W1g 兜底验位 | 14 帧 |
+| 0.9.14 | 全量回退到 0.9.7 语义 | 18~22 帧 |
+| 0.9.16 | 锚点定格后才锁定（A1-A6） | 22 帧 |
+
+**真根因（diag2 日志 + 录屏三方铁证）**
+
+中部那个胶囊**不是** `WINAJXCombinedWidgetView`（七轮一直在藏的对象），而是高德 App 自己的：
+
+```
+WINLiteWidgetGroupView(339,340,44x88)   ← 原生「轻量控件组」容器（真身）
+  UIVisualEffectView(339,340,44x88)     ← 毛玻璃底（白胶囊外观的来源）
+    WINLocationView(339,340,44x44)      ← ⊙ 定位图标
+    （↰ 路线图标同级）
+```
+
+铁证链：
+
+1. **t=0.613**（`SB=0`，搜索栏未定格）：我们的控件**尚未创建**（采样行 `W0`），
+   而中部**已经有** `WINLiteWidgetGroupView(339,340)` ⇒ 中部胶囊的出现**不依赖我们的控件**。
+2. **t=1.187**：`setFrame:->(339,281) win系(339,340) hid=1` —— App 在中部摆它时，
+   **它本身处于隐藏态**（我们 A3 的 `didMoveToWindow` 已生效）。
+3. **全档 97 条采样**：我们的控件 `89 条 @(339,606) hid0`（**只在正确底部位可见**）
+   ＋ `8 条 @(339,340) hid1`（在中部位时**全部隐藏**）；`hid0` 从未出现在 y≈340。
+4. `setHidden:` 三连：`1.184 藏在(0,59)` → `1.218 藏在中部(已隐藏)` → `1.656 只有到正确位 606 才解除隐藏`。
+5. 暴露窗口 = **`SB=0` 全程**（0.33–1.6s）；`SB=1` 后中部立刻清空。
+
+⇒ **我们的按压逻辑 100% 生效；中部裸露物与我们管的对象完全无关。**
+也终于解释「为什么 0.9.7 也露」——它**从 0.4.x 起就没人碰过**。
+
+**修复（0.9.16）**
+
+- **A1 按住原生组容器**：`WINLiteWidgetGroupView` 的 `didMoveToWindow` + `layoutSubviews`，
+  在 `!SearchBarSettled` 期间 `hidden = YES` 并登记；判据用**几何**排除右上「+/图层」胶囊
+  （同类，但出生于窗口顶部 y≈69 ≈ 窗高 3.6%，故以「y > 窗高 25%」区分）。
+- **A2 定格后由我们放行**：`AlignCornerWidgets` 扫描时缓存 `CachedLiteGroup`；
+  `AlignOneWidget` 显示右下控件时把它一并 `hidden = NO` ⇒ 胶囊与我们的控件**同时**出现，
+  背景与图标不缺。另设安全网（`SB=1` 且 `ColdTicks>16` 仍未配对则强制放行）。
+- **A3 诊断增强**：`WINLiteWidgetGroupView` / `WINLocationView` 纳入事件与逐拍探针；
+  `mid` 列表增加**有效可见性**判定（沿祖先链查 `hidden`/`alpha`）——这是本轮唯一盲点，
+  「祖先隐藏」的视图仍会被列出，上一版据此无法断定有效可见。
+- **A4** 版本 0.9.16 + 文档。
+
+**教训（第 15-17 条，见 §五）**
+
+**关键代码位置**：`src/GaodeClean.m` 按钮钩子区（A1 两钩子 + `GCCIsLiteGroupCapsule()`）、
+`AlignCornerWidgets` 扫描段（`CachedLiteGroup`）、`AlignOneWidget` 放行段（A2）、
+tick 链安全网；`src/GCCDiag.h`（A3 探针）。
 
 ## 五、教训
 
@@ -1177,21 +1240,24 @@ deb 打包用 `scripts/mkdeb.py`（Python 写 `ar` 归档，不需要 `dpkg-deb`
 
 装完 `sbreload` 或重启用户空间。
 
-### 本包产物（0.9.15）
+### 本包产物（0.9.16）
 
 | 文件 | 说明 |
 |:--|:--|
-| `dist/GaodeClean-0.9.15.dylib`（arm64）| 185,024 B · rootless / Dopamine |
-| `dist/GaodeClean-0.9.15-arm64e.dylib` | 186,496 B · RootHide（`cpusubtype 0x2` 已由 `fixarch.py` 修正）|
-| `dist/com.jibamao.gaodeclean_0.9.15_iphoneos-arm64.deb` | 61,554 B · rootless（载荷 `/var/jb/Library/MobileSubstrate/…`，`Installed-Size 181`）|
-| `dist/com.jibamao.gaodeclean_0.9.15_iphoneos-arm64e-roothide.deb` | 61,082 B · RootHide（载荷 `/Library/…`，`Depends` 含 `oldabi`，`Installed-Size 183`）|
-| `dist/GaodeClean-0.9.15-Source.zip` | 完整源码（src + control + scripts + tools + Makefile + GCCDiag.h）|
+| `GaodeClean-0.9.16.dylib`（arm64）| 201,776 B · rootless / Dopamine |
+| `GaodeClean-0.9.16-arm64e.dylib` | 203,248 B · RootHide（`cpusubtype 0x2` 已由 `fixarch.py` 修正）|
+| `com.jibamao.gaodeclean_0.9.16_iphoneos-arm64.deb` | 62,488 B · rootless（载荷 `/var/jb/Library/MobileSubstrate/…`）|
+| `com.jibamao.gaodeclean_0.9.16_iphoneos-arm64e-roothide.deb` | 61,972 B · RootHide（载荷 `/Library/…`，`Depends` 含 `oldabi`）|
+| `com.jibamao.gaodeclean_0.9.16+diag_*.deb` | 取证包（行为与正式包一致，仅多 `-DGAODECLEAN_DIAG_LOG=1`）|
+| `dist/GaodeClean-0.9.16-Source.zip` | 完整源码（src + control + scripts + tools + Makefile + GCCDiag.h）|
 
-**0.9.15 日志分档**：正式包由 Makefile 注入 `-DGAODECLEAN_STRIP_LOGS=1`，
+**0.9.16 日志分档**：正式包由 Makefile 注入 `-DGAODECLEAN_STRIP_LOGS=1`，
 12 处每事件级 `GCLog` 在编译期展开为空操作（`strings` 已验证全部消失）；
 装机核对所需的 8 处 `NSLog` 保留。需真机排查时用 `make dev` 出带日志的调试包。
 
 > 产物体积随代码增长而变；以 `make` 的实际输出与 `dist/SHA256SUMS.txt` 为准。
+> **体积跳变提示**：0.9.16 较 0.9.15 文件 +16,752 B，而 `__text` 仅 +1,544 B ——
+> 差额是 `__got` 跨 `0x4000` 页边界的对齐填充（16,384 B），与 0.9.8 审计时的同一现象，**非重复代码**。
 
 ### 每次发版自检清单
 
@@ -1259,7 +1325,7 @@ cmp <(ar p dist/*.deb data.tar.gz | tar xzO ./var/jb/.../GaodeClean.dylib) dist/
 0.9.12  拦截 setFrame:/setCenter: 中部写入（app 只挪位置时的唯一通道）
 0.9.13  兜底显示前验位置（裸露源=兜底开闸而非 app 写入）—— 系列失败，已回退
 0.9.14  回退 W 系列，恢复 0.9.7 显示语义（真根因：HomeSettled 门控被拆）—— 真机仍裸露，见 §Y
-0.9.15  锚点「定格后才锁定」+ 几何不变量 + 未定格不摆位（真根因：SearchBarSettledY 锁了第一帧）  ← 当前（采用）
+0.9.16  锚点「定格后才锁定」+ 几何不变量 + 未定格不摆位（真根因：SearchBarSettledY 锁了第一帧）  ← 当前（采用）
 ```
 
 ---
@@ -1279,5 +1345,5 @@ strings GaodeClean.dylib | grep -i jibamao
 启动输出：
 
 ```
-[GaodeClean] GaodeClean v0.9.15 | jibamao | https://gan-jibamao.github.io/
+[GaodeClean] GaodeClean v0.9.16 | jibamao | https://gan-jibamao.github.io/
 ```

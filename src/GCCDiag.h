@@ -80,6 +80,8 @@ static void GCDiagSample(void) {
 
     NSMutableArray *widgets = [NSMutableArray array];
     NSMutableArray *suspects = [NSMutableArray array];
+    NSMutableArray *lites = [NSMutableArray array];     // 0.9.16（A3）：真凶
+    NSMutableArray *locates = [NSMutableArray array];   // 0.9.16（A3）：⊙ 图标
     CGSize scr = UIScreen.mainScreen.bounds.size;
 
     NSMutableArray *queue = [NSMutableArray arrayWithObject:win];
@@ -90,6 +92,8 @@ static void GCDiagSample(void) {
         if ([cn isEqualToString:@"WINAJXCombinedWidgetView"]) {
             if (widgets.count < 5) [widgets addObject:v];   // 0.9.15+diag：全部实例都记
         }
+        if ([cn isEqualToString:@"WINLiteWidgetGroupView"] && lites.count < 4) [lites addObject:v];
+        if ([cn isEqualToString:@"WINLocationView"] && locates.count < 3) [locates addObject:v];
         if (!v.hidden && v.alpha > 0.1 && v.window) {
             CGSize bs = v.bounds.size;
             if (bs.width > 30 && bs.width < 220 && bs.height > 30 && bs.height < 420) {
@@ -97,8 +101,14 @@ static void GCDiagSample(void) {
                 if (r.origin.x > scr.width * 0.55
                     && CGRectGetMidY(r) > scr.height * 0.25
                     && CGRectGetMidY(r) < scr.height * 0.70) {
-                    NSString *sig = [NSString stringWithFormat:@"%@(%.0f,%.0f,%.0fx%.0f)",
-                                     cn, r.origin.x, r.origin.y, r.size.width, r.size.height];
+                    // 0.9.16（A3）：补**有效可见性** —— 祖先链上任一 hidden/alpha≈0 即为「祖隐」。
+                    //   上一版只看自身 hidden，导致「祖先藏着的子视图」也被当成暴露候选，
+                    //   这正是本轮唯一盲点（真凶曾因此被漏看）。
+                    BOOL eff = YES;
+                    for (UIView *p = v; p; p = p.superview) { if (p.hidden || p.alpha < 0.1) { eff = NO; break; } }
+                    NSString *sig = [NSString stringWithFormat:@"%@(%.0f,%.0f,%.0fx%.0f)%@",
+                                     cn, r.origin.x, r.origin.y, r.size.width, r.size.height,
+                                     eff ? @"✓可见" : @"✗祖隐"];
                     if (![suspects containsObject:sig] && suspects.count < 6) [suspects addObject:sig];
                 }
             }
@@ -119,6 +129,34 @@ static void GCDiagSample(void) {
                        objc_getAssociatedObject(wv, &AlignedKey) != nil,
                        [ColdWidgets containsObject:wv], wv.window != nil]];
     }
+    // 0.9.16（A3）：真凶全实例（带有效可见性 + 祖先链）
+    {
+        NSMutableArray *li = [NSMutableArray array];
+        for (UIView *lv in lites) {
+            CGRect r = [lv convertRect:lv.bounds toView:win];
+            BOOL eff = YES;
+            for (UIView *p = lv; p; p = p.superview) { if (p.hidden || p.alpha < 0.1) { eff = NO; break; } }
+            NSMutableString *chain = [NSMutableString string];
+            UIView *p = lv.superview;
+            for (int i = 0; i < 4 && p; i++, p = p.superview)
+                [chain appendFormat:@"%@>", NSStringFromClass(p.class)];
+            [li addObject:[NSString stringWithFormat:@"%@(%.0f,%.0f,%.0fx%.0f)hid%d其%dtag=%@Cold%d[%@]",
+                           eff ? @"✓" : @"✗", r.origin.x, r.origin.y, r.size.width, r.size.height,
+                           lv.hidden, eff, ObjectGetter(lv, @"getItemTag") ?: @"nil",
+                           [ColdWidgets containsObject:lv], chain]];
+        }
+        NSMutableArray *oi = [NSMutableArray array];
+        for (UIView *ov in locates) {
+            CGRect r = [ov convertRect:ov.bounds toView:win];
+            BOOL eff = YES;
+            for (UIView *p = ov; p; p = p.superview) { if (p.hidden || p.alpha < 0.1) { eff = NO; break; } }
+            [oi addObject:[NSString stringWithFormat:@"%@(%.0f,%.0f)hid%d其%d", eff ? @"✓" : @"✗",
+                           r.origin.x, r.origin.y, ov.hidden, eff]];
+        }
+        if (li.count || oi.count)
+            GCDiag(@"   LITE: %@ | LOC: %@", li.count ? [li componentsJoinedByString:@" "] : @"-",
+                   oi.count ? [oi componentsJoinedByString:@" "] : @"-");
+    }
     GCDiag(@"S%02d tick=%ld H=%d SB=%d(y=%.0f) | W%lu: %@ | mid=%s[%@]",
            n, (long)ColdTicks, HomeSettled, SearchBarSettled, SearchBarSettledY,
            (unsigned long)widgets.count, [wi componentsJoinedByString:@" "],
@@ -129,6 +167,103 @@ static void GCDiagSample(void) {
     if (CachedRoute != lastRoute) { GCDiag(@"   * CachedRoute -> %@", CachedRoute ? NSStringFromClass(CachedRoute.class) : @"nil"); lastRoute = CachedRoute; }
     if (HomeSettled != lastHome) { GCDiag(@"   * HomeSettled %d -> %d", lastHome, HomeSettled); lastHome = HomeSettled; }
     if (SearchBarSettled != lastSettled) { GCDiag(@"   * SearchBarSettled %d -> %d (y=%.0f)", lastSettled, SearchBarSettled, SearchBarSettledY); lastSettled = SearchBarSettled; }
+}
+
+// ============================================================================
+// 0.9.16（A3）：App 原生组容器的事件探针（七轮误靶的真凶）
+//   与主类同一套动作，但不依赖 getItemTag（该类的 tag 恒为 nil）。
+// ============================================================================
+static void GCDiagHookLiteClass(Class c) {
+    if (!c) return;
+    Method m; IMP prev; const char *types;
+
+    // setFrame:（抓「谁把它摆到中部」的调用栈）
+    SEL sel = @selector(setFrame:);
+    m = class_getInstanceMethod(c, sel);
+    if (m) {
+        prev = method_getImplementation(m);
+        types = method_getTypeEncoding(m);
+        Replace(c, sel, imp_implementationWithBlock(^(UIView *self, CGRect r) {
+            if (GCDiagFrameBudget > 0) {
+                GCDiagFrameBudget--;
+                UIView *win = self.window;
+                CGRect w = win ? [self convertRect:r toView:win] : r;
+                CGSize scr = UIScreen.mainScreen.bounds.size;
+                GCDiag(@"  L.setFrame:->(%.0f,%.0f,%.0fx%.0f) win系(%.0f,%.0f) hid=%d win=%d",
+                       r.origin.x, r.origin.y, r.size.width, r.size.height,
+                       w.origin.x, w.origin.y, self.hidden, self.window != nil);
+                BOOL isMid = (w.origin.y + w.size.height / 2.0) > scr.height * 0.25 &&
+                             (w.origin.y + w.size.height / 2.0) < scr.height * 0.70;
+                static int liteStackBudget = 6;
+                if (isMid && liteStackBudget > 0) {
+                    liteStackBudget--;
+                    NSArray *bt = [NSThread callStackSymbols];
+                    NSMutableString *keep = [NSMutableString string];
+                    for (NSString *fr in bt) {
+                        if ([fr containsString:@"GaodeClean"] || [fr containsString:@"Gaode"] ||
+                            [fr containsString:@"WIN"] || [fr containsString:@"AJX"] ||
+                            [fr containsString:@"Align"] || [fr containsString:@"Layout"]) {
+                            [keep appendFormat:@"\n                      | %@", fr];
+                            if (keep.length > 900) break;
+                        }
+                    }
+                    GCDiag(@"  ★L 写入中部(%.0f) — 调用栈:%@", w.origin.y, keep.length ? keep : @"(无 Gaode/WIN 帧)");
+                }
+            }
+            ((void (*)(id, SEL, CGRect))prev)(self, sel, r);
+        }), types);
+    }
+    // setHidden:
+    sel = @selector(setHidden:);
+    m = class_getInstanceMethod(c, sel);
+    if (m) {
+        prev = method_getImplementation(m);
+        types = method_getTypeEncoding(m);
+        Replace(c, sel, imp_implementationWithBlock(^(UIView *self, BOOL hidden) {
+            CGRect w = self.window ? [self convertRect:self.bounds toView:self.window] : self.frame;
+            GCDiag(@"  L.setHidden:%d @win系(%.0f,%.0f,%.0fx%.0f) hid(旧)=%d win=%d",
+                   hidden, w.origin.x, w.origin.y, w.size.width, w.size.height,
+                   self.hidden, self.window != nil);
+            ((void (*)(id, SEL, BOOL))prev)(self, sel, hidden);
+        }), types);
+    }
+    // didMoveToWindow
+    sel = @selector(didMoveToWindow);
+    m = class_getInstanceMethod(c, sel);
+    if (m) {
+        prev = method_getImplementation(m);
+        types = method_getTypeEncoding(m);
+        Replace(c, sel, imp_implementationWithBlock(^(UIView *self) {
+            CGRect w = self.window ? [self convertRect:self.bounds toView:self.window] : self.frame;
+            GCDiag(@"  L.didMoveToWindow win=%d hid=%d @win系(%.0f,%.0f,%.0fx%.0f)",
+                   self.window != nil, self.hidden, w.origin.x, w.origin.y, w.size.width, w.size.height);
+            ((void (*)(id, SEL))prev)(self, sel);
+        }), types);
+    }
+    // layoutSubviews（节流）
+    sel = @selector(layoutSubviews);
+    m = class_getInstanceMethod(c, sel);
+    if (m) {
+        prev = method_getImplementation(m);
+        types = method_getTypeEncoding(m);
+        Replace(c, sel, imp_implementationWithBlock(^(UIView *self) {
+            static NSTimeInterval lastL = 0;
+            NSTimeInterval now = NSDate.date.timeIntervalSince1970;
+            if (now - lastL > 0.1) {
+                lastL = now;
+                UIView *win = self.window;
+                CGRect w = win ? [self convertRect:self.bounds toView:win] : self.frame;
+                NSMutableString *chain = [NSMutableString string];
+                UIView *p = self.superview;
+                for (int i = 0; i < 4 && p; i++, p = p.superview)
+                    [chain appendFormat:@"%@ > ", NSStringFromClass(p.class)];
+                GCDiag(@"  L.layoutSubviews @win系(%.0f,%.0f,%.0fx%.0f) hid=%d win=%d 祖先链=%@",
+                       w.origin.x, w.origin.y, w.size.width, w.size.height,
+                       self.hidden, self.window != nil, chain.length ? chain : @"(无)");
+            }
+            ((void (*)(id, SEL))prev)(self, sel);
+        }), types);
+    }
 }
 
 static void GCDiagInstall(void) {
@@ -142,6 +277,12 @@ static void GCDiagInstall(void) {
 #endif
            );
     Class cls = NSClassFromString(@"WINAJXCombinedWidgetView");
+    // 0.9.16（A3）：真凶是 App 原生组容器 —— 纳入同一套事件探针。
+    //   （diag2 铁证：中部胶囊 = WINLiteWidgetGroupView + 毛玻璃 + WINLocationView(⊙)）
+    Class clsLite = NSClassFromString(@"WINLiteWidgetGroupView");
+    GCDiag(@"probe: WINAJXCombinedWidgetView=%@ WINLiteWidgetGroupView=%@ WINLocationView=%@",
+           cls ? @"yes" : @"NO", clsLite ? @"yes" : @"NO",
+           NSClassFromString(@"WINLocationView") ? @"yes" : @"NO");
     if (!cls) {
         GCDiag(@"!! WINAJXCombinedWidgetView 类不存在 —— 显示拦截从第一步就是空转");
     } else {
@@ -207,8 +348,11 @@ static void GCDiagInstall(void) {
                     CGSize scr = UIScreen.mainScreen.bounds.size;
                     BOOL isMid = self.window && r.origin.y > scr.height * 0.25 && r.origin.y < scr.height * 0.70;
                     BOOL isBtn = tag && [tag isKindOfClass:NSString.class] && [tag rangeOfString:@"RightBottom"].location != NSNotFound;
+                    // 0.9.16（A3）：App 原生组容器没有 getItemTag —— 按类名放行，
+                    //   中间裸露物就是它，必须抓到「谁把它摆到中部」的调用栈。
+                    BOOL isLite = [NSStringFromClass(self.class) isEqualToString:@"WINLiteWidgetGroupView"];
                     static int midStackBudget = 6;
-                    if (isMid && isBtn && midStackBudget > 0 && r.size.height > 40) {
+                    if (isMid && (isBtn || isLite) && midStackBudget > 0 && r.size.height > 40) {
                         midStackBudget--;
                         NSArray<NSString *> *st = [NSThread callStackSymbols];
                         NSMutableArray *keep = [NSMutableArray array];
@@ -267,6 +411,8 @@ static void GCDiagInstall(void) {
             }), types);
         }
     }
+    // 0.9.16（A3）：真凶纳入探针
+    GCDiagHookLiteClass(NSClassFromString(@"WINLiteWidgetGroupView"));
     // 采样定时器（200ms）—— 必须存进文件级变量持住，否则 ARC 立即释放
     GCDiagTimer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, dispatch_get_main_queue());
     dispatch_source_set_event_handler(GCDiagTimer, ^{ GCDiagSample(); });
