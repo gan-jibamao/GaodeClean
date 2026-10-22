@@ -30,6 +30,12 @@ bad()  { printf '  [FAIL] %s\n' "$*"; FAIL=1; }
 say "== $DEB  (scheme=$SCHEME)"
 PKG=$(dpkg-deb -f "$DEB" Package)
 VER=$(dpkg-deb -f "$DEB" Version)
+# 0.9.18（A4）：调试包（版本含 "+"，如 0.9.18+diag3）不是发布包 ——
+#   它按设计**不剥** GCLog、且版本号带后缀，不能拿发布不变量判它失败。
+case "$VER" in
+  *+*) IS_DEBUG_PKG=1; VER_BASE="${VER%%+*}" ;;
+  *)   IS_DEBUG_PKG=0; VER_BASE="$VER" ;;
+esac
 ARCH=$(dpkg-deb -f "$DEB" Architecture)
 say "  Package=$PKG Version=$VER Architecture=$ARCH"
 
@@ -110,7 +116,9 @@ NLOG=$(strings -a "$DYL" | grep -cF '[GaodeClean] ' || true)
 #   管线状态变非零 ⇒ 把「命中」误判成「未命中」（剥离去向错则变成**假通过**）。
 GCLOGHIT=$(strings -a "$DYL" | grep -cE "$GC_LOGONLY" || true)
 if [ "${GCLOGHIT:-0}" -gt 0 ]; then
-  if [ "${FINALPACKAGE:-0}" = "1" ]; then
+  if [ "$IS_DEBUG_PKG" = "1" ]; then
+    say "  [skip] 调试包 ${VER}：按设计保留 GCLog（命中 ${GCLOGHIT} 条），不适用发布不变量"
+  elif [ "${FINALPACKAGE:-0}" = "1" ]; then
     bad "正式包残留 GCLog 诊断串（GCLog 未被剥空）"
   else
     say "  [note] 非正式构建，保留 GCLog 诊断串（正常）"
@@ -123,13 +131,13 @@ fi
 # 起因：0.9.17 只改 control/文档，漏改源码 kGCVersion ⇒ 包是 0.9.17、体内日志仍报 0.9.16。
 # 断言：control 的 Version 必须能在体内找到；且不得再出现「同族旧版本串」。
 # 同样先取值再比较（见上：pipefail + grep -q 的 SIGPIPE 陷阱）。
-VERHIT=$(strings -a "$DYL" | grep -cF "$VER" || true)
+VERHIT=$(strings -a "$DYL" | grep -cF "$VER_BASE" || true)
 if [ "${VERHIT:-0}" -gt 0 ]; then
   ok "体内版本串 ${VER}（与 control 一致）"
 else
-  bad "体内版本串与 control 不一致：control=${VER}，dylib 内找不到"
+  bad "体内版本串与 control 不一致：control=${VER}（基版本 ${VER_BASE}），dylib 内找不到"
 fi
-STALE=$(strings -a "$DYL" | grep -oE '0\.9\.[0-9]+' | sort -u | grep -v "^${VER}$" || true)
+STALE=$(strings -a "$DYL" | grep -oE '0\.9\.[0-9]+' | sort -u | grep -v "^${VER_BASE}$" || true)
 if [ -n "$STALE" ]; then
   bad "体内残留同族旧版本串: $(printf '%s' "$STALE" | tr '\n' ' ')"
 else
