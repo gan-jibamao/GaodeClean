@@ -125,9 +125,9 @@ fi
 # 同样先取值再比较（见上：pipefail + grep -q 的 SIGPIPE 陷阱）。
 VERHIT=$(strings -a "$DYL" | grep -cF "$VER" || true)
 if [ "${VERHIT:-0}" -gt 0 ]; then
-  ok "体内版本串 $VER（与 control 一致）"
+  ok "体内版本串 ${VER}（与 control 一致）"
 else
-  bad "体内版本串与 control 不一致：control=$VER，dylib 内找不到"
+  bad "体内版本串与 control 不一致：control=${VER}，dylib 内找不到"
 fi
 STALE=$(strings -a "$DYL" | grep -oE '0\.9\.[0-9]+' | sort -u | grep -v "^${VER}$" || true)
 if [ -n "$STALE" ]; then
