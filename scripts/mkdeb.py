@@ -69,7 +69,13 @@ def control_text(control_path, arch, roothide, installed_kb):
     # 否则 Sileo / dpkg-deb 报 "end of file during value of field"）。
     txt = open(control_path, encoding='utf-8').read().rstrip('\n') + '\n'
     txt = txt.replace('Architecture: iphoneos-arm64', 'Architecture: ' + arch)
-    txt = re.sub(r'(?m)^Installed-Size:.*$', 'Installed-Size: %d' % installed_kb, txt)
+    # 2026-10-22：control 里不再手写 Installed-Size（theos 打包会自行追加，
+    # 手写会导致 "duplicate value for 'Installed-Size' field"）。这里改为
+    # 「有则替换、无则插入」，两个构建通道语义一致。
+    if re.search(r'(?m)^Installed-Size:', txt):
+        txt = re.sub(r'(?m)^Installed-Size:.*$', 'Installed-Size: %d' % installed_kb, txt)
+    else:
+        txt = txt.rstrip('\n') + '\nInstalled-Size: %d\n' % installed_kb
     if roothide:
         txt = txt.replace('mobilesubstrate', 'mobilesubstrate, oldabi')
     return txt.encode('utf-8')

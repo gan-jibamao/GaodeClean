@@ -8,4 +8,3 @@ Maintainer: jibamao
 Author: jibamao
 Section: jibamao-Tweaks
 Depends: firmware (>= 15.0), mobilesubstrate
-Installed-Size: 160
