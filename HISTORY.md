@@ -1319,6 +1319,27 @@ A4：`control` → 0.9.17；README 版本行/功能表/版本链/门禁表同步
 - `scripts/verify_deb.sh`：四包全部核验通过（正式包 11 项 + 调试包按「非发布不变量」跳过剥离断言，
   版本串按**基版本**比对）。调试包判定依据：`control` 的 Version 含 `+`。
 
+### §AD · 本地链修复 —— 调试包不再产出「名字冒充正式包」的 deb
+
+**事实**：0.9.18 出包时先跑 `make -f Makefile.local`（正式）再跑
+`make -f Makefile.local RELEASE=0 EXTRA=-DGAODECLEAN_DIAG_LOG=1 OUT=distdiag`。
+第二条命令的打包步骤仍用仓库 `control`（Version 0.9.18）⇒ 在 `distdiag/` 里**额外**产出
+`com.jibamao.gaodeclean_0.9.18_iphoneos-arm64.deb`，但它内部是**未剥离的调试 dylib**。
+复制交付时按文件名取件 ⇒ 正式包位置放进了调试构建（体积 74,582B vs 正确 63,418B 暴露）。
+
+**根因**：`Makefile.local` 的打包步骤硬编码 `--control control`，`OUT` 与 `CONTROL` 不可分别指定。
+
+**修法**：新增 `CONTROL ?= control`，打包步骤改用 `--control $(CONTROL)`；调试包改为
+```bash
+sed 's/^Version: \(.*\)$/Version: \1+diag3/' control > /tmp/control.diag
+make -f Makefile.local clean
+make -f Makefile.local RELEASE=0 EXTRA="-DGAODECLEAN_DIAG_LOG=1" OUT=distdiag CONTROL=/tmp/control.diag
+```
+⇒ 只产出正确命名的 `..._0.9.18+diag3_*.deb`。
+
+**附带门禁**：交付前**逐包开包核验**（`dpkg-deb -x` 后查体内 dylib）：
+正式包必须 `GCLog命中=0 且 DIAG命中=0`，调试包才允许两者命中。本轮据此拦下污染件。
+
 ## 五、教训
 
 1. **视图「不见了」按三个通道依次排除** — `hidden` → `alpha` → `removeFromSuperview`；
