@@ -1,0 +1,7 @@
+# 构建中间产物（theos）
+.theos/
+packages/
+
+# 本机临时验证产物（正式包由 GitHub Actions 构建，见 .github/workflows/build-theos.yml）
+distdiag/
+*.o

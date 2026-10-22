@@ -1,92 +1,35 @@
 # ============================================================================
-#  GaodeClean —— 构建入口（0.9.8 / A15 新增）
+#  GaodeClean —— theos 工程（2026-10-22 构建通道迁移：正式包一律走 GitHub CI）
 #
-#  此前仓库没有任何构建脚本：mkdeb.py 里写死 /tmp/gcbuild090 与 VERSION=0.9.0，
-#  编译参数只存在于历史对话里，任何人拿到仓库都无法一键重建。
+#  正式发布包（GitHub Actions, macos-14）：
+#    make package FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=rootless
+#        → com.jibamao.gaodeclean_<ver>_iphoneos-arm64.deb      （载荷前缀 /var/jb）
+#    make package FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=roothide
+#        → com.jibamao.gaodeclean_<ver>_iphoneos-arm64e.deb     （载荷前缀 /Library）
 #
-#  用法：
-#    make            # arm64 + arm64e + 两个 deb（正式包，日志已剥离）
-#    make arm64      # 只出 rootless 切片
-#    make arm64e     # 只出 RootHide 切片
-#    make deb        # 只打包（需先有 dist/*.dylib）
-#    make check      # 语法/警告门禁：剥离开 + 剥离关 两遍都必须 0 警告
-#    make dev        # 带诊断日志的调试包（不剥离，自己真机排查用）
-#    make clean
-#
-#  SDK 默认 /tmp/sdk165/iPhoneOS16.5.sdk，可用 SDK=... 覆盖。
+#  本机 iSH 自研 clang 链（/tmp/sdk165 + lld + scripts/fixarch.py）保留为
+#  【临时验证】用途，见 Makefile.local：
+#    make -f Makefile.local check     # 剥离/不剥离 双跑 0 警告门禁
+#    make -f Makefile.local deb       # 本地临时包（不得作为发布资产）
+#    make -f Makefile.local diagdebs  # 真机取证包
 # ============================================================================
 
-SDK        ?= /tmp/sdk165/iPhoneOS16.5.sdk
-CLANG      ?= clang
-TARGET_IOS ?= 15.0
-OUT        ?= dist
-SRC        := src/GaodeClean.m
-HDR        := src/GCCGeometry.h src/GCCDiag.h
+ARCHS = arm64 arm64e
+TARGET = iphone:clang:16.5:15.0
+INSTALL_TARGET_PROCESSES = AMap
 
-# 0.9.14（A9）：正式包剥离诊断日志（GCLog → 空操作）。
-RELEASE    ?= 1
-ifeq ($(RELEASE),1)
-STRIPFLAGS := -DGAODECLEAN_STRIP_LOGS=1
-else
-STRIPFLAGS :=
+include $(THEOS)/makefiles/common.mk
+
+TWEAK_NAME = GaodeClean
+
+# 源码与本地链完全同源：src/GaodeClean.m（+ GCCGeometry.h / GCCDiag.h）
+GaodeClean_FILES = src/GaodeClean.m
+GaodeClean_CFLAGS = -fobjc-arc -fmodules -Isrc -Wall -Wextra -Wno-unused-parameter
+GaodeClean_FRAMEWORKS = UIKit Foundation
+
+# 正式包剥掉全部 GCLog 诊断串（与 Makefile.local 的 RELEASE=1 语义一致）
+ifeq ($(FINALPACKAGE),1)
+GaodeClean_CFLAGS += -DGAODECLEAN_STRIP_LOGS=1
 endif
 
-# 0.9.14-diag：真机事实采集构建（-DGAODECLEAN_DIAG_LOG=1 才会编译 GCCDiag.h）
-EXTRA      ?=
-
-COMMON := -isysroot $(SDK) -fobjc-arc -fmodules -O2 \
-          -Wall -Wextra -Wno-unused-parameter -I src $(STRIPFLAGS) $(EXTRA)
-LINK   := -dynamiclib \
-          -install_name /Library/MobileSubstrate/DynamicLibraries/GaodeClean.dylib \
-          -framework UIKit -framework Foundation -fuse-ld=lld -Wl,-adhoc_codesign
-
-DYLIB64  := $(OUT)/GaodeClean-arm64.dylib
-DYLIB64E := $(OUT)/GaodeClean-arm64e.dylib
-
-.PHONY: all arm64 arm64e deb check clean
-
-all: deb
-
-arm64: $(DYLIB64)
-arm64e: $(DYLIB64E)
-
-# arm64：lld 支持 -fixup_chains，走链式绑定
-$(DYLIB64): $(SRC) $(HDR) | $(OUT)
-	$(CLANG) -target arm64-apple-ios$(TARGET_IOS) $(COMMON) $(LINK) \
-	  -Wl,-fixup_chains -o $@ $(SRC)
-
-# arm64e：lld 不支持 arm64e 的 -fixup_chains，走经典 LC_DYLD_INFO_ONLY；
-#         链接后再把 cpusubtype 从 0 改回 2 并重算签名页哈希（见 scripts/fixarch.py）
-$(DYLIB64E): $(SRC) $(HDR) | $(OUT)
-	$(CLANG) -target arm64e-apple-ios$(TARGET_IOS) $(COMMON) $(LINK) -o $@ $(SRC)
-	python3 scripts/fixarch.py $@ 2
-
-$(OUT):
-	mkdir -p $(OUT)
-
-deb: $(DYLIB64) $(DYLIB64E)
-	python3 scripts/mkdeb.py --dist $(OUT) --control control --plist GaodeClean.plist \
-	  --dylib-arm64 $(DYLIB64) --dylib-arm64e $(DYLIB64E)
-
-# 门禁：两遍都必须 0 警告 —— ① 正式包（日志剥离）② 调试包（日志保留）：
-#   剥离后若某变量只在被剥掉的 GCLog 里用过，会产生 unused-variable 警告，
-#   必须在这里就暴露，而不是等真机出问题。
-check:
-	@for mode in 1 0; do \
-	  flag=$$([ $$mode = 1 ] && echo -DGAODECLEAN_STRIP_LOGS=1); \
-	  out=$$($(CLANG) -target arm64-apple-ios$(TARGET_IOS) $(COMMON) $$flag -fsyntax-only $(SRC) 2>&1); \
-	  if echo "$$out" | grep -q 'warning:'; then \
-	    echo "STRIP=$$mode"; echo "$$out"; echo "FAIL: 存在警告"; exit 1; \
-	  fi; \
-	  echo "OK: 0 warnings (STRIP=$$mode)"; \
-	done
-	@echo "check: 全部通过"
-
-# 0.9.14：带诊断日志的调试包（不发版，真机排查用）
-dev: ; $(MAKE) RELEASE=0 deb
-
-# 0.9.14-diag：事实采集包 —— 每 200ms 采样按钮生命周期并落盘（真机排查专用）
-diagdebs: ; $(MAKE) RELEASE=0 EXTRA="-DGAODECLEAN_DIAG_LOG=1" deb
-
-clean:
-	rm -f $(DYLIB64) $(DYLIB64E) $(OUT)/*.deb
+include $(THEOS_MAKE_PATH)/tweak.mk
