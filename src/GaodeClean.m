@@ -18,7 +18,7 @@
 // ---- jibamao 个人标识（编译进 dylib，可用 strings 核对）----
 static NSString *const kGCAuthor      = @"jibamao";
 static NSString *const kGCRepo        = @"https://gan-jibamao.github.io/";
-static NSString *const kGCVersion     = @"0.9.22";
+static NSString *const kGCVersion     = @"0.9.23";
 
 // 0.9.18（A1）：底边间隙**按控件分开**，对表原生（搜索栏白底顶边 = 702.6pt）
 //   车机钮（连接车机 · WINDeviceInterconnectWidget）：原生底 652 → 间隙 50.6 → 取 50
@@ -641,10 +641,8 @@ static void Schedule(void) {
         // 不会因提前返回而断。重试链只剩副作用：非活跃时额外 10 次/秒空转唤醒。
         if (UIApplication.sharedApplication.applicationState != UIApplicationStateActive) return;
         TickCount++;
-        if (TickCount % 5 == 0) {   // 0.9.22（A1）缩窄兜底：每 ~0.5s 重认一次可见层
-            GCNarrowOneBar(SearchBarView);
-            GCNarrowOneBar(CachedTabBar);
-        }
+        if (TickCount % 5 == 0) GCNarrowSetDirty();   // 0.9.23（A1）每 ~0.5s 重扫一次下屏条带
+        GCNarrowRecheck();                            // 每拍轻量复核（幂等，达标即放行）
         for (id tabs in TabControllers.allObjects) {
             id selected = ObjectGetter(tabs, GCStrAt(71));
             id params = ObjectGetter(tabs, GCStrAt(38));
@@ -822,100 +820,180 @@ static void HookVoid(NSString *name, NSString *methodName, void (^after)(id)) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// 0.9.22（A1）搜索栏 / 底栏「缩窄」—— 两侧各留 24pt，居中收窄，其余一概不动
+// 0.9.23（A1）搜索栏 / 底栏缩窄 · 第二版
 // ───────────────────────────────────────────────────────────────────────────
-// 依据（对老大给的原生截图逐像素量得；1179px @3x = 393×852pt）：
-//   搜索栏可见白胶囊：x = 10.7 → 382.3pt（宽 371.6pt，两侧各 ≈10.7pt）
-//   底栏（首页/我的）可见胶囊：同口径 ≈10pt
-//   右侧地图控件（+ / 图层 / 定位）：x = 353 → 383pt（宽 30pt，右侧 10pt）
-// 目标视觉：两条栏对称内收，两侧各 24pt → 宽 345pt（比原生窄 ≈27pt / 7.2%），
-//   与地图控件（10pt）拉开「内容层 vs 控件层」的层次；两条栏彼此同宽同边距。
-//
-// 取哪一层：容器可能是「全宽的透明容器 + 内嵌可见胶囊子视图」，也可能本身就是胶囊。
-//   故运行时自适应：优先取「宽度 ≥ 屏宽-60 的直接子视图」作可见层，取不到就退化为
-//   容器自身 —— 两种情况都能收窄。规则是**绝对宽度**（幂等），重复应用不会越收越窄。
-// 防回弹：给被判定的那一层挂 setFrame: 钳位 —— 无论 App 自己还是我们自己的布局代码
-//   再写一次，都被同一条规则夹回目标宽度，不会出现 100ms 级的撑开/回缩抖动。
-//
-// 安全边界（避免误伤整屏容器）：只处理「被我们捕获的那条栏」及其**直接子视图**；
-//   且必须同时满足：居中、两端都在屏内 40pt 以内、宽度 ≥ 屏宽-60、高度 ∈ [20, 屏宽×0.35]，
-//   并排除窗口自身与其 rootViewController 视图。
-static const CGFloat GCBarInset = 24.0;   // 两侧留白（pt）：调大 = 更窄，调小 = 更宽
-static NSMutableSet *GCNarrowHooked;      // 已挂钳位的类名（防止重复 Hook）
+// v1（0.9.22）只从「捕获引用」向下找可见层：搜索栏命中（容器下就是白胶囊），
+// 但底栏没动 —— 反馈「搜索栏变窄了，搜索栏下面的没有变化」⇒ 底栏的可见胶囊
+// 不在被捕获的那个视图里（极可能是它的父级或兄弟层），向下找永远找不到。
+// v2 改法：不再依赖捕获引用 —— 按**窗口几何**在「下屏条带」直接发现该收窄的层。
+//   判定（须同时满足）：完全在屏内、居中（中轴偏差 ≤4pt）、宽 ≥ 屏宽-60、
+//   高 ∈ [20, 110]pt（像一条栏，且排除更大的面板容器）、中线落在屏幕下 30% 条带。
+//   夹法：条带内**所有**合格层都夹到同一绝对几何（左端 24pt、宽 屏宽-48），
+//   于是「可见的那一层无论落在哪一级」都必然收到目标宽度；两层叠加也不会翻倍。
+// 定值：两侧各 24pt（宽 = 屏宽-48）；单一常量 GCBarInset 控制，调大 = 更窄。
+// 防回弹：给判定层挂 setFrame:/setBounds:/setCenter: 三重钳位 + 每拍轻量复核兜底。
+static const CGFloat GCBarInset = 24.0;      // 两侧留白（pt）：调大=更窄
+static NSMutableSet *GCNarrowHooked;         // 已挂钳位的类名
+static NSHashTable  *GCNarrowTargets;        // 已判定的可见层（弱引用，不保活）
+static BOOL          GCNarrowDirty = YES;    // 需要重扫条带
 
-static CGFloat GCNarrowScreenW(UIView *v) {
+static void GCNarrowSetDirty(void) { GCNarrowDirty = YES; }
+static void GCNarrowFixInPlace(UIView *v);   // 前置声明（钳位块内要用）
+
+// 把「某视图 + 某个候选 frame」换算成窗口坐标
+static CGRect GCNarrowWindowRect(UIView *v, CGRect f) {
     UIWindow *w = v.window;
-    return w ? w.bounds.size.width : 0;
+    if (!w) return CGRectNull;
+    if (v.superview) return [v.superview convertRect:f toView:w];
+    return [v convertRect:f toView:w];
 }
 
-// 「这是一条贴边宽栏」→ 收窄；否则原样返回
+// 判定：这一层是不是「该收窄的栏」（几何特征；winOut 回传窗口坐标）
+static BOOL GCNarrowIsBar(UIView *v, CGRect *winOut) {
+    UIWindow *w = v.window;
+    if (!w || !v.superview) return NO;
+    if (v.hidden || v.alpha < 0.05) return NO;
+    if (v == w || v == w.rootViewController.view) return NO;      // 绝不碰整屏容器
+    CGFloat sw = w.bounds.size.width, sh = w.bounds.size.height;
+    if (sw < 200) return NO;
+    CGRect win = GCNarrowWindowRect(v, v.frame);
+    if (CGRectIsNull(win)) return NO;
+    if (winOut) *winOut = win;
+    if (win.size.width < sw - 60) return NO;                       // 不够宽：不是这两条栏
+    if (win.size.height < 20 || win.size.height > 110) return NO;  // 高度不像一条栏
+    if (win.origin.x < -1 || CGRectGetMaxX(win) > sw + 1) return NO;     // 横向出屏
+    if (win.origin.y < -1 || CGRectGetMaxY(win) > sh + 1) return NO;     // 纵向出屏
+    if (fabs(CGRectGetMidX(win) - sw * 0.5) > 4) return NO;              // 不居中
+    if (CGRectGetMidY(win) < sh * 0.70) return NO;                       // 只认下屏条带
+    return YES;
+}
+
+// 收窄规则（绝对几何、幂等）：左端对齐 GCBarInset，宽度锁 屏宽-2*inset
 static CGRect GCNarrowClamp(UIView *v, CGRect f) {
     UIWindow *w = v.window;
-    CGFloat screenW = w ? w.bounds.size.width : 0;
-    if (screenW < 200 || !w) return f;
-    if (v == (UIView *)w) return f;
-    if (w.rootViewController && v == w.rootViewController.view) return f;
-    CGFloat target = screenW - 2 * GCBarInset;
-    if (f.size.width <= target + 0.5) return f;          // 已不比目标宽：不碰（幂等）
-    if (f.size.width < screenW - 60) return f;           // 不够宽，不是这两条栏
-    UIView *sup = v.superview;
-    CGRect win = sup ? [sup convertRect:f toView:w] : f;
-    CGFloat h = win.size.height;
-    if (h < 20 || h > screenW * 0.35) return f;          // 高度不像一条栏 → 放行
-    if (win.origin.x < -1 || CGRectGetMaxX(win) > screenW + 1) return f;    // 超出屏
-    if (win.origin.x > 40 || screenW - CGRectGetMaxX(win) > 40) return f;   // 端头太靠里
-    if (fabs(CGRectGetMidX(win) - screenW * 0.5) > 4) return f;             // 不居中
-    f.origin.x += GCBarInset - win.origin.x;             // 左端对齐到 24pt
-    f.size.width = target;                               // 宽度锁到 345pt
+    if (!w) return f;
+    CGFloat sw = w.bounds.size.width;
+    if (sw < 200) return f;
+    CGFloat target = sw - 2 * GCBarInset;
+    if (f.size.width <= target + 0.5) return f;                    // 已达标：放行（幂等闸门）
+    CGRect win = GCNarrowWindowRect(v, f);
+    if (CGRectIsNull(win)) return f;
+    if (f.size.width < sw - 60) return f;
+    if (f.size.height < 20 || f.size.height > 110) return f;
+    if (win.origin.x < -1 || CGRectGetMaxX(win) > sw + 1) return f;
+    if (win.origin.y < -1 || CGRectGetMaxY(win) > w.bounds.size.height + 1) return f;
+    if (fabs(CGRectGetMidX(win) - sw * 0.5) > 4) return f;
+    f.origin.x += GCBarInset - win.origin.x;                       // 左端对齐到 24pt
+    f.size.width = target;                                         // 宽度锁 393-48 = 345pt
     return f;
 }
 
+// 取一个可用窗口（优先 keyWindow）
+static UIWindow *GCBarWindow(void) {
+    UIWindow *best = nil;
+    for (UIWindow *w in GCAllWindows()) {
+        if (w.hidden || w.alpha < 0.05) continue;
+        if (w.bounds.size.width < 200) continue;
+        if (w.isKeyWindow) return w;
+        if (!best) best = w;
+    }
+    return best;
+}
+
+// 给判定层挂**三重**钳位：App 无论用 setFrame: / setBounds: / setCenter: 哪一种写，
+// 都会被同一条规则夹住 —— 这是「不被撑回原生宽度」的治本手段。
 static void GCNarrowHookClass(Class cls) {
     if (!cls) return;
     if (!GCNarrowHooked) GCNarrowHooked = [NSMutableSet set];
-    NSString *name = NSStringFromClass(cls);
-    if ([name length] == 0 || [GCNarrowHooked containsObject:name]) return;
-    SEL sel = NSSelectorFromString(@"setFrame:");
-    Method m = class_getInstanceMethod(cls, sel);
-    if (!m) return;
-    [GCNarrowHooked addObject:name];
-    IMP orig = method_getImplementation(m);
-    IMP imp = imp_implementationWithBlock(^(UIView *self, CGRect f) {
-        ((void (*)(id, SEL, CGRect))orig)(self, sel, GCNarrowClamp(self, f));
-    });
-    Replace(cls, sel, imp, method_getTypeEncoding(m));
-}
+    NSString *n = NSStringFromClass(cls);
+    if ([GCNarrowHooked containsObject:n]) return;
+    [GCNarrowHooked addObject:n];
 
-// 这条栏「可见的那一层」：最宽的直接子视图（够宽才算），没有就用它自己
-static UIView *GCNarrowVisibleLayer(UIView *bar) {
-    CGFloat screenW = GCNarrowScreenW(bar);
-    if (screenW < 200) return bar;
-    UIView *best = nil;
-    CGFloat bw = 0;
-    for (UIView *sub in bar.subviews) {
-        if (sub.hidden || sub.alpha < 0.05) continue;
-        CGRect wr = [sub convertRect:sub.bounds toView:bar.window];
-        CGFloat wh = wr.size.height;
-        if (wr.size.width < screenW - 60) continue;      // 不够宽：不是可见胶囊
-        if (wh < 20 || wh > screenW * 0.35) continue;    // 高度不像一条栏
-        if (wr.size.width > bw) { bw = wr.size.width; best = sub; }
+    SEL sf = NSSelectorFromString(@"setFrame:");
+    Method mf = class_getInstanceMethod(cls, sf);
+    if (!mf) return;
+    IMP origF = method_getImplementation(mf);
+    Replace(cls, sf, imp_implementationWithBlock(^(UIView *self, CGRect f) {
+        ((void (*)(id, SEL, CGRect))origF)(self, sf, GCNarrowClamp(self, f));
+    }), method_getTypeEncoding(mf));
+
+    SEL sb = NSSelectorFromString(@"setBounds:");
+    Method mb = class_getInstanceMethod(cls, sb);
+    if (mb) {
+        IMP origB = method_getImplementation(mb);
+        Replace(cls, sb, imp_implementationWithBlock(^(UIView *self, CGRect b) {
+            ((void (*)(id, SEL, CGRect))origB)(self, sb, b);
+            GCNarrowFixInPlace(self);
+        }), method_getTypeEncoding(mb));
     }
-    return best ?: bar;
-}
 
-static void GCNarrowOneBar(UIView *bar) {
-    if (!bar || !bar.window || !Visible(bar)) return;
-    CGFloat screenW = GCNarrowScreenW(bar);
-    if (screenW < 200) return;
-    UIView *layer = GCNarrowVisibleLayer(bar);
-    GCNarrowHookClass([layer class]);                    // 先防回弹，再立刻夹一次
-    if (layer != bar) GCNarrowHookClass([bar class]);
-    CGRect f = layer.frame, g = GCNarrowClamp(layer, f);
-    if (!CGRectEqualToRect(f, g)) {
-        layer.frame = g;
-        [layer setNeedsLayout];
+    SEL sc = NSSelectorFromString(@"setCenter:");
+    Method mc = class_getInstanceMethod(cls, sc);
+    if (mc) {
+        IMP origC = method_getImplementation(mc);
+        Replace(cls, sc, imp_implementationWithBlock(^(UIView *self, CGPoint c) {
+            ((void (*)(id, SEL, CGPoint))origC)(self, sc, c);
+            GCNarrowFixInPlace(self);
+        }), method_getTypeEncoding(mc));
     }
 }
+
+// 复核并就地夹一次（幂等：已达标立即放行）；改动用 setFrame: 走一遍，钳位自动生效
+static void GCNarrowFixInPlace(UIView *v) {
+    if (!v || !v.window) return;
+    CGRect g = GCNarrowClamp(v, v.frame);
+    if (!CGRectEqualToRect(g, v.frame)) { v.frame = g; [v setNeedsLayout]; }
+}
+
+// 条带内收集**所有**合格层（父与子都收：全部夹到同一绝对几何，
+// 于是「可见的那一层无论在哪一级」都必然收到目标宽度，且两层叠加不会翻倍）
+static void GCNarrowCollect(UIView *v, int depth, NSMutableArray *out) {
+    if (depth > 6) return;
+    UIWindow *w = v.window;
+    if (!w) return;
+    CGFloat sh = w.bounds.size.height;
+    if (GCNarrowIsBar(v, NULL)) [out addObject:v];
+    for (UIView *c in v.subviews) {
+        if (c.hidden || c.alpha < 0.05) continue;
+        CGRect cwr = GCNarrowWindowRect(c, c.frame);
+        if (CGRectIsNull(cwr)) continue;
+        if (CGRectGetMaxY(cwr) < sh * 0.55) continue;      // 剪枝：只进下屏子树
+        GCNarrowCollect(c, depth + 1, out);
+    }
+}
+
+// 重扫条带：发现 → 立即夹一次 → 挂三重钳位 → 记入弱引用表
+static void GCNarrowDiscover(void) {
+    GCNarrowDirty = NO;
+    UIWindow *w = GCBarWindow();
+    if (!w || w.bounds.size.width < 200) return;
+    UIView *root = w.rootViewController.view ?: w;
+    NSMutableArray *found = [NSMutableArray array];
+    GCNarrowCollect(root, 0, found);
+    if (!GCNarrowTargets) GCNarrowTargets = [NSHashTable weakObjectsHashTable];
+    for (UIView *v in found) {
+        GCNarrowHookClass(v.class);
+        [GCNarrowTargets addObject:v];
+        GCNarrowFixInPlace(v);
+    }
+}
+
+// 每拍轻量复核：只比宽度，达标立即放行（幂等）；不重扫树
+static void GCNarrowRecheck(void) {
+    if (GCNarrowDirty) GCNarrowDiscover();
+    if (!GCNarrowTargets) return;
+    UIWindow *w = GCBarWindow();
+    if (!w || w.bounds.size.width < 200) return;
+    CGFloat target = w.bounds.size.width - 2 * GCBarInset;
+    for (UIView *v in GCNarrowTargets.allObjects) {
+        if (!v.window) continue;
+        if (v.frame.size.width > target + 0.5) GCNarrowFixInPlace(v);
+    }
+}
+
+// 对外接口（兼容 v1 调用点）：只标脏 —— 真正的重扫交给每拍 tick，
+// 避免在 App 的 layoutSubviews 里做整树扫描（省开销、也避免重入）
+static void GCNarrowOneBar(UIView *bar) { (void)bar; GCNarrowSetDirty(); }
 
 // 0.9.4：删除 IsBlurOverlayView / GCCColorStr / GCCScreenMapMean
 // （审计确认零引用的诊断期遗留，编译器 -Wunused-function 实证）。
