@@ -1512,6 +1512,51 @@ Amap 私有类名（`WINPermanentCompassView`/`WINLiteWidgetGroupView`/…）与
 本地双包门禁 **15/16 项 [OK]、exit 0**；体内版本串 `0.9.21` ×1、`0.9.20` 残留 **0**；
 敏感明文 0、本地符号 0（加固不回退）。
 
+### §AI · 0.9.22 —— 搜索栏 / 底栏缩窄（对原生截图逐像素定量后定值）
+
+**起因**：老大给出原生截图并要求「把搜索栏和底栏缩窄一点，变窄多少你决定，优化整体最佳视觉」。
+
+**原生定量**（截图 1179px @3x = 393×852pt，逐像素测边界）
+
+| 元素 | 左→右 | 宽 | 两侧留白 |
+|:--|:--|:--|:--|
+| 搜索栏可见白胶囊 | 10.7 → 382.3pt | 371.6pt | 10.7pt |
+| 底栏（首页/我的）可见胶囊 | ≈9.5 → 383.5pt | 374pt | ≈10pt |
+| 右侧地图控件（+ / 图层 / 定位） | 353 → 383pt | 30pt | 右 10pt |
+
+**定值**：两条栏**两侧各 24pt**（宽 345pt，比原生窄 26.6pt ≈ 7.2%）。理由：与地图控件（10pt）拉开
+「内容层 vs 控件层」的层次，两条栏彼此**同宽同边距**；比原生明显但不激进。数值由单一常量
+`GCBarInset` 控制（调大 = 更窄）。
+
+**A1 施工（`src/GaodeClean.m`）**
+
+- `GCBarInset = 24.0` + `GCNarrowClamp()`：**绝对宽度规则**——凡「居中、两端都在屏内 40pt 内、
+  宽 ≥ 屏宽-60、高 ∈ [20, 屏宽×0.35]」的条，一律收到左端 24pt、宽 345pt；幂等（已达标即放行）。
+- `GCNarrowVisibleLayer()`：**运行时自适应取层** —— 容器可能是「全宽透明容器 + 内嵌可见胶囊」，
+  也可能是胶囊本身；优先取「最宽的合格直接子视图」，取不到就用容器自身，两种情况都能收窄。
+- `GCNarrowHookClass()`：给被判定的那一层挂 `setFrame:` 钳位 —— App 或我们自己的布局代码再写一次
+  也会被同规则夹回，**不会出现 100ms 级的撑开/回缩抖动**。
+- 挂点 4 处：搜索栏捕获处（`SearchBarView = bar` 之后）、底栏 `layoutSubviews` 钩子内、
+  `CachedTabBar = bar` 处、tick 每 5 拍（≈0.5s）兜底重认（实例/类被换掉时自动跟上）。
+
+**安全边界（防误伤整屏容器）**：只处理**被捕获的这两条栏及其直接子视图**，且必须同时满足上述几何条件，
+并显式排除窗口自身与 `window.rootViewController.view`。
+
+**验证（纯 C 复刻同一套规则仿真，`scripts/clamp_sim.c`，`gcc -O2 scripts/clamp_sim.c -lm && ./a.out`）**
+
+- 正例 **5/5**：容器满屏宽 / 胶囊内缩 10.7 / 底栏容器 / 底栏胶囊 / 底栏高 70pt → 全部收到 **x=24、w=345（两侧 24）**
+- **幂等 ✓**：连夹两次，第二次一像素不变
+- 反例 **7/7 不动**：窗口根内容视图（393×852）、窗口自身、200pt 窄视图、非居中宽视图、
+  过高视图（200pt > 屏宽×0.35）、超屏宽、端头太靠左（L=60）
+- 小屏：320pt 屏 → 272pt 宽（同样 24pt 边距，不越界）
+
+**同类问题自查（施工中抓到）**：一度新增 `HookVoid(GCStrAt(88), GCStrAt(92), …)` 想再加一个入口，
+但清单第 92 项是 `AUGlobalBlurService`（**类名，不是 selector**，91 才是 `layoutSubviews`）——
+属无效空钩子。改为把缩窄挂进**既有**的底栏 `layoutSubviews` 钩子。
+
+**版本**：0.9.22；`control` 与 `kGCVersion` 两处同步；双跑 0 警告；混淆回环 295/295 PASS；
+本地双包门禁 15/16 项 [OK]、exit 0；体内版本串 `0.9.22` ×1。
+
 ## 五、教训
 
 1. **视图「不见了」按三个通道依次排除** — `hidden` → `alpha` → `removeFromSuperview`；
@@ -1689,6 +1734,7 @@ cmp <(ar p dist/*.deb data.tar.gz | tar xzO ./var/jb/.../GaodeClean.dylib) dist/
 0.9.19  §AE：2D/3D 真身 `WINPermanentCompassView`（三级识别 + 直钩 layout/didMoveToWindow）
 0.9.20  §AF 清探针清日志 + §AG 最高级加固：全量字符串混淆加密 + 链接期符号剥离  ← 当前（采用）
 0.9.21  §AH：面向用户的详情文案「只讲功能」+ 补做爱源地址（功能与 0.9.20 一致）  ← 当前（采用）
+0.9.22  §AI：搜索栏 / 底栏缩窄（两侧各 24pt，宽 345pt，两条栏同宽对齐）  ← 当前（采用）
 ```
 
 ---
@@ -1707,7 +1753,7 @@ cmp <(ar p dist/*.deb data.tar.gz | tar xzO ./var/jb/.../GaodeClean.dylib) dist/
 # ① 安装路径标识（必须叫 GaodeClean.dylib，无法也不该隐藏）
 strings GaodeClean.dylib | grep -i gaodeclean        # /Library/.../GaodeClean.dylib
 # ② 版本串（门禁与装机核对依赖；由构造函数内存屏障钉住）
-strings GaodeClean.dylib | grep -F 0.9.21            # 0.9.21  ×1
+strings GaodeClean.dylib | grep -F 0.9.22            # 0.9.22  ×1
 ```
 
 **无任何自定义日志**：0.9.20 起 `[GaodeClean]` 前缀命中 **0**，启动不再打印版本行。
