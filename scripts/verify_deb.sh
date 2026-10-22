@@ -184,8 +184,12 @@ else
   bad "中文关键词仍有明文（${CNHIT} 个）"
 fi
 # 7c 本地符号应被链接期剥离（-Wl,-x）
+#     注意：必须用 { ... || true; } 包住 nm。脚本开头是 set -euo pipefail，
+#     在 iSH 上 nm 读 Mach-O 会非零退出（busybox nm 不支持），pipefail 会
+#     把整条管道判失败 ⇒ set -e 直接终止脚本 ⇒ 脚本静默 exit 1（既无 FAIL
+#     也无「核验通过」，本次实测踩到）。包住后 nm 失败只降级为「无法核验」。
 if command -v nm >/dev/null 2>&1; then
-  LOCALSYM=$(nm -a "$DYL" 2>/dev/null | awk '$2=="t"||$2=="s"' | wc -l | tr -d ' ')
+  LOCALSYM=$( { nm -a "$DYL" 2>/dev/null || true; } | awk '$2=="t"||$2=="s"' | wc -l | tr -d ' ')
   if [ "${LOCALSYM:-1}" -le 2 ]; then
     ok "本地符号已剥离（残留 ${LOCALSYM}）"
   else
