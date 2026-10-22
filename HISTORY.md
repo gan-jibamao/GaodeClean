@@ -1265,6 +1265,15 @@ A4：`control` → 0.9.17；README 版本行/功能表/版本链/门禁表同步
 
 **关键文件**：`src/GaodeClean.m`（3 处常量）、`control`、`README.md`。
 
+**A6 · 发布门禁补强（本轮自身踩坑的固化）**
+
+| # | 事实 | 修法 |
+|:--|:--|:--|
+| 1 | 0.9.17 只改了 `control`/文档，**漏改源码 `kGCVersion`（行 21）** ⇒ 包名是 0.9.17、体内日志却仍报 0.9.16 | 改 `kGCVersion = @"0.9.17"`；`scripts/verify_deb.sh` 新增**版本串一致性断言**（control 的 `Version` 必须能在体内找到 + 不得残留同族旧版本串） |
+| 2 | 新断言首跑「误判失败」——真因是脚本自己的坑：`set -o pipefail` + `strings \| grep -q`，grep 命中即退出 → `strings` 吃 **SIGPIPE(141)** → 管线状态非零 → **命中被读成未命中** | 所有断言改为「先取值再比较」：`HIT=$(strings … \| grep -cF … \|\| true); [ "$HIT" -gt 0 ]`。同一坑在 GCLog 哨兵处已存在（方向相反 ⇒ **假通过**），一并修掉 |
+
+**验证**：新断言对「刚发布的缺陷包」判定 FAIL、对修正后的本地包判定 PASS（正反两向都验过）。
+
 ## 五、教训
 
 1. **视图「不见了」按三个通道依次排除** — `hidden` → `alpha` → `removeFromSuperview`；
