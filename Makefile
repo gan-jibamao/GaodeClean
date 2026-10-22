@@ -32,4 +32,11 @@ ifeq ($(FINALPACKAGE),1)
 GaodeClean_CFLAGS += -DGAODECLEAN_STRIP_LOGS=1
 endif
 
+# 真机取证包（0.9.18 起也可由 CI 出）：
+#   make package FINALPACKAGE=0 DIAG=1 THEOS_PACKAGE_SCHEME=<scheme>
+#   → 版本号由 workflow 改写为 <base>+diag3，包名自带 +diag3，内容为未剥离 + 诊断
+ifeq ($(DIAG),1)
+GaodeClean_CFLAGS += -DGAODECLEAN_DIAG_LOG=1
+endif
+
 include $(THEOS_MAKE_PATH)/tweak.mk
