@@ -10,13 +10,15 @@ def macho_slices(path):
         data = f.read(8)
     magic = struct.unpack('>I', data[:4])[0]
     out = []
-    if magic in (0xcafebabe, 0xcafebabf):  # FAT
+    if magic in (0xcafebabe, 0xcafebabf):  # FAT / FAT64
+        step = 20 if magic == 0xcafebabe else 32
         with open(path, 'rb') as f:
             f.seek(4)
             n = struct.unpack('>I', f.read(4))[0]
             for _ in range(n):
-                cpu, sub = struct.unpack('>ii', f.read(8))
-                f.read(16)
+                # 必须按**无符号**读：arm64e 的 cpusubtype 是 0x80000002（ABI64_PAC 标志）
+                cpu, sub = struct.unpack('>II', f.read(8))
+                f.read(step - 8)
                 out.append((cpu, sub))
     else:
         with open(path, 'rb') as f:
