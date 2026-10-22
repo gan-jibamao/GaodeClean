@@ -96,8 +96,8 @@ check:
 # 逐条比对 + 校验头内 FNV 摘要；这一步保证「加密后仍 100% 解得原串」。
 	@$(CLANG) -O2 -Wall -Wextra -I src -o /tmp/obf_selftest scripts/obf_selftest.c \
 	  && /tmp/obf_selftest
-	$(CC) -O2 -Wall -Wextra -o /tmp/narrow_v4_sim scripts/narrow_v4_sim.c -lm \
-	  && /tmp/narrow_v4_sim | tail -1
+	$(CC) -O2 -Wall -Wextra -o /tmp/narrow_v5_sim scripts/narrow_v5_sim.c -lm \
+	  && /tmp/narrow_v5_sim | tail -1
 	@echo "check: 全部通过"
 
 # 0.9.14：带诊断日志的调试包（不发版，真机排查用）

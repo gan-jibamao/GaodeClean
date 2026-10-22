@@ -18,7 +18,7 @@
 // ---- jibamao 个人标识（编译进 dylib，可用 strings 核对）----
 static NSString *const kGCAuthor      = @"jibamao";
 static NSString *const kGCRepo        = @"https://gan-jibamao.github.io/";
-static NSString *const kGCVersion     = @"0.9.25";
+static NSString *const kGCVersion     = @"0.9.26";
 
 // 0.9.18（A1）：底边间隙**按控件分开**，对表原生（搜索栏白底顶边 = 702.6pt）
 //   车机钮（连接车机 · WINDeviceInterconnectWidget）：原生底 652 → 间隙 50.6 → 取 50
@@ -106,7 +106,7 @@ static __weak UIView *SearchBarView;   // 0.5.58   // 0.5.55：用于判断当�
 static void UpdateMask(UIView *page);
 static void Schedule(void);
 static void GCNarrowOneBar(UIView *bar);   // 0.9.22（A1）搜索栏/底栏缩窄
-static BOOL GCNarrowAlike(UIView *v);            // 0.9.25（A1）同口径合格判定
+static BOOL GCNarrowFullLike(UIView *v);                // 0.9.26（A1）满宽包装容器口径（> 屏宽-12）
 static UIView *GCNarrowInnerBarDescendant(UIView *v);   // 0.9.25（A1）最内层 bar 形状层
 static BOOL GCNarrowInSearchSubtree(UIView *v);         // 0.9.25（A1）是否在捕获的搜索栏子树内
 static BOOL GCNarrowInnerLike(UIView *v);               // 0.9.25（A1）内层胶囊口径
@@ -841,6 +841,8 @@ static void HookVoid(NSString *name, NSString *methodName, void (^after)(id)) {
 // 定值：两侧各 24pt（宽 = 屏宽-48）；单一常量 GCBarInset 控制，调大 = 更窄。
 // 防回弹：给判定层挂 setFrame:/setBounds:/setCenter: 三重钳位 + 每拍轻量复核兜底。
 static const CGFloat GCBarInset = 24.0;      // 两侧留白（pt）：调大=更窄
+static const CGFloat GCBarMinH  = 46.0;      // 0.9.26（A2）：夹取高度下限 —— 两栏可见胶囊实测
+                                             //   53.6/58.6pt，46 恰好隔离 ~36-40pt 文本框
 static NSMutableSet *GCNarrowHooked;         // 已挂钳位的类名
 static NSHashTable  *GCNarrowTargets;        // 已判定的可见层（弱引用，不保活）
 static BOOL          GCNarrowDirty = YES;    // 需要重扫条带
@@ -886,7 +888,7 @@ static BOOL GCNarrowInSearchSubtree(UIView *v) {
     return NO;
 }
 
-// 「内层胶囊」口径：比 GCNarrowAlike 宽松（下限 sw-120），但**排除满宽容器**（> sw-12）。
+// 「内层胶囊」口径：宽 ∈ (屏宽-120, 屏宽-12)，即「比满宽容器窄、又足够宽的可见胶囊」。
 // 这条「排除满宽」正是区分「包装容器」与「里面的白胶囊」的判据。
 static BOOL GCNarrowInnerLike(UIView *v) {
     if (!v || !v.window || !v.superview) return NO;
@@ -925,6 +927,18 @@ static UIView *GCNarrowInnerBarDescendant(UIView *v) {
     return best;
 }
 
+// 0.9.26（A1）：满宽口径 —— 只有比「屏宽-12」还宽的层才算「包装容器」（白胶囊 374 ≤ 381 不算）。
+// 旧规则「有内层胶囊就放行」把白胶囊自己（肚子里装着 ~354pt 文本框）也误判成包装容器放行
+// ⇒ 搜索栏整条回原生（0.9.25 实测胶囊 [10.3, 383.3]，与原生 [10.7, 382.3] 逐位吻合）。
+static BOOL GCNarrowFullLike(UIView *v) {
+    UIWindow *w = v.window;
+    if (!w) return NO;
+    if (w.bounds.size.width < 200) return NO;
+    CGRect win = GCNarrowWindowRect(v, v.frame);
+    if (CGRectIsNull(win)) return NO;
+    return win.size.width > w.bounds.size.width - 12;
+}
+
 // 收窄规则（绝对几何、幂等）：左端对齐 GCBarInset，宽度锁 屏宽-2*inset
 static CGRect GCNarrowClamp(UIView *v, CGRect f) {
     UIWindow *w = v.window;
@@ -932,23 +946,24 @@ static CGRect GCNarrowClamp(UIView *v, CGRect f) {
     CGFloat sw = w.bounds.size.width;
     if (sw < 200) return f;
     CGFloat target = sw - 2 * GCBarInset;
-    // 0.9.25（A2）：搜索栏的**包装容器**整体不碰 —— 交给里面的「可见白胶囊」。
-    //   实测：容器 393 → 白胶囊 371.7（内缩 10.65/侧）；夹容器会让白胶囊只剩 323.6
-    //   ⇒ 两栏不等宽（搜索 324 / 底栏 346）。不碰容器 ⇒ App 每次仍把白胶囊摆到 371.7，
-    //   我们把它夹到 345 ⇒ 稳定且与底栏齐平。
+    // 0.9.25（A2）观察：搜索栏「容器 393 / 白胶囊 371.7（内缩 10.65/侧）」两层并存，
+    //   夹容器会让白胶囊只剩 323.6 ⇒ 两栏不等宽（搜索 324 / 底栏 346）。
+    //   0.9.26（A1）补上「满宽」前提：只有 > 屏宽-12 的容器才放行，白胶囊（374）重新进入夹取。
     BOOL inSearch = GCNarrowInSearchSubtree(v);
-    if (inSearch && GCNarrowInnerBarDescendant(v)) return f;      // 包装容器：放行
+    if (inSearch && GCNarrowFullLike(v) && GCNarrowInnerBarDescendant(v)) return f;   // 只放行满宽包装
     BOOL isInner = inSearch && GCNarrowInnerLike(v);               // 内层白胶囊
-    // 闸门：普通层只收窄；内层白胶囊允许「回补」（被容器内缩吃窄时自愈）
+    // 闸门：偏宽一律收窄；内层白胶囊允许就地回补（被容器内缩吃窄时自愈）——
+    // 门槛与 Recheck 的通用回补统一为 0.82（实测搁浅值 301.3 = 0.873×目标）。
     BOOL need = (f.size.width > target + 0.5);
-    if (!need && isInner && f.size.width < target - 0.5 && f.size.width >= target * 0.85) need = YES;
+    if (!need && isInner && f.size.width < target - 0.5 && f.size.width >= target * 0.82) need = YES;
     if (!need) return f;
     CGRect win = GCNarrowWindowRect(v, f);
     if (CGRectIsNull(win)) return f;
-    CGFloat minW = isInner ? target * 0.8 : sw - 60;
+    CGFloat minW = target * 0.82;                                  // 与回补门槛一致（0.9.26（A4））
     if (f.size.width < minW) return f;
-    if (f.size.height < 20 || f.size.height > sw * 0.35) return f;   // 0.9.24：放宽到 137.6pt（搜索栏可点区域偏高）
-    if (win.origin.x < -1 || CGRectGetMaxX(win) > sw + 1) return f;
+    if (f.size.height < GCBarMinH || f.size.height > sw * 0.35) return f;  // 0.9.26（A2）：下限 46pt 隔离文本框
+    // 0.9.26（A3）：±6% 轻微出屏的「跨屏包装」（底栏包装原生 [-12.5, 405.5]）也允许夹取。
+    if (win.origin.x < -sw * 0.06 || CGRectGetMaxX(win) > sw * 1.06) return f;
     if (win.origin.y < -1 || CGRectGetMaxY(win) > w.bounds.size.height + 1) return f;
     if (fabs(CGRectGetMidX(win) - sw * 0.5) > 4) return f;
     f.origin.x += GCBarInset - win.origin.x;                       // 左端对齐到 24pt
@@ -1048,6 +1063,30 @@ static void GCNarrowDiscover(void) {
     }
 }
 
+// 0.9.26（A4）回补专用通道：把层直接写到目标几何。
+// 为什么不走 GCNarrowFixInPlace？因为它内部要过 GCNarrowClamp 的 need 闸门 ——
+// 而「偏窄回补」正是闸门放行的情形（301.3 不满足 width > 目标+0.5），走闸门必然落空。
+// 直接写目标宽 345 后，hook 里 Clamp 看到的是「恰好达标」⇒ 原样放行，不形成拉锯。
+static void GCNarrowForceTarget(UIView *v) {
+    if (!v || !v.window) return;
+    UIWindow *w = v.window;
+    CGFloat sw = w.bounds.size.width;
+    if (sw < 200) return;
+    CGRect f = v.frame;
+    CGRect win = GCNarrowWindowRect(v, f);
+    if (CGRectIsNull(win)) return;
+    if (f.size.height < GCBarMinH || f.size.height > sw * 0.35) return;
+    if (fabs(CGRectGetMidX(win) - sw * 0.5) > 4) return;
+    f.origin.x += GCBarInset - win.origin.x;
+    f.size.width = sw - 2 * GCBarInset;
+    v.frame = f;
+}
+
+// 0.9.26（A4）：捕获链来源集（回补只对它生效，防几何发现收进来的旁支层被误回补）
+static NSHashTable *GCNarrowChainSet;
+// 0.9.26（A4）：每拍宽度快照（弱键），用于「静止确认」——动画中间帧不抢戏
+static NSMapTable *GCNarrowWidthSnap;
+
 // 每拍轻量复核：只比宽度，达标立即放行（幂等）；不重扫树
 static void GCNarrowRecheck(void) {
     if (GCNarrowDirty) GCNarrowDiscover();
@@ -1055,26 +1094,32 @@ static void GCNarrowRecheck(void) {
     UIWindow *w = GCBarWindow();
     if (!w || w.bounds.size.width < 200) return;
     CGFloat target = w.bounds.size.width - 2 * GCBarInset;
+    if (!GCNarrowWidthSnap) GCNarrowWidthSnap = [NSMapTable weakToStrongObjectsMapTable];
     for (UIView *v in GCNarrowTargets.allObjects) {
         if (!v.window) continue;
         CGFloat wv = v.frame.size.width;
+        NSNumber *prev = [GCNarrowWidthSnap objectForKey:v];
+        [GCNarrowWidthSnap setObject:@(wv) forKey:v];
         if (wv > target + 0.5) { GCNarrowFixInPlace(v); continue; }      // 偏宽：收窄
-        // 0.9.25（A3）自愈：搜索栏「内层白胶囊」被容器内缩吃窄时回补到目标宽。
-        //   仅限 [0.85·目标, 目标)：既覆盖 323.6 这种被吃窄的情形，
-        //   又不会去跟 App 正常收缩（比如整条搜索栏收成小药丸）抢戏。
-        if (GCNarrowInSearchSubtree(v) && GCNarrowInnerLike(v) &&
-            wv < target - 0.5 && wv >= target * 0.85) {
-            GCNarrowFixInPlace(v);
+        // 0.9.26（A4）回补门禁双向化：不再限「搜索栏内层」—— 底栏可见胶囊会被 App
+        //   按「包装宽-44」重排成 301pt（0.873×目标，实测 301.3），旧条件不在搜索
+        //   子树 ⇒ 永久搁浅。现覆盖捕获链来源集全部层；下限 0.82 留 5pt 余量并排除
+        //   ≤283pt 的合法小药丸；「静止确认」要求本拍与上拍宽度一致（动画帧不动）。
+        if (wv < target - 0.5 && wv >= target * 0.82 &&
+            [GCNarrowChainSet containsObject:v] &&
+            prev && fabs(prev.doubleValue - wv) < 0.5) {
+            GCNarrowForceTarget(v);        // 0.9.26（A4）：绕开 need 闸门直写目标几何
         }
     }
 }
 
-// ── 0.9.24（A1）捕获引用路径 ─────────────────────────────────────────────────
-// 0.9.22（v1）就是靠这条路径把搜索栏收窄的：从**捕获到的视图**出发取「最宽的合格层」。
-// v2 只按几何发现、且高度上限压到 110pt，把搜索栏容器（可点区域 ~110-137pt）排除掉了
-// ⇒ 搜索栏回到原生宽度。v3 两条路径并存：捕获引用（对搜索栏有效）+ 几何发现（对底栏有效）。
-static BOOL GCNarrowAlike(UIView *v) {          // 与 GCNarrowIsBar 同口径，但不要求下屏条带、
-    UIWindow *w = v.window;                     // 且高度上限放宽到 屏宽×0.35
+// ── 0.9.26（A3）捕获链「全收」路径 ───────────────────────────────────────────
+// 0.9.22（v1）靠「捕获引用 → 取最宽合格层」把搜索栏收窄；0.9.23（v2）改成几何发现补底栏；
+// 0.9.24（v3）两条路径并存；0.9.25（v4）改为「深度≤4 挑最宽内层胶囊」——但等宽 374 时
+// BFS 先遇到的是**外层包装**，被夹的是包装、可见胶囊被 App 按「包装宽-44」重排成 301pt
+// （实测 301.3）⇒ 两栏不等宽。v5 起不再「挑一层」：链上所有合格层一起收编、同夹绝对矩形。
+static BOOL GCNarrowChainHit(UIView *v) {       // 收编口径：宽 ≥ 屏宽-120、高 ∈ [GCBarMinH, 屏宽×0.35]、
+    UIWindow *w = v.window;                     // 居中(≤6)，允许 ±6% 轻微出屏（跨屏包装）
     if (!w || !v.superview) return NO;
     if (v == w || v == w.rootViewController.view) return NO;
     if (v.hidden || v.alpha < 0.05) return NO;
@@ -1082,33 +1127,41 @@ static BOOL GCNarrowAlike(UIView *v) {          // 与 GCNarrowIsBar 同口径�
     if (sw < 200) return NO;
     CGRect win = GCNarrowWindowRect(v, v.frame);
     if (CGRectIsNull(win)) return NO;
-    if (win.size.width < sw - 60) return NO;
-    if (win.size.height < 20 || win.size.height > sw * 0.35) return NO;
-    if (win.origin.x < -1 || CGRectGetMaxX(win) > sw + 1) return NO;
+    if (win.size.width < sw - 120) return NO;
+    if (win.size.height < GCBarMinH || win.size.height > sw * 0.35) return NO;
+    if (win.origin.x < -sw * 0.06 || CGRectGetMaxX(win) > sw * 1.06) return NO;
     if (win.origin.y < -1 || CGRectGetMaxY(win) > sh + 1) return NO;
-    if (fabs(CGRectGetMidX(win) - sw * 0.5) > 4) return NO;
+    if (fabs(CGRectGetMidX(win) - sw * 0.5) > 6) return NO;
     return YES;
 }
-static UIView *GCNarrowPickFrom(UIView *bar) {  // 0.9.25（A1）：优先「最内层可见胶囊」
-    if (!bar || !bar.window) return nil;
-    UIView *inner = GCNarrowInnerBarDescendant(bar);   // 搜索栏：拿到白胶囊；底栏：一般拿到自身子树里的可见层
-    if (inner) return inner;
-    if (GCNarrowAlike(bar)) return bar;
-    for (UIView *v in bar.subviews) {
-        if (v.hidden || v.alpha < 0.05) continue;
-        if (GCNarrowAlike(v)) return v;
+// BFS 深度 ≤4：bar 自身 + 全部合格后代一起收编（不再「挑一层」）
+static void GCNarrowCollectChain(UIView *bar, NSMutableArray *out) {
+    if (!bar || !bar.window) return;
+    if (GCNarrowChainHit(bar)) [out addObject:bar];
+    NSMutableArray *cur = [NSMutableArray arrayWithObject:bar];
+    for (int d = 0; d < 4 && cur.count; d++) {
+        NSMutableArray *next = [NSMutableArray array];
+        for (UIView *p in cur) {
+            for (UIView *c in p.subviews) {
+                if (c.hidden || c.alpha < 0.05) continue;
+                [next addObject:c];
+                if (GCNarrowChainHit(c)) [out addObject:c];
+            }
+        }
+        cur = next;
     }
-    return nil;
 }
 static NSHashTable *GCNarrowCaptured;           // 捕获引用（弱引用，不保活）
 static void GCNarrowFromCaptured(void) {
     if (!GCNarrowCaptured) return;
     if (!GCNarrowTargets) GCNarrowTargets = [NSHashTable weakObjectsHashTable];
-    for (UIView *bar in GCNarrowCaptured.allObjects) {
-        UIView *v = GCNarrowPickFrom(bar);
-        if (!v) continue;
+    if (!GCNarrowChainSet) GCNarrowChainSet = [NSHashTable weakObjectsHashTable];
+    NSMutableArray *found = [NSMutableArray array];
+    for (UIView *bar in GCNarrowCaptured.allObjects) GCNarrowCollectChain(bar, found);
+    for (UIView *v in found) {
         GCNarrowHookClass(v.class);
         [GCNarrowTargets addObject:v];
+        [GCNarrowChainSet addObject:v];        // 0.9.26（A4）：记为捕获链来源（回补资格）
         GCNarrowFixInPlace(v);
     }
 }
