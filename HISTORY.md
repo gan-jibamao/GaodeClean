@@ -1340,6 +1340,48 @@ make -f Makefile.local RELEASE=0 EXTRA="-DGAODECLEAN_DIAG_LOG=1" OUT=distdiag CO
 **附带门禁**：交付前**逐包开包核验**（`dpkg-deb -x` 后查体内 dylib）：
 正式包必须 `GCLog命中=0 且 DIAG命中=0`，调试包才允许两者命中。本轮据此拦下污染件。
 
+---
+
+### §AE · 0.9.19 —— 2D/3D（地图类型）按钮：真身是 `WINPermanentCompassView`
+
+**起因**：0.9.18 真机反馈「2D3D 还是没动」。0.9.18（A3）写了识别器却**从未命中**。
+
+**真机 diag 铁证**（0.9.18+diag3 日志 `shared-449BFE16_gaodeclean-diag.log`，0.9.19 段 665 行起）：
+
+```
+RIGHT: ... WINPermanentCompassView(339,286,44x44)hid0^MapWidgetContainerView
+             UIView(339,286,44x44) UIVisualEffectView(339,286,44x44) ...
+```
+
+- 那个 44x44 圆钮 = `WINPermanentCompassView`（Amap 类名复用，父类 `MapWidgetContainerView`）
+- 它的子视图**只有毛玻璃**（`UIVisualEffectView` 一系），**子树里没有任何 2D/3D 文本视图**
+  ⇒ 0.9.18 的「子树含 2D/3D 文本」判定**必然失败**（文字是自绘/图片）
+- `RIGHT:` 行封顶 14 条，早期采样被别的条目挤满，所以 6.242s 前看不到它（不是不存在）
+
+**位置铁证（原生录屏模板匹配，同一模板同一口径）**：
+
+| | 2D 按钮顶 | 胶囊顶 | 差 |
+|:--|--:|--:|--:|
+| 原生 | **536.7pt**（score 0.622） | 594 | **57.3** |
+| 我们 | **283.0pt**（score 0.627） | **340（冷启动瞬态位）** | **57.0** |
+
+⇒ **App 摆 2D 按钮的规则 = 「胶囊顶 − 57.3」**；我们的构建里 App 用胶囊的**冷启动瞬态位(340)**
+当锚（我们 0.9.16 起把胶囊按在 340），于是按钮被钉在 283，**与原生差 253.7pt ≈ 594−340 = 254**。
+
+**施工 A1–A4**：
+- **A1** `GCGapMapType` 15.0 → **13.3**（原生 594 − 580.7；0.9.18 的 15 偏 1.7pt）
+- **A2** `GCCFindMapTypeButton` 重写为**三级识别**：
+  ① 文本判定（保留，跨版本通用）→ ② **类名判定**（`Compass`/`MapType`/`MapStyle`/`MapMode`）
+  → ③ 兜底「BFS 序里第一个 40..48 方形」；
+  新增 `GCCIsClaimedWidget`（不碰已认领的车机钮/胶囊/组容器及其祖先后代）；
+  `AlignMapTypeButton` 加**重入保护** + **`SearchBarSettled` 闸**（绝不拿瞬态位当锚）
+- **A3** 新增 `WINPermanentCompassView` 的 `layoutSubviews` / `didMoveToWindow` 两条钩子：
+  每次 App 布局完立刻按「胶囊顶 − GCGapMapType」纠正，不必等 200ms 轮询（类名与 tick 双保险）
+- **A4** `GCCDiag.h` 新增 `MAPTYPE:` 诊断行（命中档位 + 类名 + frame + 目标底），下一轮日志可自证
+
+**验证**：双跑门禁 0 警告；diag 变体编译通过（`MAPTYPE:`/`未识别到`/`0.9.19 2D/3D 摆位` 三条
+字符串经 UTF-16 搜索均在体内 —— 中文字面量编成 `__ustring`，`strings` 搜不到是正常现象）。
+
 ## 五、教训
 
 1. **视图「不见了」按三个通道依次排除** — `hidden` → `alpha` → `removeFromSuperview`；

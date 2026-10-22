@@ -18,7 +18,7 @@
 static NSString *const kGCAuthor      = @"jibamao";
 static NSString *const kGCRepo        = @"https://gan-jibamao.github.io/";
 static NSString *const kGCSection     = @"jibamao-Tweaks";
-static NSString *const kGCVersion     = @"0.9.18";
+static NSString *const kGCVersion     = @"0.9.19";
 static NSString *const kGCSignature   = @"GaodeClean by jibamao";
 
 // 0.9.18（A1）：底边间隙**按控件分开**，对表原生（搜索栏白底顶边 = 702.6pt）
@@ -27,8 +27,10 @@ static NSString *const kGCSignature   = @"GaodeClean by jibamao";
 //   0.9.17 之前两者共用 20 ⇒ 车机钮低了 30pt，被塞进天气行（真机铁证：我们 648..682 vs 原生 616..652）
 static const CGFloat GCGapCar     = 50.0;
 static const CGFloat GCGapCapsule = 20.0;
-// 0.9.18（A3）：2D/3D 按钮与胶囊的原生间隙（原生：2D 底 580、胶囊顶 595）
-static const CGFloat GCGapMapType = 15.0;
+// 0.9.19（A1）：2D/3D 按钮与胶囊的原生间隙 —— 按原生实测校准为 13.3
+//   原生：2D 按钮顶 536.7 + 高 44 → 底 580.7；胶囊顶 594 ⇒ 间隙 13.3
+//   （0.9.18 用的 15 偏 1.7pt；本轮「真机 diag + 原生录屏模板匹配」双证）
+static const CGFloat GCGapMapType = 13.3;
 
 // 对外签名（供 log / 诊断 / 二次核对使用）
 const char *GaodeCleanSignature(void) {
@@ -1755,39 +1757,100 @@ static BOOL GCCViewTreeHasMapTypeLabel(UIView *v, NSInteger depth) {
     return NO;
 }
 
+// ---- 0.9.19（A2）：2D/3D（地图类型）按钮识别重写 --------------------------------
+// 0.9.18 只用「子树里有 2D/3D 文本的 UILabel」判定 ⇒ 本机高德 17.00.2 **从未命中**。
+// 真机 diag 铁证（2026-10-22 0.9.18+diag3 日志）：右侧 (339,286) 那个 44x44 按钮
+//   类名 = WINPermanentCompassView，子视图只有 UIVisualEffectView（毛玻璃），
+//   其子树里**没有任何** 2D/3D 文本视图（文字是自绘/图片）⇒ 文本判定必然失败。
+// 现改为三级识别 + 唯一候选兜底，命中档位记进 GCReportedMapTypeTier 供 diag 打印。
+static __weak UIView *GCReportedMapType = nil;   // 仅诊断用（diag 构建才被读）
+static NSInteger GCReportedMapTypeTier = 0;
+
+static BOOL GCCViewIsUnder(UIView *v, UIView *anc) {   // v == anc 或其后代？
+    for (UIView *p = v; p; p = p.superview) if (p == anc) return YES;
+    return NO;
+}
+
+// 已被我们认领的控件（车机钮 / ⊙↰ 胶囊 / 原生组容器）及其祖先后代 —— 一律不碰
+static BOOL GCCIsClaimedWidget(UIView *v) {
+    UIView *cs[3] = { CachedCar, CachedRight, CachedLiteGroup };
+    for (int i = 0; i < 3; i++) {
+        UIView *c = cs[i];
+        if (!c) continue;
+        if (v == c || GCCViewIsUnder(v, c) || GCCViewIsUnder(c, v)) return YES;
+    }
+    return NO;
+}
+
 static UIView *GCCFindMapTypeButton(UIWindow *win, UIView *capsule) {
+    GCReportedMapTypeTier = 0;
     if (!win || !capsule || !capsule.window) return nil;
     CGRect cap = [capsule convertRect:capsule.bounds toView:win];
+    NSMutableArray<UIView *> *cands = [NSMutableArray array];
     NSMutableArray<UIView *> *queue = [NSMutableArray arrayWithObject:win];
-    for (NSUInteger i = 0; i < queue.count && queue.count < 2000; i++) {
+    for (NSUInteger i = 0; i < queue.count && queue.count < 4000; i++) {
         UIView *v = queue[i];
         [queue addObjectsFromArray:v.subviews];
-        if (v == win || v == capsule || v.hidden || v.alpha < 0.01) continue;
+        if (v == win || v == capsule) continue;
+        if (v.hidden || v.alpha < 0.5) continue;            // 只认可见的
+        if (GCCIsClaimedWidget(v)) continue;                // 不碰已认领控件
         CGSize sz = v.bounds.size;
         if (sz.width < 26 || sz.width > 64 || sz.height < 26 || sz.height > 64) continue;
         CGRect r = [v convertRect:v.bounds toView:win];
         if (CGRectGetMidX(r) < win.bounds.size.width * 0.70) continue;   // 右列
         if (CGRectGetMaxY(r) > CGRectGetMidY(cap)) continue;             // 必须在胶囊上方
-        if (!GCCViewTreeHasMapTypeLabel(v, 0)) continue;
-        return v;   // BFS：先命中的是「最外层且尺寸合规」的容器，即按钮本体
+        [cands addObject:v];                                             // BFS 序 = 外→内
+    }
+    // ① 文本判定（跨版本通用）
+    for (UIView *v in cands)
+        if (GCCViewTreeHasMapTypeLabel(v, 0)) { GCReportedMapTypeTier = 1; return v; }
+    // ② 类名判定（本机实测：WINPermanentCompassView）
+    for (UIView *v in cands) {
+        NSString *cn = NSStringFromClass(v.class).lowercaseString;
+        if ([cn containsString:@"compass"] || [cn containsString:@"maptype"] ||
+            [cn containsString:@"mapstyle"] || [cn containsString:@"mapmode"]) {
+            GCReportedMapTypeTier = 2;
+            return v;
+        }
+    }
+    // ③ 兜底：BFS 序里第一个 40..48 方形（最外层容器）
+    for (UIView *v in cands) {
+        CGSize sz = v.bounds.size;
+        if (sz.width >= 40 && sz.width <= 48 && sz.height >= 40 && sz.height <= 48) {
+            GCReportedMapTypeTier = 3;
+            return v;
+        }
     }
     return nil;
 }
 
 static void AlignMapTypeButton(UIView *capsule) {
+    static BOOL busy = NO;                       // 0.9.19（A2）：重入保护（layoutSubviews 里会被回调）
+    if (busy) return;
     if (!capsule || !capsule.window) return;
+    // 0.9.19（A2）：锚点没定格就绝不摆位 —— 这时胶囊本身还在瞬态位（340），
+    //   拿它当锚正是 App 摆错的原因，我们不能重蹈覆辙。
+    if (!SearchBarSettled) return;
+    busy = YES;
     UIWindow *win = capsule.window;
     UIView *btn = GCCFindMapTypeButton(win, capsule);
-    if (!btn) return;
-    CGRect cap = [capsule convertRect:capsule.bounds toView:win];
-    CGFloat targetBottom = CGRectGetMinY(cap) - GCGapMapType;
-    CGRect br = [btn convertRect:btn.bounds toView:win];
-    if (fabs(CGRectGetMaxY(br) - targetBottom) < 1) return;
-    // 刻意**不打** AlignedKey：它属于「胶囊/车机钮」那一套钳位，打上去会让
-    // HookWidgetSetFrame 的底边钳位（gap 50）也作用到这个按钮上，与这里打架。
-    CGRect f = btn.frame;
-    f.origin.y += (targetBottom - CGRectGetMaxY(br));
-    btn.frame = f;
+    GCReportedMapType = btn;
+    if (btn) {
+        CGRect cap = [capsule convertRect:capsule.bounds toView:win];
+        CGFloat targetBottom = CGRectGetMinY(cap) - GCGapMapType;
+        CGRect br = [btn convertRect:btn.bounds toView:win];
+        if (fabs(CGRectGetMaxY(br) - targetBottom) >= 1) {
+            // 刻意**不打** AlignedKey：它属于「胶囊/车机钮」那一套钳位，打上去会让
+            // HookWidgetSetFrame 的底边钳位（gap 50）也作用到这个按钮上，与这里打架。
+            CGRect f = btn.frame;
+            f.origin.y += (targetBottom - CGRectGetMaxY(br));
+            btn.frame = f;
+            GCLog(@"0.9.19 2D/3D 摆位 tier=%ld %@ 底 %.1f→%.1f（胶囊顶 %.1f）",
+                  (long)GCReportedMapTypeTier, NSStringFromClass(btn.class),
+                  CGRectGetMaxY(br), targetBottom, CGRectGetMinY(cap));
+        }
+    }
+    busy = NO;
 }
 
 static void AlignCornerWidgets(UIView *bar) {
@@ -2989,6 +3052,18 @@ static void InstallMinimalHome(void) {
     // 0.4.47：拦截两圆钮 setFrame:，对齐后 y 钉死，杜绝 app 挪回原生位置闪跳
     HookWidgetSetFrame(@"WINDeviceInterconnectWidget", GCGapCar);
     HookWidgetSetFrame(@"WINAJXCombinedWidgetView", GCGapCapsule);
+    // ---- 0.9.19（A3）：2D/3D（地图类型）圆钮 --------------------------------------
+    // 本机实测类名 = WINPermanentCompassView（Amap 17.00.2，44x44，父类 MapWidgetContainerView）。
+    // 真机 diag 铁证：App 只布局一次，且把它锚在**胶囊的冷启动瞬态位**(339,340) 上
+    //   ⇒ 按钮被摆到 y=283（原生 536.7），与「胶囊顶 − 57.3」的原生关系刚好差 254pt。
+    // 这里在它每次布局/上窗后立刻按「胶囊顶 − GCGapMapType」纠正，不必等 200ms 轮询；
+    //   未定格期间由 AlignMapTypeButton 内部判空返回（绝不拿瞬态位当锚）。
+    HookVoid(@"WINPermanentCompassView", @"layoutSubviews", ^(UIView *v) {
+        AlignMapTypeButton(CachedRight);
+    });
+    HookVoid(@"WINPermanentCompassView", @"didMoveToWindow", ^(UIView *v) {
+        AlignMapTypeButton(CachedRight);
+    });
     // 0.5.19：拦截天气行 setFrame:，对齐后钉死到车机钮右边
     // 0.5.1：线路按钮原生 hid=1，setHidden: 强制 NO，app 再藏也压不住
     {
