@@ -1455,3 +1455,9 @@ strings GaodeClean.dylib | grep -i jibamao
 `didMoveToWindow`/`layoutSubviews`/`setHidden`、ARC 运行时符号（`_objc_retain`/`_objc_release`/`_objc_storeStrong`）均在。
 本地版多出的是 `AlignCornerWidgets`/`CachedLiteGroup`/`SearchBarSettledY`/`ColdTicks` 等
 **static 函数与变量名**（只存在于符号表，theos 发布构建会剥掉）—— 属预期的发布加固，非功能缺失。
+
+**CI 版真机复验（2026-10-22，录屏 `video_44161DBD.mp4`）**：口径与本地版一致 ⇒ **中部裸露 0 帧**；
+竖列全帧扫描 240 命中、y 集合恒为 `{683px = 605.9pt}`（= 日志 win 606）；全宽粗网格 61 命中
+位置集合恒为 `{x=384, y=684}`（全屏唯一位置，0 幽灵）；搜索栏/相机/底栏与胶囊**同帧 2.300s** 出现，
+不早于搜索栏；右上「+/图层」1.900s 起在屏未被误伤。
+⇒ **CI 构建（theos/-Os）与本地构建（-O2）行为一致，通道迁移完成。**
