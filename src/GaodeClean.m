@@ -18,8 +18,17 @@
 static NSString *const kGCAuthor      = @"jibamao";
 static NSString *const kGCRepo        = @"https://gan-jibamao.github.io/";
 static NSString *const kGCSection     = @"jibamao-Tweaks";
-static NSString *const kGCVersion     = @"0.9.17";
+static NSString *const kGCVersion     = @"0.9.18";
 static NSString *const kGCSignature   = @"GaodeClean by jibamao";
+
+// 0.9.18（A1）：底边间隙**按控件分开**，对表原生（搜索栏白底顶边 = 702.6pt）
+//   车机钮（连接车机 · WINDeviceInterconnectWidget）：原生底 652 → 间隙 50.6 → 取 50
+//   ⊙/↰ 胶囊（WINAJXCombinedWidgetView）：原生底 683 → 间隙 19.5 → 取 20（0.9.17 已实测 Δ=0）
+//   0.9.17 之前两者共用 20 ⇒ 车机钮低了 30pt，被塞进天气行（真机铁证：我们 648..682 vs 原生 616..652）
+static const CGFloat GCGapCar     = 50.0;
+static const CGFloat GCGapCapsule = 20.0;
+// 0.9.18（A3）：2D/3D 按钮与胶囊的原生间隙（原生：2D 底 580、胶囊顶 595）
+static const CGFloat GCGapMapType = 15.0;
 
 // 对外签名（供 log / 诊断 / 二次核对使用）
 const char *GaodeCleanSignature(void) {
@@ -120,7 +129,7 @@ static void GCCArmTick(void); // 0.7.4(A3)：按前台/后台动态整备 tick �
 static NSMutableDictionary<NSString *, NSNumber *> *AjxCache;  // 0.7.2：类名→是否 AJX
 static void InstallSplashAdGuard(void);
 static void SplashAdTick(void);
-static void AlignOneWidget(UIView *bar, UIView *w, CGFloat barTop);
+static void AlignOneWidget(UIView *bar, UIView *w, CGFloat barTop, CGFloat gap);
 
 @class GCCState;
 @interface GCCLimit : NSObject
@@ -1224,8 +1233,12 @@ static void AlignWeatherRow(UIView *row) {
     inAlign = YES;
     UIWindow *win = row.window;
     CGRect carRect = [car convertRect:car.bounds toView:win];
-    CGPoint wantWin = CGPointMake(CGRectGetMaxX(carRect) + 8,
-                                  CGRectGetMidY(carRect) - row.bounds.size.height * 0.5);
+    // 0.9.18（A2）：对表原生 —— 车机钮在上、天气行在**正下方**且左对齐。
+    //   0.5.33 起这里写的是「搬到车机钮右侧」，那是当年的假设，从没对过表；
+    //   原生实测（原生录屏 vs 我们逐元素比对）：车机钮 616..652、天气行 670..690、
+    //   两者 x 均为 10 ⇒ 关系是「上下 + 左对齐」，间隙 18pt。
+    CGPoint wantWin = CGPointMake(carRect.origin.x,
+                                  CGRectGetMaxY(carRect) + 18);
     CGPoint wantInParent = [row.superview convertPoint:wantWin fromView:win];
     CGPoint wantCenter = CGPointMake(wantInParent.x + row.bounds.size.width * 0.5,
                                      wantInParent.y + row.bounds.size.height * 0.5);
@@ -1618,7 +1631,7 @@ static BOOL GCCIsLiteGroupCapsule(UIView *v) {
     return y > win.bounds.size.height * 0.25;
 }
 
-static void AlignOneWidget(UIView *bar, UIView *w, CGFloat barTop) {
+static void AlignOneWidget(UIView *bar, UIView *w, CGFloat barTop, CGFloat gap) {
     if (!w.window) return;
     UIWindow *win = bar.window;
     CGRect r = [w convertRect:w.bounds toView:win];
@@ -1629,7 +1642,8 @@ static void AlignOneWidget(UIView *bar, UIView *w, CGFloat barTop) {
     //   而搜索栏白底顶边两边都是 702.6pt（完全同位）⇒ 差值全部来自间隙：
     //   原生 19.5pt、我们只有 6.9pt。旧值 8 让 ⊙/↰（连接车机）整组低了 12.4pt，
     //   并压掉了它与 2D/3D 按钮之间的原生间隙。
-    CGFloat targetBottom = barTop - 20;
+    // 0.9.18（A1）：间隙按控件区分（GCGapCar / GCGapCapsule），不再共用。
+    CGFloat targetBottom = barTop - gap;
     if (fabs(CGRectGetMaxY(r) - targetBottom) >= 1) {
         CGRect f = w.frame;
         f.origin.y += (targetBottom - CGRectGetMaxY(r));
@@ -1709,6 +1723,73 @@ static void AlignWeatherRowTick(UIWindow *win) {
     AlignWeatherRow(Row);   // 0.9.3：被扣留的行也放行（对齐成功即恢复显示）
 }
 
+// ===========================================================================
+// 0.9.18（A3）—— 2D/3D（地图类型）按钮摆回 ⊙/↰ 胶囊正上方
+//
+// 事实（原生录屏 vs 我们 0.9.17，同口径逐元素比对）：
+//   原生  2D 按钮 y 543..580（底边 580），胶囊顶 595 ⇒ 间隙 15pt
+//   我们  2D 按钮 y 294..320（底边 325），而**组容器**（WINLiteWidgetGroupView）
+//         冷启动期停在 (339,340) ⇒ 325 与 340 的间隙同样是 15pt
+// ⇒ App 把 2D/3D 按钮锚在「组容器上方 15pt」，而我们的组容器在冷启动期还停在中部，
+//   于是 2D/3D 被永久锚到屏高 35%。胶囊本身已被我们摆正（599.7/632.5 与原生 Δ=0），
+//   但 App 的锚点用的是组容器、不是胶囊 ⇒ 必须显式把它摆回来。
+//
+// 识别（双守卫，避免误伤 + / 图层 / ⊙ / ↰）：
+//   ① 尺寸 26..64pt 方形   ② 位于右列（中心 x > 屏宽 0.70）
+//   ③ 子树（深度 ≤3）含文字为 2D / 3D 的 UILabel
+// 摆放：bottom = 胶囊顶 - 15（原生关系）
+// ===========================================================================
+static BOOL GCCViewTreeHasMapTypeLabel(UIView *v, NSInteger depth) {
+    if (depth > 3) return NO;
+    if ([v isKindOfClass:[UILabel class]]) {
+        NSString *t = [(UILabel *)v text];
+        if (t.length) {
+            NSString *s = [t stringByTrimmingCharactersInSet:
+                           [NSCharacterSet whitespaceAndNewlineCharacterSet]];
+            if ([s isEqualToString:@"2D"] || [s isEqualToString:@"3D"]) return YES;
+        }
+    }
+    for (UIView *sub in v.subviews) {
+        if (GCCViewTreeHasMapTypeLabel(sub, depth + 1)) return YES;
+    }
+    return NO;
+}
+
+static UIView *GCCFindMapTypeButton(UIWindow *win, UIView *capsule) {
+    if (!win || !capsule || !capsule.window) return nil;
+    CGRect cap = [capsule convertRect:capsule.bounds toView:win];
+    NSMutableArray<UIView *> *queue = [NSMutableArray arrayWithObject:win];
+    for (NSUInteger i = 0; i < queue.count && queue.count < 2000; i++) {
+        UIView *v = queue[i];
+        [queue addObjectsFromArray:v.subviews];
+        if (v == win || v == capsule || v.hidden || v.alpha < 0.01) continue;
+        CGSize sz = v.bounds.size;
+        if (sz.width < 26 || sz.width > 64 || sz.height < 26 || sz.height > 64) continue;
+        CGRect r = [v convertRect:v.bounds toView:win];
+        if (CGRectGetMidX(r) < win.bounds.size.width * 0.70) continue;   // 右列
+        if (CGRectGetMaxY(r) > CGRectGetMidY(cap)) continue;             // 必须在胶囊上方
+        if (!GCCViewTreeHasMapTypeLabel(v, 0)) continue;
+        return v;   // BFS：先命中的是「最外层且尺寸合规」的容器，即按钮本体
+    }
+    return nil;
+}
+
+static void AlignMapTypeButton(UIView *capsule) {
+    if (!capsule || !capsule.window) return;
+    UIWindow *win = capsule.window;
+    UIView *btn = GCCFindMapTypeButton(win, capsule);
+    if (!btn) return;
+    CGRect cap = [capsule convertRect:capsule.bounds toView:win];
+    CGFloat targetBottom = CGRectGetMinY(cap) - GCGapMapType;
+    CGRect br = [btn convertRect:btn.bounds toView:win];
+    if (fabs(CGRectGetMaxY(br) - targetBottom) < 1) return;
+    // 刻意**不打** AlignedKey：它属于「胶囊/车机钮」那一套钳位，打上去会让
+    // HookWidgetSetFrame 的底边钳位（gap 50）也作用到这个按钮上，与这里打架。
+    CGRect f = btn.frame;
+    f.origin.y += (targetBottom - CGRectGetMaxY(br));
+    btn.frame = f;
+}
+
 static void AlignCornerWidgets(UIView *bar) {
     if (!bar.window) return;
     UIWindow *win = bar.window;
@@ -1746,8 +1827,10 @@ static void AlignCornerWidgets(UIView *bar) {
             if (CachedCar && CachedRight && CachedRoute && CachedLiteGroup) break;
         }
     }
-    if (CachedCar) AlignOneWidget(bar, CachedCar, barTop);
-    if (CachedRight) AlignOneWidget(bar, CachedRight, barTop);
+    // 0.9.18（A1）：车机钮 50pt / 胶囊 20pt —— 原生两者间隙不同，共用会让车机钮低 30pt
+    if (CachedCar) AlignOneWidget(bar, CachedCar, barTop, GCGapCar);
+    if (CachedRight) AlignOneWidget(bar, CachedRight, barTop, GCGapCapsule);
+    if (CachedRight) AlignMapTypeButton(CachedRight);   // 0.9.18（A3）：2D/3D 摆回胶囊正上方
     // 0.5.1：线路按钮（组合按钮下半部分）原生 hid=1，强制显示，保持原位在组合按钮内部
     if (CachedRoute) {
         if (CachedRoute.hidden) CachedRoute.hidden = NO;
@@ -1767,7 +1850,7 @@ static void AlignCornerWidgets(UIView *bar) {
     }
 }
 
-static void HookWidgetSetFrame(NSString *className) {
+static void HookWidgetSetFrame(NSString *className, CGFloat gap) {
     Class cls = NSClassFromString(className);
     if (!cls) return;
     SEL fs = @selector(setFrame:);
@@ -1785,7 +1868,7 @@ static void HookWidgetSetFrame(NSString *className) {
                 UIView *sv = self.superview;
                 if (sv && self.window) {
                     CGPoint p = [sv convertPoint:CGPointMake(rect.origin.x, rect.origin.y) toView:self.window];
-                    CGFloat targetBottom = SearchBarSettledY - 20;  // 0.9.17(A1)：与 AlignOneWidget 同源
+                    CGFloat targetBottom = SearchBarSettledY - gap;  // 0.9.18(A1)：按类区分（车机钮 50 / 胶囊 20）
                     CGFloat proposedBottom = p.y + rect.size.height;
                     if (fabs(proposedBottom - targetBottom) > 2) rect.origin.y += (targetBottom - proposedBottom);
                 }
@@ -1805,7 +1888,7 @@ static void HookWidgetSetFrame(NSString *className) {
                 if (sv && self.window) {
                     CGFloat proposedY = center.y - self.bounds.size.height / 2;
                     CGPoint p = [sv convertPoint:CGPointMake(0, proposedY) toView:self.window];
-                    CGFloat targetBottom = SearchBarSettledY - 20;  // 0.9.17(A1)：与 AlignOneWidget 同源
+                    CGFloat targetBottom = SearchBarSettledY - gap;  // 0.9.18(A1)：按类区分（车机钮 50 / 胶囊 20）
                     CGFloat proposedBottom = p.y + self.bounds.size.height;
                     if (fabs(proposedBottom - targetBottom) > 2) center.y += (targetBottom - proposedBottom);
                 }
@@ -2904,8 +2987,8 @@ static void InstallMinimalHome(void) {
     //   控件仍全透明」）与拦截带来的显示时序扰动没有存在必要。0.9.7 只挂 layoutSubviews
     //   一条，实测无跳动、无裸奔，恢复原样。
     // 0.4.47：拦截两圆钮 setFrame:，对齐后 y 钉死，杜绝 app 挪回原生位置闪跳
-    HookWidgetSetFrame(@"WINDeviceInterconnectWidget");
-    HookWidgetSetFrame(@"WINAJXCombinedWidgetView");
+    HookWidgetSetFrame(@"WINDeviceInterconnectWidget", GCGapCar);
+    HookWidgetSetFrame(@"WINAJXCombinedWidgetView", GCGapCapsule);
     // 0.5.19：拦截天气行 setFrame:，对齐后钉死到车机钮右边
     // 0.5.1：线路按钮原生 hid=1，setHidden: 强制 NO，app 再藏也压不住
     {

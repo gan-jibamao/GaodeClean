@@ -157,6 +157,31 @@ static void GCDiagSample(void) {
             GCDiag(@"   LITE: %@ | LOC: %@", li.count ? [li componentsJoinedByString:@" "] : @"-",
                    oi.count ? [oi componentsJoinedByString:@" "] : @"-");
     }
+    // 0.9.18（A4）：右列视图树 dump —— 定位「2D/3D（地图类型）按钮」的类名与父链。
+    //   取样：x 中心 > 屏宽 0.65 且尺寸 14..90pt 的视图（小容器/按钮），最多 14 条；
+    //   子树含 "2D"/"3D" 文字的视图打 ★ 标记（A3 的识别器与这里同源）。
+    {
+        NSMutableArray *ri = [NSMutableArray array];
+        NSMutableArray *q2 = [NSMutableArray arrayWithObject:win];
+        for (NSUInteger i = 0; i < q2.count && q2.count < 1500 && ri.count < 14; i++) {
+            UIView *v = q2[i];
+            [q2 addObjectsFromArray:v.subviews];
+            if (v == win) continue;
+            CGRect r = [v convertRect:v.bounds toView:win];
+            if (CGRectGetMidX(r) < win.bounds.size.width * 0.65) continue;
+            if (r.size.width < 14 || r.size.height < 12) continue;
+            if (r.size.width > 90 || r.size.height > 90) continue;
+            BOOL hit = GCCViewTreeHasMapTypeLabel(v, 0);
+            NSString *chain = @"";
+            UIView *pp = v.superview;
+            if (pp) chain = [NSString stringWithFormat:@"^%@", NSStringFromClass(pp.class)];
+            [ri addObject:[NSString stringWithFormat:@"%@(%.0f,%.0f,%.0fx%.0f)hid%d%@%@",
+                           NSStringFromClass(v.class), r.origin.x, r.origin.y,
+                           r.size.width, r.size.height, v.hidden,
+                           hit ? @"★" : @"", chain]];
+        }
+        if (ri.count) GCDiag(@"   RIGHT: %@", [ri componentsJoinedByString:@" "]);
+    }
     GCDiag(@"S%02d tick=%ld H=%d SB=%d(y=%.0f) | W%lu: %@ | mid=%s[%@]",
            n, (long)ColdTicks, HomeSettled, SearchBarSettled, SearchBarSettledY,
            (unsigned long)widgets.count, [wi componentsJoinedByString:@" "],
