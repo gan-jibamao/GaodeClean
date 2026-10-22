@@ -18,7 +18,7 @@
 static NSString *const kGCAuthor      = @"jibamao";
 static NSString *const kGCRepo        = @"https://gan-jibamao.github.io/";
 static NSString *const kGCSection     = @"jibamao-Tweaks";
-static NSString *const kGCVersion     = @"0.9.15";
+static NSString *const kGCVersion     = @"0.9.16";
 static NSString *const kGCSignature   = @"GaodeClean by jibamao";
 
 // 对外签名（供 log / 诊断 / 二次核对使用）
@@ -88,6 +88,8 @@ static char AlignedKey;
 static dispatch_source_t ScheduleTimer;
 static __weak UIView *BarParent;
 static __weak UIView *CachedCar, *CachedRight, *CachedRoute;
+// 0.9.16（A2）：App 原生「轻量控件组」容器（中部裸露胶囊的真身，见 A1）
+static __weak UIView *CachedLiteGroup;
 static NSHashTable<UIView *> *GCWeatherHeldRows;   // 0.9.3：冷启动被扣留的天气行（锚点未就绪期间不显示）
 static __weak id CachedTabs;
 static __weak UIView *SearchBarView;   // 0.5.58   // 0.5.55：用于判断当前是否「首页」选中
@@ -1605,6 +1607,17 @@ static BOOL IsRightBottomWidget(UIView *v) {
     return [t containsString:@"rightbottom"] || [t containsString:@"locate"] || [t containsString:@"location"];
 }
 
+// 0.9.16（A1）：App 原生「轻量控件组」容器的识别与排除判定。
+//   中部裸露胶囊的真身（diag2 铁证）；右上「+/图层」胶囊用的是同一类，
+//   但它出生就在窗口顶部（y≈69 ≈ 窗高 3.6%），故用 25% 高度线排除。
+static BOOL GCCIsLiteGroupCapsule(UIView *v) {
+    if (![NSStringFromClass(v.class) isEqualToString:@"WINLiteWidgetGroupView"]) return NO;
+    UIView *win = v.window;
+    if (!win) return NO;
+    CGFloat y = [v convertPoint:CGPointZero toView:win].y;
+    return y > win.bounds.size.height * 0.25;
+}
+
 static void AlignOneWidget(UIView *bar, UIView *w, CGFloat barTop) {
     if (!w.window) return;
     UIWindow *win = bar.window;
@@ -1622,6 +1635,12 @@ static void AlignOneWidget(UIView *bar, UIView *w, CGFloat barTop) {
     // 这里必须一并恢复 —— 否则 hidden 放行了、按钮仍然全透明（A2/A3 的自伤点）。
     if (w.alpha < 0.01) w.alpha = 1.0;
     if (w.hidden) w.hidden = NO;
+    // 0.9.16（A2，A1 的对偶）：放行右下控件的「宿主」时，把 App 原生组容器一并放行。
+    //   胶囊的毛玻璃底与 ⊙/↰ 图标由它承载 —— 只按不还会缺背景。
+    //   两者同一时刻出现，正是「按钮与搜索栏同时出现」的设计意图。
+    if (w == CachedRight && CachedLiteGroup && CachedLiteGroup.window) {
+        CachedLiteGroup.hidden = NO;
+    }
     // 0.9.14（A8 回退）：恢复 0.9.7 的「对齐即封门」。
     // 有任一控件对齐成功，就说明首页布局已稳定、兜底无存在必要 ——
     // 这正是 0.9.7 零裸露的机制：车机钮 ~1.3s 对齐 → HomeSettled=YES →
@@ -1703,7 +1722,8 @@ static void AlignCornerWidgets(UIView *bar) {
     if (!CachedCar || !CachedCar.window) CachedCar = nil;
     if (!CachedRight || !CachedRight.window) CachedRight = nil;
     if (!CachedRoute || !CachedRoute.window) CachedRoute = nil;
-    if (!CachedCar || !CachedRight || !CachedRoute) {
+    if (!CachedLiteGroup || !CachedLiteGroup.window) CachedLiteGroup = nil;
+    if (!CachedCar || !CachedRight || !CachedRoute || !CachedLiteGroup) {
         NSMutableArray<UIView *> *queue = [NSMutableArray arrayWithObject:win];
         for (NSUInteger i = 0; i < queue.count && queue.count < 2000; i++) {
             UIView *v = queue[i];
@@ -1714,7 +1734,10 @@ static void AlignCornerWidgets(UIView *bar) {
             // 精确判定能找到；几何兜底只用于「显示拦截」这条更早的路径，避免误选实例。
             else if (IsRightBottomWidget(v)) CachedRight = v;
             else if ([cn isEqualToString:@"WINRouteLineWidgetView"]) CachedRoute = v;
-            if (CachedCar && CachedRight && CachedRoute) break;
+            // 0.9.16（A2）：缓存 App 原生组容器 —— 胶囊的背景与图标由它承载，
+            // A1 按住它之后，必须由我们在「正确时刻」放行（与 CachedRight 同步）。
+            else if (GCCIsLiteGroupCapsule(v)) CachedLiteGroup = v;
+            if (CachedCar && CachedRight && CachedRoute && CachedLiteGroup) break;
         }
     }
     if (CachedCar) AlignOneWidget(bar, CachedCar, barTop);
@@ -1728,6 +1751,13 @@ static void AlignCornerWidgets(UIView *bar) {
             f.size.height = 88;
             CachedRight.frame = f;
         }
+    }
+    // 0.9.16（A2 安全网）：锚点已定格、但我们仍按着 App 原生组容器时超时放行 ——
+    //   覆盖「CachedRight 未配对 / AlignOneWidget 没跑到」的极端情形，
+    //   确保胶囊的背景与图标绝不会永久缺失（宁可早放，不可不放）。
+    if (SearchBarSettled && ColdTicks > 16 && CachedLiteGroup &&
+        CachedLiteGroup.window && CachedLiteGroup.hidden) {
+        CachedLiteGroup.hidden = NO;
     }
 }
 
@@ -2836,6 +2866,26 @@ static void InstallMinimalHome(void) {
         if (view.window && !objc_getAssociatedObject(view, &AlignedKey) && IsRightBottomWidget(view)) {
             view.hidden = YES; [ColdWidgets addObject:view];
         }
+    });
+    // ==========================================================================
+    // 0.9.16（A1）：**真凶在这里** —— App 原生「轻量控件组」容器。
+    //   七轮（0.9.9~0.9.15）全部按 WINAJXCombinedWidgetView 施工，而 diag2 日志
+    //   逐拍铁证：中部裸露的 ⊙+↰ 胶囊是 WINLiteWidgetGroupView(339,340,44x88)
+    //   自身可见 + 它的毛玻璃 UIVisualEffectView + WINLocationView(⊙)；
+    //   同一时刻我们的控件是 hid1（藏得好好的）。
+    //   ⇒ 「藏宿主」挡不住「容器自身」，这就是为什么 0.9.7 也露、七轮修不掉。
+    //   判据用几何排除右上「+/图层」胶囊（它出生就在 y≈69 = 窗高 3.6%）：
+    //   只对 y 落在窗高 25% 以下的实例动手。
+    HookVoid(@"WINLiteWidgetGroupView", @"didMoveToWindow", ^(UIView *v) {
+        if (v.window && !SearchBarSettled && GCCIsLiteGroupCapsule(v)) {
+            v.hidden = YES; [ColdWidgets addObject:v];
+        }
+    });
+    HookVoid(@"WINLiteWidgetGroupView", @"layoutSubviews", ^(UIView *v) {
+        // 锚点（搜索栏）未定格 = 冷启动未完成：按住它，不让它停在中部位显示。
+        // 定格后交回给 A2（与我们的右下控件同一时刻放行）。
+        if (!GCCIsLiteGroupCapsule(v)) return;
+        if (!SearchBarSettled) { v.hidden = YES; [ColdWidgets addObject:v]; }
     });
     // 0.4.41：车机圆钮冷启动先隐藏，对齐后再显示，消除跳动
     HookVoid(@"WINDeviceInterconnectWidget", @"layoutSubviews", ^(UIView *w) {
