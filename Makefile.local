@@ -24,6 +24,9 @@ SDK        ?= /tmp/sdk165/iPhoneOS16.5.sdk
 CLANG      ?= clang
 TARGET_IOS ?= 15.0
 OUT        ?= dist
+# 0.9.18：打包用的 control（调试包可传 CONTROL=... 带 +diag3 版本，避免产出
+#   名字冒充正式包、内容却是调试构建的 deb —— 本轮就踩过这个坑）
+CONTROL    ?= control
 SRC        := src/GaodeClean.m
 HDR        := src/GCCGeometry.h src/GCCDiag.h
 
@@ -69,7 +72,7 @@ $(OUT):
 	mkdir -p $(OUT)
 
 deb: $(DYLIB64) $(DYLIB64E)
-	python3 scripts/mkdeb.py --dist $(OUT) --control control --plist GaodeClean.plist \
+	python3 scripts/mkdeb.py --dist $(OUT) --control $(CONTROL) --plist GaodeClean.plist \
 	  --dylib-arm64 $(DYLIB64) --dylib-arm64e $(DYLIB64E)
 
 # 门禁：两遍都必须 0 警告 —— ① 正式包（日志剥离）② 调试包（日志保留）：
