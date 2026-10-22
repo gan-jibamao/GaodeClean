@@ -1622,8 +1622,14 @@ static void AlignOneWidget(UIView *bar, UIView *w, CGFloat barTop) {
     if (!w.window) return;
     UIWindow *win = bar.window;
     CGRect r = [w convertRect:w.bounds toView:win];
-    // 0.5.1：改底边对齐——不管 44/88 高，底边都贴在搜索框上方 8pt
-    CGFloat targetBottom = barTop - 8;
+    // 0.5.1：改底边对齐——不管 44/88 高，底边都贴在搜索框上方一段固定间隙
+    // 0.9.17（A1）：间隙对表原生实测。原生录屏（697 帧）vs 我们逐元素模板匹配
+    //   （score 0.906/0.934，对齐原生 1.000）：⊙ 原生 599.7 / 我们 612.1，
+    //   ↰ 原生 632.5 / 我们 644.9 —— 两图标位移完全一致 ⇒ 是整组平移；
+    //   而搜索栏白底顶边两边都是 702.6pt（完全同位）⇒ 差值全部来自间隙：
+    //   原生 19.5pt、我们只有 6.9pt。旧值 8 让 ⊙/↰（连接车机）整组低了 12.4pt，
+    //   并压掉了它与 2D/3D 按钮之间的原生间隙。
+    CGFloat targetBottom = barTop - 20;
     if (fabs(CGRectGetMaxY(r) - targetBottom) >= 1) {
         CGRect f = w.frame;
         f.origin.y += (targetBottom - CGRectGetMaxY(r));
@@ -1773,12 +1779,13 @@ static void HookWidgetSetFrame(NSString *className) {
             // 压回 hidden，而 AlignOneWidget 的精确 tag 判定未必找得到实例 ⇒ 按钮
             // 卡死在 hidden，最后靠 W1g 兜底在错误位置硬显示（0.9.13 实测反弹回
             // 14 帧）。0.9.7 语义：位置写入一律放行，只在已对齐后做底边钳位。
-            // 0.5.1：底边对齐钳位——不管 44/88 高，底边都贴在搜索框上方 8pt
+            // 0.5.1：底边对齐钳位——不管 44/88 高，底边都贴在搜索框上方 20pt
+            // 0.9.17（A1）：与 AlignOneWidget 同源常量，必须同步改；否则钳位会把摆放拉回旧位
             if (SearchBarSettled && objc_getAssociatedObject(self, &AlignedKey)) {
                 UIView *sv = self.superview;
                 if (sv && self.window) {
                     CGPoint p = [sv convertPoint:CGPointMake(rect.origin.x, rect.origin.y) toView:self.window];
-                    CGFloat targetBottom = SearchBarSettledY - 8;
+                    CGFloat targetBottom = SearchBarSettledY - 20;  // 0.9.17(A1)：与 AlignOneWidget 同源
                     CGFloat proposedBottom = p.y + rect.size.height;
                     if (fabs(proposedBottom - targetBottom) > 2) rect.origin.y += (targetBottom - proposedBottom);
                 }
@@ -1798,7 +1805,7 @@ static void HookWidgetSetFrame(NSString *className) {
                 if (sv && self.window) {
                     CGFloat proposedY = center.y - self.bounds.size.height / 2;
                     CGPoint p = [sv convertPoint:CGPointMake(0, proposedY) toView:self.window];
-                    CGFloat targetBottom = SearchBarSettledY - 8;
+                    CGFloat targetBottom = SearchBarSettledY - 20;  // 0.9.17(A1)：与 AlignOneWidget 同源
                     CGFloat proposedBottom = p.y + self.bounds.size.height;
                     if (fabs(proposedBottom - targetBottom) > 2) center.y += (targetBottom - proposedBottom);
                 }
