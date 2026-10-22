@@ -5,7 +5,7 @@
 
 | | |
 |:--|:--|
-| **当前版本** | `0.9.14` |
+| **当前版本** | `0.9.15` |
 | **Author** | **jibamao** — <https://gan-jibamao.github.io/> · Section `jibamao-Tweaks` |
 | **目标** | 高德地图 / AMap `com.autonavi.amap`（**版本限制已取消，全版本自适应**） |
 | **架构** | `arm64`（rootless / TrollFools 注入）· `arm64e`（RootHide） |
@@ -902,7 +902,7 @@ app 走 `setHidden:NO` 这条路时直接绕过 → 按钮以原生位置露出�
 而 app 布局时序在每次启动的抖动又让「哪一层先赢」随机化 —— 数值只能乱跳，永远到不了 0。
 真根因见 §X。
 
-### X. 0.9.14 —— 回退 W 系列，恢复 0.9.7 显示语义（当前采用）
+### X. 0.9.14 —— 回退 W 系列，恢复 0.9.7 显示语义（**经验证不足，见 §Y**）
 
 **定位方法**：不再猜测，直接 `git show ed01450:src/GaodeClean.m`（0.9.7）与当前源码
 做**函数级归一化逐字比对**（去注释、压缩空白），差异清单就是唯一嫌疑：
@@ -957,6 +957,96 @@ app 走 `setHidden:NO` 这条路时直接绕过 → 按钮以原生位置露出�
    却没人把 0.9.7 的函数拉出来对一遍；真根因只是一行 `HomeSettled = YES;`。
    现象驱动的层层加码，会把一个 1 行回归滚成 8 条拦截 + 6 个版本。
 
+### Y. 0.9.14 → 0.9.15 —— 真机取证定位「裸露」真凶：锚点「首帧锁定」（当前采用）
+
+**为什么还要一轮取证**：0.9.14 已把按钮显示链**函数级逐字**恢复成 0.9.7 语义（比对 5/5
+通过），真机却仍裸露 18-21 帧 —— 说明「0.9.7 无此问题」这条口头基线、或裸露的真正成因，
+至少有一个与假设不符。于是做了一版**只记录、不改行为**的取证包
+（`-DGAODECLEAN_DIAG_LOG=1`：每 200ms 采样 + 事件级日志落盘到 `gaodeclean-diag.log`）。
+
+**取证日志（0.9.14+diag，真机）关键行**：
+
+```
+[  1.187]   didMoveToWindow win=1 hid=0 a=1.00 tag=template_mainmapRightBottom frame=(0,0)
+[  1.187]   setFrame:->(339,281,44x88) win系(339,340)      ← 窗口系 y=340（屏高 40%）
+[  1.229]   layoutSubviews frame=(339,547,44x88) hid=0 win=1
+             tag=template_mainmapRightBottom 精确判定=1
+[  1.834]   setHidden:1 @(339,167,44x44) tag=template_rank  ← 全档唯一一次 setHidden:
+```
+
+**三个立刻成立的事实**：
+1. **tag 完全匹配**（`template_mainmapRightBottom` 含 `rightbottom`，`精确判定=1`）
+   —— 「tag 可能不匹配」的猜测全部作废；
+2. app **从未**对按钮调过 `setHidden:`（唯一那次打在别的控件上），它建出来就是可见的；
+3. 我们的 `layoutSubviews` 钩子确实在工作（它隐藏了 `template_rank`），但对该按钮
+   **一次都没隐藏** —— 因为 `AlignedKey` 早已被我们自己的 `AlignOneWidget` 打上，
+   所有「未对齐才隐藏」的钩子集体跳过。
+
+**逐帧录屏（886x1920）**：按钮出现在**窗口系 y=340、底边 428**，稳定停留 21 帧（350ms）
+后瞬移到底部（窗口系 606，底边 694）。三带轨迹扫描另证实：同屏的「+/图层」圆钮
+（`template_mainmapRightTop`）**没有任何裸露** —— 因为它从不被我们对齐，
+app 在同一毫秒内就把它摆到了最终位置。
+
+**真根因：锚点被「第一帧」锁死**
+
+`LayoutMinimalHome` 里搜索栏是**跟随 tab 栏**定位的：
+
+```objc
+CGRect tabFrame = [tabBar convertRect:tabBar.bounds toView:parent];
+CGRect want = CGRectMake(0, MAX(0, tabFrame.origin.y - height - 12), ...);   // 最终 701
+if (moved) { bar.frame = want; }
+...
+// 0.4.19 首帧锁定：缓存最终 y ...      ← 注释说「最终」，代码锁的却是「第一帧」
+if (!SearchBarSettled) { SearchBarSettledY = bar.frame.origin.y; SearchBarSettled = YES; }
+```
+
+冷启动时 tab 栏自身还在迁移（启动期 498 → 最终 763），于是搜索栏先出现在
+**y≈436**（436-8 = **428**，与裸露位置**逐位吻合**），最终才落到 701。锁定 436 之后：
+
+1. 控件钳位 `HookWidgetSetFrame` 的目标 = `SearchBarSettledY - 8` = **428** —— 而 app 的
+   原生槽位恰好也是 428（它自己的界面模型里搜索栏还在 447 附近），**两方一致**
+   ⇒ 按钮被稳稳钉在屏高 40%；
+2. `AlignOneWidget` 在按钮出生后约 40ms 就按搜索栏**当时**的位置 (436) 把它摆好并显示，
+   同时置 `AlignedKey` ⇒ 隐藏路径全部失效；
+3. 直到搜索栏落到 701，下一拍 `AlignOneWidget` 才把它拉到底部 —— 那一下就是「瞬移」。
+
+**六轮结论作废**：真凶不是「显示路径漏拦」，而是**我们自己的钳位目标**用了一个启动瞬态
+位置。0.9.9~0.9.13 的五层拦截之所以只能把数据在 19→21→14→4→2→14 之间来回晃，是因为
+它们拦的是 app 的写入，而写入本身没错 —— 错的是我们钉住的目标值。
+
+**为什么 0.9.7 也会露**：`0.4.19 首帧锁定` 早于 0.9.7，逻辑一字未变。老大那次「0.9.7
+没问题」应当是那一拍 tab 栏恰好没有迁移（同一逻辑下的概率性表现），不代表 0.9.7 免疫。
+
+**施工（A1-A6）**：
+
+| 项 | 改动 |
+|---|---|
+| A1 | 锚点改为「定格后才锁定」：稳定性计数改为**与上一拍比较**（不再与锁定值比较，避免自循环）；新增**几何不变量** —— 目标位置必须落在容器**底部 30%**（启动瞬态 436/852 = 51% 不满足，最终 701/852 = 82% 满足）；`ColdTicks<30` 内若又稳定停到新位置则**自愈重锁**；锁定条件 =（稳定 3 拍 或 ColdTicks≥20）且（几何达标 或 ColdTicks≥20） |
+| A2 | `AlignCornerWidgets`：锚点未定格前 `if (!SearchBarSettled) return;` —— 不摆位、不认领、不显示；控件与搜索栏用**同一判据**（`BarStableTicks>=3`）解除，二者同时出现、位置都是最终值 |
+| A3 | 新增 `WINAJXCombinedWidgetView -didMoveToWindow` 钩子（**精确 tag** 判定）：上窗瞬间即隐藏 —— 日志显示 app 在 addSubview 同一毫秒内就把 frame 摆到中部，而首次 `layoutSubviews` 要等 42ms（≈2.5 帧） |
+| A4 | 兜底阈值 `ColdTicks > 12` → `> 16`，避免它抢在 A2 的闸门（≥15）之前把控件按原始位置强显 |
+| A5 | 版本 0.9.15 + control；文档同步 |
+| A6 | 修诊断模块定时器：`dispatch_source_t` 原来是函数局部变量，ARC 下出作用域即释放 ⇒ 采样一次都没跑（本次取证的失误，日志里 0 条 `Sxx` 行）；改为文件级强引用 |
+
+**影响范围与验证方法**：
+- **影响**：搜索栏与两个伴随控件（车机钮 / 右下组合钮）的**出现时刻**由「第一拍」改为
+  「搜索栏定格那一拍」——三者从此同时出现、位置都是最终值。其余链条（天气行扣留、
+  上拉白雾、底栏引导、开屏广告、比例尺、切页/切 2D-3D）未触碰。
+- **防回归门禁（逻辑级）**：`/tmp/gcc_anchor_sim.py` 按真机数值（tab 栏 498→763 ⇒ 目标
+  436→701）逐拍仿真新旧逻辑：旧逻辑 3 拍（≈36 帧）落在中部位，新逻辑 **0 拍**。
+- **真机验收标准**：冷启动逐帧扫 `y768-958`（原图 x 820）**必须 0 帧**；且**按钮出现
+  时刻不得早于搜索栏**；按钮最终位置窗口系 606-694（底边贴搜索栏上方 8pt）不变。
+
+**教训（新增）**：
+5. **「锁定最终值」的代码必须真的锁最终值**。变量名 `SearchBarSettledY`（Settled）与注释
+   「缓存最终 y」都在说最终值，代码却是「第一帧」—— 注释与实现分歧是最难查的一类 bug，
+   比没有注释更危险。
+6. **拦症状之前先算一遍「正确位置是多少」**。六轮都在拦 app 的写入，却没人算过
+   「钳位目标 = 搜索栏 y - 8」在启动瞬态下等于多少 —— 一算就发现 428 与实测裸露位置
+   逐位吻合。
+7. **取证代码同样是代码**。第一版取证包因一个局部 `dispatch_source_t` 被 ARC 释放，
+   采样表 0 条记录，只能靠录屏反推；它也要过「真的跑了吗」这一关。
+
 ## 三、跨版本验证汇总
 
 | 版本 | 项目 | 结果 |
@@ -977,7 +1067,10 @@ app 走 `setHidden:NO` 这条路时直接绕过 → 按钮以原生位置露出�
 | 0.9.12 | 右下按钮冷启动位置 | 未归零：2 帧（33ms）—— 裸露源是兜底开闸，非 app 写入 |
 | 0.9.13 | 右下按钮冷启动位置 | **仍未归零：14 帧（233ms，较 0.9.12 反弹）** → 系列整体回退 |
 | 0.9.14 | 构建门禁（静态） | 双架构 0 警告（剥离开/关**双跑**）· 0.9.13 版本串残留 0 · cpusubtype `0x2` · 载荷路径与 `Depends` 解包核验 · 按钮链与 0.9.7 **函数级逐字比对通过** **通过** |
-| 0.9.14 | 右下按钮冷启动位置 | 待真机逐帧复验（验收标准：中部裸露 = 0 帧） |
+| 0.9.14 | 右下按钮冷启动位置 | **仍未归零：18-21 帧（350ms）** → 触发取证包（见 §Y） |
+| 0.9.15 | 锚点逻辑（仿真） | 按真机数值逐拍仿真：旧逻辑 3 拍落中部、新逻辑 **0 拍** **通过** |
+| 0.9.15 | 构建门禁（静态） | 双架构 0 警告（剥离开/关**双跑**）· 0.9.14 版本串残留 0 · `cpusubtype 0x2` · 载荷路径与 `Depends` 核验 · 载荷与交付 dylib 逐字节一致 **通过** |
+| 0.9.15 | 右下按钮冷启动位置 | 待真机逐帧复验（验收：中部裸露 = 0 帧 且 按钮不早于搜索栏出现） |
 
 > 本表只收录**有明确记录**的条目；0.8.0–0.9.7 各版的逐版真机结论未逐条回填。
 
@@ -1084,17 +1177,17 @@ deb 打包用 `scripts/mkdeb.py`（Python 写 `ar` 归档，不需要 `dpkg-deb`
 
 装完 `sbreload` 或重启用户空间。
 
-### 本包产物（0.9.14）
+### 本包产物（0.9.15）
 
 | 文件 | 说明 |
 |:--|:--|
-| `dist/GaodeClean-0.9.14.dylib`（arm64）| 184,896 B · rootless / Dopamine |
-| `dist/GaodeClean-0.9.14-arm64e.dylib` | 186,352 B · RootHide（`cpusubtype 0x2` 已由 `fixarch.py` 修正）|
-| `dist/com.jibamao.gaodeclean_0.9.14_iphoneos-arm64.deb` | 61,376 B · rootless（载荷 `/var/jb/Library/MobileSubstrate/…`，`Installed-Size 181`）|
-| `dist/com.jibamao.gaodeclean_0.9.14_iphoneos-arm64e-roothide.deb` | 60,892 B · RootHide（载荷 `/Library/…`，`Depends` 含 `oldabi`，`Installed-Size 183`）|
-| `dist/GaodeClean-0.9.14-Source.zip` | 完整源码（src + control + scripts + tools + Makefile）|
+| `dist/GaodeClean-0.9.15.dylib`（arm64）| 185,024 B · rootless / Dopamine |
+| `dist/GaodeClean-0.9.15-arm64e.dylib` | 186,496 B · RootHide（`cpusubtype 0x2` 已由 `fixarch.py` 修正）|
+| `dist/com.jibamao.gaodeclean_0.9.15_iphoneos-arm64.deb` | 61,554 B · rootless（载荷 `/var/jb/Library/MobileSubstrate/…`，`Installed-Size 181`）|
+| `dist/com.jibamao.gaodeclean_0.9.15_iphoneos-arm64e-roothide.deb` | 61,082 B · RootHide（载荷 `/Library/…`，`Depends` 含 `oldabi`，`Installed-Size 183`）|
+| `dist/GaodeClean-0.9.15-Source.zip` | 完整源码（src + control + scripts + tools + Makefile + GCCDiag.h）|
 
-**0.9.14 日志分档**：正式包由 Makefile 注入 `-DGAODECLEAN_STRIP_LOGS=1`，
+**0.9.15 日志分档**：正式包由 Makefile 注入 `-DGAODECLEAN_STRIP_LOGS=1`，
 12 处每事件级 `GCLog` 在编译期展开为空操作（`strings` 已验证全部消失）；
 装机核对所需的 8 处 `NSLog` 保留。需真机排查时用 `make dev` 出带日志的调试包。
 
@@ -1165,7 +1258,8 @@ cmp <(ar p dist/*.deb data.tar.gz | tar xzO ./var/jb/.../GaodeClean.dylib) dist/
 0.9.11  显示路径补齐：纯类名判定 + didMoveToWindow（四条通道全覆盖）
 0.9.12  拦截 setFrame:/setCenter: 中部写入（app 只挪位置时的唯一通道）
 0.9.13  兜底显示前验位置（裸露源=兜底开闸而非 app 写入）—— 系列失败，已回退
-0.9.14  回退 W 系列，恢复 0.9.7 显示语义（真根因：HomeSettled 门控被拆）  ← 当前（采用）
+0.9.14  回退 W 系列，恢复 0.9.7 显示语义（真根因：HomeSettled 门控被拆）—— 真机仍裸露，见 §Y
+0.9.15  锚点「定格后才锁定」+ 几何不变量 + 未定格不摆位（真根因：SearchBarSettledY 锁了第一帧）  ← 当前（采用）
 ```
 
 ---
@@ -1185,5 +1279,5 @@ strings GaodeClean.dylib | grep -i jibamao
 启动输出：
 
 ```
-[GaodeClean] GaodeClean v0.9.14 | jibamao | https://gan-jibamao.github.io/
+[GaodeClean] GaodeClean v0.9.15 | jibamao | https://gan-jibamao.github.io/
 ```
