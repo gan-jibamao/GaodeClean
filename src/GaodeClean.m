@@ -18,7 +18,7 @@
 // ---- jibamao 个人标识（编译进 dylib，可用 strings 核对）----
 static NSString *const kGCAuthor      = @"jibamao";
 static NSString *const kGCRepo        = @"https://gan-jibamao.github.io/";
-static NSString *const kGCVersion     = @"0.9.23";
+static NSString *const kGCVersion     = @"0.9.24";
 
 // 0.9.18（A1）：底边间隙**按控件分开**，对表原生（搜索栏白底顶边 = 702.6pt）
 //   车机钮（连接车机 · WINDeviceInterconnectWidget）：原生底 652 → 间隙 50.6 → 取 50
@@ -108,6 +108,7 @@ static void Schedule(void);
 static void GCNarrowOneBar(UIView *bar);   // 0.9.22（A1）搜索栏/底栏缩窄
 static void GCNarrowSetDirty(void);        // 0.9.23（A1）标脏：下一拍重扫条带
 static void GCNarrowRecheck(void);         // 0.9.23（A1）每拍轻量复核
+static void GCNarrowFromCaptured(void);    // 0.9.24（A1）从捕获引用取层（v1 的有效路径）
 static void LayoutMinimalHome(id handler);
 static void AlignCornerWidgets(UIView *bar);
 static BOOL FixingHintText;
@@ -644,6 +645,7 @@ static void Schedule(void) {
         if (UIApplication.sharedApplication.applicationState != UIApplicationStateActive) return;
         TickCount++;
         if (TickCount % 5 == 0) GCNarrowSetDirty();   // 0.9.23（A1）每 ~0.5s 重扫一次下屏条带
+        if (TickCount % 5 == 0) GCNarrowFromCaptured(); // 0.9.24（A1）捕获引用重认（搜索栏走这条）
         GCNarrowRecheck();                            // 每拍轻量复核（幂等，达标即放行）
         for (id tabs in TabControllers.allObjects) {
             id selected = ObjectGetter(tabs, GCStrAt(71));
@@ -881,7 +883,7 @@ static CGRect GCNarrowClamp(UIView *v, CGRect f) {
     CGRect win = GCNarrowWindowRect(v, f);
     if (CGRectIsNull(win)) return f;
     if (f.size.width < sw - 60) return f;
-    if (f.size.height < 20 || f.size.height > 110) return f;
+    if (f.size.height < 20 || f.size.height > sw * 0.35) return f;   // 0.9.24：放宽到 137.6pt（搜索栏可点区域偏高）
     if (win.origin.x < -1 || CGRectGetMaxX(win) > sw + 1) return f;
     if (win.origin.y < -1 || CGRectGetMaxY(win) > w.bounds.size.height + 1) return f;
     if (fabs(CGRectGetMidX(win) - sw * 0.5) > 4) return f;
@@ -950,7 +952,7 @@ static void GCNarrowFixInPlace(UIView *v) {
 // 条带内收集**所有**合格层（父与子都收：全部夹到同一绝对几何，
 // 于是「可见的那一层无论在哪一级」都必然收到目标宽度，且两层叠加不会翻倍）
 static void GCNarrowCollect(UIView *v, int depth, NSMutableArray *out) {
-    if (depth > 6) return;
+    if (depth > 10) return;
     UIWindow *w = v.window;
     if (!w) return;
     CGFloat sh = w.bounds.size.height;
@@ -967,12 +969,14 @@ static void GCNarrowCollect(UIView *v, int depth, NSMutableArray *out) {
 // 重扫条带：发现 → 立即夹一次 → 挂三重钳位 → 记入弱引用表
 static void GCNarrowDiscover(void) {
     GCNarrowDirty = NO;
-    UIWindow *w = GCBarWindow();
-    if (!w || w.bounds.size.width < 200) return;
-    UIView *root = w.rootViewController.view ?: w;
-    NSMutableArray *found = [NSMutableArray array];
-    GCNarrowCollect(root, 0, found);
     if (!GCNarrowTargets) GCNarrowTargets = [NSHashTable weakObjectsHashTable];
+    NSMutableArray *found = [NSMutableArray array];
+    for (UIWindow *w in GCAllWindows()) {          // 0.9.24：所有窗口都扫
+        if (w.hidden || w.alpha < 0.05) continue;
+        if (w.bounds.size.width < 200) continue;
+        UIView *root = w.rootViewController.view ?: w;
+        GCNarrowCollect(root, 0, found);
+    }
     for (UIView *v in found) {
         GCNarrowHookClass(v.class);
         [GCNarrowTargets addObject:v];
@@ -993,9 +997,58 @@ static void GCNarrowRecheck(void) {
     }
 }
 
-// 对外接口（兼容 v1 调用点）：只标脏 —— 真正的重扫交给每拍 tick，
-// 避免在 App 的 layoutSubviews 里做整树扫描（省开销、也避免重入）
-static void GCNarrowOneBar(UIView *bar) { (void)bar; GCNarrowSetDirty(); }
+// ── 0.9.24（A1）捕获引用路径 ─────────────────────────────────────────────────
+// 0.9.22（v1）就是靠这条路径把搜索栏收窄的：从**捕获到的视图**出发取「最宽的合格层」。
+// v2 只按几何发现、且高度上限压到 110pt，把搜索栏容器（可点区域 ~110-137pt）排除掉了
+// ⇒ 搜索栏回到原生宽度。v3 两条路径并存：捕获引用（对搜索栏有效）+ 几何发现（对底栏有效）。
+static BOOL GCNarrowAlike(UIView *v) {          // 与 GCNarrowIsBar 同口径，但不要求下屏条带、
+    UIWindow *w = v.window;                     // 且高度上限放宽到 屏宽×0.35
+    if (!w || !v.superview) return NO;
+    if (v == w || v == w.rootViewController.view) return NO;
+    if (v.hidden || v.alpha < 0.05) return NO;
+    CGFloat sw = w.bounds.size.width, sh = w.bounds.size.height;
+    if (sw < 200) return NO;
+    CGRect win = GCNarrowWindowRect(v, v.frame);
+    if (CGRectIsNull(win)) return NO;
+    if (win.size.width < sw - 60) return NO;
+    if (win.size.height < 20 || win.size.height > sw * 0.35) return NO;
+    if (win.origin.x < -1 || CGRectGetMaxX(win) > sw + 1) return NO;
+    if (win.origin.y < -1 || CGRectGetMaxY(win) > sh + 1) return NO;
+    if (fabs(CGRectGetMidX(win) - sw * 0.5) > 4) return NO;
+    return YES;
+}
+static UIView *GCNarrowPickFrom(UIView *bar) {  // bar 自身与直接子视图里挑最宽合格层
+    if (!bar || !bar.window) return nil;
+    UIView *best = nil; CGFloat bw = 0;
+    if (GCNarrowAlike(bar)) { best = bar; bw = bar.frame.size.width; }
+    for (UIView *v in bar.subviews) {
+        if (v.hidden || v.alpha < 0.05) continue;
+        if (!GCNarrowAlike(v)) continue;
+        if (v.frame.size.width > bw) { best = v; bw = v.frame.size.width; }
+    }
+    return best;
+}
+static NSHashTable *GCNarrowCaptured;           // 捕获引用（弱引用，不保活）
+static void GCNarrowFromCaptured(void) {
+    if (!GCNarrowCaptured) return;
+    if (!GCNarrowTargets) GCNarrowTargets = [NSHashTable weakObjectsHashTable];
+    for (UIView *bar in GCNarrowCaptured.allObjects) {
+        UIView *v = GCNarrowPickFrom(bar);
+        if (!v) continue;
+        GCNarrowHookClass(v.class);
+        [GCNarrowTargets addObject:v];
+        GCNarrowFixInPlace(v);
+    }
+}
+// 对外接口：既记下捕获引用（下一步取层），也标脏让几何发现跟上
+static void GCNarrowOneBar(UIView *bar) {
+    GCNarrowSetDirty();
+    if (bar) {
+        if (!GCNarrowCaptured) GCNarrowCaptured = [NSHashTable weakObjectsHashTable];
+        [GCNarrowCaptured addObject:bar];
+        GCNarrowFromCaptured();
+    }
+}
 
 // 0.9.4：删除 IsBlurOverlayView / GCCColorStr / GCCScreenMapMean
 // （审计确认零引用的诊断期遗留，编译器 -Wunused-function 实证）。
