@@ -1382,6 +1382,111 @@ RIGHT: ... WINPermanentCompassView(339,286,44x44)hid0^MapWidgetContainerView
 **验证**：双跑门禁 0 警告；diag 变体编译通过（`MAPTYPE:`/`未识别到`/`0.9.19 2D/3D 摆位` 三条
 字符串经 UTF-16 搜索均在体内 —— 中文字面量编成 `__ustring`，`strings` 搜不到是正常现象）。
 
+---
+
+### §AF · 0.9.20 —— 清探针 + 清日志（发布收尾）
+
+**起因**：2D/3D 通过真机验收后，用户指令「去掉探针和日志」并交付正式源。
+
+**A1 清探针（全部删除，非仅关开关）**
+
+| 对象 | 处理 |
+|:--|:--|
+| `src/GCCDiag.h`（真机取证模块，462 行） | **整文件删除**；`#include` 与 `GCDiagInstall()` 调用一并移除 |
+| `GAODECLEAN_DEBUG_SPLASH` 环境开关 + `GCReportSplashClasses()`（全类枚举探针） | 函数与 2 处调用（install / +1s/+3s 定时）删除 |
+| `GAODECLEAN_DEBUG_HOOKS` 环境开关（hook 跳过提示） | 删除，恢复静默 `return` |
+| 构建侧 | `Makefile` 去 `DIAG` 分支；`Makefile.local` 去 `diagdebs`；工作流去 `diag` 输入与分支 |
+
+**A2 清日志（8 处 `NSLog` 全清）**
+
+启动横幅 3 条、`signature=`、app version、`loaded`、hook 跳过、广告窗黑名单跳过、开屏守卫命中 —— 全部移除。
+正式包内 `[GaodeClean] ` 计数从「8 条」降为 **0**。
+
+> ★ 连带约束（踩过的坑）：`kGCSignature` / `kGCSection` 清日志后变成未使用常量 ⇒ `-Wunused-const-variable` 会
+> 破「0 警告」门禁，故一并删除；**`GaodeCleanSignature()` 保留**（它引用 `kGCVersion`/`kGCAuthor`/`kGCRepo`，
+> 既让这些常量保持「已使用」，也让版本串仍在包内 —— 门禁第 6 条「版本串一致性」正是靠它才成立）。
+
+**A3 门禁改口径**
+
+`verify_deb.sh` 第 5 条从「GCLog 剥空 + 保留 8 处 NSLog」改为**双零断言**：
+
+- 探针哨兵：`gaodeclean-diag|GAODECLEAN_DEBUG|GAODECLEAN_DIAG_LOG|WINSplash classes at runtime|hook SKIPPED|splash guard hooked|ad-window blacklist SKIPPED`
+- 日志哨兵：`[GaodeClean] ` 计数必须为 **0**（调试包自动跳过）
+
+**A4 版本与详情**
+
+`control` → 0.9.20；`Description` 重写为结构化多行（主要效果 / 全版本自适应 / 装后注销提示），
+Sileo 详情页排版更清晰；工作流 Release 正文重写（装哪个包对照表 + 本版说明 + 功能一览 + 校验 + 构建说明）。
+
+**实测**：双跑编译 **0 警告**；本地双包门禁全绿（探针 0 / 日志 0 / 版本串 `0.9.20` / 载荷路径正确）；
+`Installed-Size` 198 KB（arm64）/ 200 KB（arm64e）。
+
+### §AG · 0.9.20 —— 最高级加固：字符串混淆加密 + 链接期符号剥离
+
+**起因**：老大追加要求「最高级加密混淆成品 deb」。此前 0.9.x 一直沿用
+「发布构建剥日志 + FINALPACKAGE 剥调试符号」，`strings` 仍能一眼读出全部
+Amap 私有类名（`WINPermanentCompassView`/`WINLiteWidgetGroupView`/…）与
+全部 selector，等于把「这个 tweak 打了什么」直接摊开。
+
+**A1 编译/链接期加固**（`Makefile`、`Makefile.local` 同步同口径）
+
+| 项 | 原状 | 现状 |
+|:--|:--|:--|
+| 可见性 | 默认 | `-fvisibility=hidden`（内部符号不外露） |
+| 本地符号 | 保留（`AlignCornerWidgets`/`CachedLiteGroup`/`SearchBarSettledY` 等公开可读） | `-Wl,-x` 全部剥离 ⇒ `nm -a` 本地符号 **0** |
+| 死代码 | 保留 | `-Wl,-dead_strip` |
+| 编译器标识 | 默认 | `-fno-ident` |
+
+**A2 全部内部字符串混淆加密（本轮主体）**
+
+- 规模：**441 个 `@"…"` 字面量 / 295 条唯一串 / 430 个替换点**。
+- 方案：`scripts/gen_obf.py` 扫描源码 → 逐串独立密钥（`0xA7 + idx*31`）做
+  `b ^ key` → 加位置相关偏移 `17*(idx+i)+3` → 按 `(idx+i)%8` 左旋，得密文表；
+  写入 `src/GCStrData.h`（`gcObfBytes` 4,582 字节 + `gcObfTab` 295 条），
+  并把源码中的字面量整体改写为 `GCStrAt(idx)`。
+- 运行时：`src/GCStr.h` 懒解码 + `NSMutableArray` 缓存（每条只解一次，
+  非热点零开销）；纯 C 解码数学抽到 `src/GCObfMath.h`，主机与设备**同一份代码**。
+- 刻意**不加密**的只有 3 个文件级 `static NSString *const`（`kGCAuthor`
+  /`kGCRepo`/`kGCVersion`）——C 静态初始化必须是编译期常量，无法用函数替换。
+- 刻意**不做**的：不加反调试 / 反 VM（会与 Dopamine/RootHide 冲突，见全局约定）。
+- 系统公开 API（UIKit/Foundation 的类名与 selector）不加密也无意义：它们本就出现在
+  App 自身镜像里，藏不住也不影响判定。
+
+**A2 自证（关键：加密不能把功能改坏）**
+
+- `scripts/obf_selftest.c`：用 `GCObfMath.h` 在主机上把 295 条密文全部解回明文，
+  逐条与 `scripts/obf_strings.txt` 比对，并校验数据头内嵌的 FNV-1a 摘要
+  `GC_OBF_FNV = 0x80C5B4682D5E281C`。
+- 结果：`PASS 混淆回环 295/295 条逐字节一致`；已接入 `make -f Makefile.local check`
+  与 CI（`Obfuscation round-trip self-test` 步骤），今后任何一次改串都会自动复验。
+- 数据头可从清单**逐字节复现**：`python3 scripts/gen_obf.py --from-list` 重生成的
+  `GCStrData.h` 与在用版本 diff 仅多一行摘要 ⇒ 清单顺序/密钥/旋转全部可追溯。
+
+**A3 加固连带踩坑：版本串被 `-dead_strip` 删除（当场修）**
+
+- 现象：加固后门禁报 `体内版本串与 control 不一致：control=0.9.20 … dylib 内找不到`。
+- 根因：`kGCVersion` 只被 `GaodeCleanSignature()` 引用，而后者在 0.9.20 清日志后
+  **已无任何调用者** ⇒ 死代码被整段移除，字符串随之消失。
+- 修法：构造函数内以内存屏障钉住该串（不进任何功能路径）：
+  `__asm__ volatile("" :: "r"(kGCVersion.UTF8String) : "memory");`
+- 复验：`strings -a` 命中 `0.9.20` **1** 处，本地符号仍为 **0**。
+
+**A4 门禁新增（`scripts/verify_deb.sh` §7a/7b/7c）**
+
+- **7a 混淆生效**：`WINPermanentCompassView|WINAJXCombinedWidgetView|WINLiteWidgetGroupView|WINDeviceInterconnectWidget|WINGroupMapWidget|amap_bundle_quickservice` 命中必须 **0**。
+- **7b 中文关键词**：`酒店/加油站/超市/停车场` 无明文残留（注意中文字面量在 Mach-O 里是
+  UTF-16/`__ustring`，`strings` 查不实，须按 UTF-16 形状核验）。
+- **7c 本地符号**：`nm -a` 的 `t/s` 符号数 ≤ 2（实测 0）。
+
+**A5 交付面**
+
+- `control` 新增「已加固」说明（Sileo 详情可见）；`control` 体积 916 → 1,073 B。
+- CI 源码包**刻意剔除** `scripts/obf_strings.txt`（明文清单只留私有仓库），
+  避免「二进制混淆了、源码包又把明文送出去」。
+
+**实测（本地链，双架构）**：双跑编译 **0 警告**；混淆回环 **295/295 PASS**；
+两包门禁各 **14 项全 OK**（含 7a/7b/7c）；arm64 dylib 190,416 B / arm64e 191,072 B。
+
 ## 五、教训
 
 1. **视图「不见了」按三个通道依次排除** — `hidden` → `alpha` → `removeFromSuperview`；
@@ -1554,27 +1659,32 @@ cmp <(ar p dist/*.deb data.tar.gz | tar xzO ./var/jb/.../GaodeClean.dylib) dist/
 0.9.15  锚点「定格后才锁定」+ 几何不变量 + 未定格不摆位（假设：SearchBarSettledY 锁了第一帧）—— 真机仍裸露 22 帧，见 §Z
 0.9.16  §Z：真凶是 App 原生 WINLiteWidgetGroupView —— 出生即藏 + 未定格按住 + 定格后同刻放行  ← 当前（采用）
 0.9.16+§AA  构建通道迁移：正式 deb 一律由 GitHub Actions（macos-14 + theos）构建，本地链降级为临时验证
+0.9.17  §AB：⊙/↰「连接车机」间隙 6.9 → 19.5pt（整组上移 12.4pt，对表原生）
+0.9.18  §AC：车机钮 / 天气行 / 2D·3D 三项对表原生（间隙按类分离 + 天气行左对齐钮下方）
+0.9.19  §AE：2D/3D 真身 `WINPermanentCompassView`（三级识别 + 直钩 layout/didMoveToWindow）
+0.9.20  §AF 清探针清日志 + §AG 最高级加固：全量字符串混淆加密 + 链接期符号剥离  ← 当前（采用）
 ```
 
 ---
 
 ## 八、标识
 
-源码与产物均带 `jibamao` 标识：
+**0.9.20 起（加固后）**：镜像内**不再**出现作者/仓库标识。原因有二：
+
+1. `GaodeCleanSignature()` 在 0.9.20 清日志后已无调用者，被 `-Wl,-dead_strip` 整段移除，
+   其引用的 `jibamao` / `gan-jibamao.github.io` / `GaodeClean by jibamao` 一并消失；
+2. 其余全部内部字符串已混淆加密（§AG · A2），`strings` 读到的都是密文。
+
+现在可核对的只剩两项，均为**刻意保留**：
 
 ```bash
-strings GaodeClean.dylib | grep -i jibamao
-# jibamao
-# gan-jibamao.github.io
-# jibamao-Tweaks
-# GaodeClean by jibamao
+# ① 安装路径标识（必须叫 GaodeClean.dylib，无法也不该隐藏）
+strings GaodeClean.dylib | grep -i gaodeclean        # /Library/.../GaodeClean.dylib
+# ② 版本串（门禁与装机核对依赖；由构造函数内存屏障钉住）
+strings GaodeClean.dylib | grep -F 0.9.20            # 0.9.20  ×1
 ```
 
-启动输出：
-
-```
-[GaodeClean] GaodeClean v0.9.16 | jibamao | https://gan-jibamao.github.io/
-```
+**无任何自定义日志**：0.9.20 起 `[GaodeClean]` 前缀命中 **0**，启动不再打印版本行。
 
 ### §AA 附：CI 通道首次打通与产物核验（2026-10-22 07:0x–07:3x）
 

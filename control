@@ -1,9 +1,23 @@
 Package: com.jibamao.gaodeclean
 Name: GaodeClean 高德精简
-Version: 0.9.19
+Version: 0.9.20
 Architecture: iphoneos-arm64
-Description: 高德地图 UI 精简（版本限制已取消，全版本自适应）：根除底栏「上拉发现」引导提示、去底栏上拉白雾/闪白、去顶部高斯模糊带、
- 去首页白块、搜索栏与天气行归位、切页与切 2D/3D 不再跳动。纯 UI hook，不抓网络、不改 IPA。
+Description: 高德地图 UI 精简 · 纯运行时 hook
+ 按原生关系归位、去冗余视觉干扰；不抓网络、不改 IPA、不采集任何数据。
+ .
+ 主要效果：
+  • 去底栏「上拉发现」引导提示、去上拉白雾/闪白
+  • 去顶部高斯模糊带、去首页白块
+  • 搜索栏 / 天气行 / 连接车机 / 2D·3D / 定位·路线胶囊，按原生位置归位
+  • 切页与切 2D/3D 不再跳动；冷启动也不会在屏幕中部闪出按钮
+ .
+ 已加固：链接期剥离全部本地符号，内部字符串一律混淆加密存储、运行时解密，
+ 无任何诊断埋点与自定义日志。
+ .
+ 全版本自适应：按类名与几何特征判定，不依赖具体高德版本号。
+ 装后请注销（sbreload）或重启用户空间再打开高德。
+ .
+ 常用说明与更新日志见仓库 Release 页面。
 Maintainer: jibamao
 Author: jibamao
 Section: jibamao-Tweaks

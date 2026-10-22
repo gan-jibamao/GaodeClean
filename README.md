@@ -4,8 +4,8 @@
 
 | | |
 |:--|:--|
-| **版本** | `0.9.19`（2D/3D「地图类型」按钮：真身 `WINPermanentCompassView`，识别器重写 + 类名直钩，摆回胶囊正上方） |
-| **门禁** | arm64 / arm64e 双架构 **0 警告**（日志剥离开/关**双跑**）；旧版本串残留 0；arm64e cpusubtype `0x2`；锚点逻辑按真机数值逐拍仿真（旧 3 拍落中部 / 新 0 拍） |
+| **版本** | `0.9.20`（功能已验收完成；本版清探针、清日志 + 最高级加固混淆） |
+| **门禁** | arm64 / arm64e 双架构 **0 警告**（日志剥离开/关**双跑**）；旧版本串残留 0；arm64e cpusubtype `0x2`；**探针与自定义日志零残留**；锚点逻辑按真机数值逐拍仿真 |
 | **Author** | **jibamao** |
 | **Repo** | <https://gan-jibamao.github.io/> · Section `jibamao-Tweaks` |
 | **目标** | 高德地图 / AMap `com.autonavi.amap`（**版本限制已取消，全版本自适应**） |
@@ -50,12 +50,15 @@
 | 车机钮独立间隙 50pt（不再与胶囊共用 20pt） | 0.9.18 | ✅ 真机该项无反馈（2026-10-22） |
 | 天气行回原生关系：车机钮正下方、左对齐（不再是「车机钮右侧」） | 0.9.18 | ✅ 真机该项无反馈（2026-10-22） |
 | 2D/3D 按钮摆回 ⊙/↰ 胶囊正上方（0.9.18 用文本判定，真机**从未命中**） | 0.9.18 | ❌ 真机反馈「还是没动」 |
-| 2D/3D 识别器三级重写 + `WINPermanentCompassView` 类名直钩 + 间隙 13.3 | 0.9.19 | 🕐 待真机复验 |
+| 2D/3D 识别器三级重写 + `WINPermanentCompassView` 类名直钩 + 间隙 13.3 | 0.9.19 | ✅ 真机验收通过（2026-10-22） |
+| 清探针、清日志：删诊断模块 + 2 个环境开关 + 全类枚举探针；8 处 `NSLog` 全清（正式包 `[GaodeClean]` 计数 **0**） | 0.9.20 | 🕐 仅构建验证，功能与 0.9.19 同源 |
+| **最高级加固混淆**：441 处字面量 / 295 条唯一串全部加密存储 + 运行时解密；`-Wl,-x` 剥离本地符号（`nm -a` 残留 **0**） | 0.9.20 | 🕐 混淆回环 **295/295** 逐字节自证通过 |
 
-正式包**零诊断埋点** —— 不再写 `Documents/GaodeClean-*.txt`，源文件零磁盘 I/O。
-需要取证时可用环境变量 `GAODECLEAN_DEBUG_HOOKS=1`（列出被签名守卫跳过的 Hook）
-或 `GAODECLEAN_DEBUG_SPLASH=1`（列出运行时 `WINSplash*` 类）；两者默认**全关**，
-打开也只走 `NSLog`，仍不落任何文件。
+发布包**零诊断埋点、零自定义日志**（0.9.20 起）：
+
+- 不写任何文件（源文件零磁盘 I/O）；诊断模块与两个 `GAODECLEAN_DEBUG_*` 环境开关**物理删除**，不是关掉
+- 8 处 `NSLog` 全部清除；正式包内 `[GaodeClean] ` 字符串计数为 **0**，由门禁第 5 条双零断言守住
+- 开发期日志走 `GCLog`：`Makefile.local` 的 `RELEASE=0` 构建才会打印，正式包编译期展开为空操作
 
 ---
 
@@ -74,9 +77,22 @@
 > 判据踩坑记录见 [`HISTORY.md`](HISTORY.md)：底栏胶囊定位、整页亮度两个指标都曾把结论带反；
 > 最终以**参考帧最近邻分类**（取已知正确的帧做标尺）为准。
 
+### 加固与混淆（0.9.20 起，最高级）
+
+| 层 | 措施 | 核验方式 |
+|:--|:--|:--|
+| 编译 | `-fvisibility=hidden -fno-ident` | 内部符号不外露 |
+| 链接 | `-Wl,-x`（剥本地符号）、`-Wl,-dead_strip`（去死代码） | `nm -a` 的 `t/s` 符号 **0** |
+| 字符串 | 441 处字面量 / 295 条唯一串加密存储（逐串密钥 + 位置偏移 + 位旋转），运行时 `GCStr.h` 解密并缓存 | 门禁 7a：抽样 6 类敏感明文命中 **0**；7b：中文关键词无残留 |
+| 自证 | 主机用**同一份**解码数学把 295 条全部解回明文逐条比对 + FNV 摘要校验 | `PASS 混淆回环 295/295 条逐字节一致` |
+| 不做 | 不加反调试 / 反 VM（会与 Dopamine / RootHide 冲突）；系统公开 API 名不加密（App 镜像里本就有） | — |
+
+> `strings GaodeClean.dylib` 现只能读出两条刻意保留的信息：安装路径中的
+> `GaodeClean.dylib`，以及版本串 `0.9.20`（由构造函数内存屏障钉住，供门禁与装机核对）。
+
 ### 构建门禁（0.9.8 起，`make check` 强制）
 
-| 项 | 判据 | 0.9.19 实测 |
+| 项 | 判据 | 0.9.20 实测 |
 |:--|:--|:--|
 | 编译告警 | 与 0.9.7 基线逐条比对 | **0 / 0**（`STRIP=1` 与 `STRIP=0` 双跑均为 0）|
 | 版本串残留 | 旧版本号命中数 | **0** |
@@ -85,21 +101,27 @@
 | 载荷路径 | rootless `/var/jb`、RootHide `/Library` | 解包逐条核验通过 |
 | 锚点逻辑 | 按真机数值（目标 436→701）逐拍仿真 | 旧逻辑 3 拍落中部位；新逻辑 **0 拍** |
 | 载荷一致性 | deb 内 dylib 与交付 dylib `cmp` | 双架构**逐字节一致** |
-| 日志分档 | 正式包 12 处 GCLog 编译期剥离 | `strings` 命中 **0**；装机核对 8 处 NSLog 保留 |
-| `Installed-Size` | 按真实载荷计算 | 181 / 183 KB |
+| 探针残留 | 诊断模块 / 环境开关 / 全类枚举探针 | 正式包内命中 **0** |
+| 日志残留 | 正式包内 `[GaodeClean]` 自定义日志串 | 命中 **0**（0.9.20 起 GCLog 与 NSLog 全清） |
+| `Installed-Size` | 按真实载荷计算 | 198 / 200 KB |
 
 ---
 
 ## 目录
 
 ```
-src/GaodeClean.m          当前源码（0.9.19）
-src/GCCDiag.h             真机取证模块（仅 -DGAODECLEAN_DIAG_LOG=1 编译）
+src/GaodeClean.m          当前源码（0.9.20，无探针/无日志）
 src/GCCGeometry.h         几何辅助头
 Makefile                  ★ 正式构建入口（theos 工程，GitHub Actions 使用）
 Makefile.local            本地临时验证构建入口（iSH clang 链，不产出发布资产）
 .github/workflows/build-theos.yml  ★ CI：macos-14 + theos，双架构出包 + 门禁 + 打 tag 自动发 Release
-scripts/verify_deb.sh     deb 核验门禁（载荷前缀 / 架构切片 / 日志剥离 / 过滤器）
+scripts/verify_deb.sh     deb 核验门禁（载荷前缀 / 架构切片 / 日志剥离 / 混淆生效 / 符号剥离 / 过滤器）
+scripts/gen_obf.py        字符串混淆生成器（可 --from-list 从清单逐字节复现数据头）
+scripts/obf_strings.txt   ★ 明文清单（私有仓库保留；**刻意不随源码包分发**）
+scripts/obf_selftest.c    主机回环自测（把密文解回明文逐条比对 + 校验 FNV 摘要）
+src/GCStr.h               混淆串解码运行时（懒解码 + 缓存）
+src/GCObfMath.h           纯 C 解码数学（主机与设备同一份）
+src/GCStrData.h           自动生成：密文表 295 条 + FNV 摘要
 scripts/mkdeb.py          不依赖 dpkg-deb 的打包脚本（本地链专用，版本/路径全参数化）
 scripts/fixarch.py        arm64e cpusubtype 修正 + 签名页哈希重算（本地链专用）
 scripts/make-roothide.sh  【已废弃】历史脚本，打包请直接用 mkdeb.py
@@ -123,7 +145,7 @@ git push origin main
 gh workflow run "Build GaodeClean"
 
 # 发版：打 tag 后自动构建并把资产挂到 Release
-git tag v0.9.19 && git push origin v0.9.19
+git tag v0.9.20 && git push origin v0.9.20
 ```
 
 CI 内部等价于：
@@ -138,8 +160,7 @@ scripts/verify_deb.sh <deb> <scheme>                        # 门禁，失败即
 
 ```bash
 make -f Makefile.local check             # 剥离/不剥离 双跑 0 警告门禁
-make -f Makefile.local deb               # 本地临时包
-make -f Makefile.local diagdebs          # 真机取证包
+make -f Makefile.local deb               # 本地临时包（仅自检，不作交付）
 make -f Makefile.local SDK=/path/to/iPhoneOS16.5.sdk
 ```
 
@@ -241,7 +262,8 @@ arm64e 切片有两个坑：lld 不支持它的 `-fixup_chains`（改走经典 `
 0.9.16  §Z：真凶是 App 原生 WINLiteWidgetGroupView（出生即藏 + 未定格按住 + 定格后同刻放行）
 0.9.17  ⊙/↰ 间隙对表原生 8pt→20pt（整组上移 12.4pt）
 0.9.18  车机钮 50pt / 天气行回「钮下左对齐」；2D3D 文本识别未命中（真机未动）
-0.9.19  §AE：2D3D 真身 = WINPermanentCompassView；三级识别 + 类名直钩 + 间隙 13.3   ← 当前（采用）
+0.9.19  §AE：2D3D 真身 = WINPermanentCompassView；三级识别 + 类名直钩 + 间隙 13.3（真机验收通过）
+0.9.20  §AF：清探针 + 清日志；§AG：最高级加固（字符串混淆加密 + 链接期符号剥离）   ← 当前（采用）
 ```
 
 ---

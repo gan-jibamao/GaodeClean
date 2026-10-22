@@ -11,7 +11,6 @@
 #  【临时验证】用途，见 Makefile.local：
 #    make -f Makefile.local check     # 剥离/不剥离 双跑 0 警告门禁
 #    make -f Makefile.local deb       # 本地临时包（不得作为发布资产）
-#    make -f Makefile.local diagdebs  # 真机取证包
 # ============================================================================
 
 ARCHS = arm64 arm64e
@@ -22,21 +21,18 @@ include $(THEOS)/makefiles/common.mk
 
 TWEAK_NAME = GaodeClean
 
-# 源码与本地链完全同源：src/GaodeClean.m（+ GCCGeometry.h / GCCDiag.h）
+# 源码与本地链完全同源：src/GaodeClean.m（+ GCCGeometry.h）
 GaodeClean_FILES = src/GaodeClean.m
-GaodeClean_CFLAGS = -fobjc-arc -fmodules -Isrc -Wall -Wextra -Wno-unused-parameter
+GaodeClean_CFLAGS = -fobjc-arc -fmodules -Isrc -Wall -Wextra -Wno-unused-parameter \
+                    -fvisibility=hidden -fno-ident
+# 0.9.21（A1）加固：-Wl,-x 剥掉全部本地符号，-Wl,-dead_strip 去死代码；
+# 配合 -fvisibility=hidden，nm/strings 里不再暴露内部函数名与实现线索。
+GaodeClean_LDFLAGS = -Wl,-x -Wl,-dead_strip
 GaodeClean_FRAMEWORKS = UIKit Foundation
 
 # 正式包剥掉全部 GCLog 诊断串（与 Makefile.local 的 RELEASE=1 语义一致）
 ifeq ($(FINALPACKAGE),1)
 GaodeClean_CFLAGS += -DGAODECLEAN_STRIP_LOGS=1
-endif
-
-# 真机取证包（0.9.18 起也可由 CI 出）：
-#   make package FINALPACKAGE=0 DIAG=1 THEOS_PACKAGE_SCHEME=<scheme>
-#   → 版本号由 workflow 改写为 <base>+diag3，包名自带 +diag3，内容为未剥离 + 诊断
-ifeq ($(DIAG),1)
-GaodeClean_CFLAGS += -DGAODECLEAN_DIAG_LOG=1
 endif
 
 include $(THEOS_MAKE_PATH)/tweak.mk

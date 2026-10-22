@@ -5,3 +5,7 @@ packages/
 # 本机临时验证产物（正式包由 GitHub Actions 构建，见 .github/workflows/build-theos.yml）
 distdiag/
 *.o
+
+# python 缓存
+__pycache__/
+*.pyc
