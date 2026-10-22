@@ -21,7 +21,7 @@ CLANG      ?= clang
 TARGET_IOS ?= 15.0
 OUT        ?= dist
 SRC        := src/GaodeClean.m
-HDR        := src/GCCGeometry.h
+HDR        := src/GCCGeometry.h src/GCCDiag.h
 
 # 0.9.14（A9）：正式包剥离诊断日志（GCLog → 空操作）。
 RELEASE    ?= 1
@@ -31,8 +31,11 @@ else
 STRIPFLAGS :=
 endif
 
+# 0.9.14-diag：真机事实采集构建（-DGAODECLEAN_DIAG_LOG=1 才会编译 GCCDiag.h）
+EXTRA      ?=
+
 COMMON := -isysroot $(SDK) -fobjc-arc -fmodules -O2 \
-          -Wall -Wextra -Wno-unused-parameter -I src $(STRIPFLAGS)
+          -Wall -Wextra -Wno-unused-parameter -I src $(STRIPFLAGS) $(EXTRA)
 LINK   := -dynamiclib \
           -install_name /Library/MobileSubstrate/DynamicLibraries/GaodeClean.dylib \
           -framework UIKit -framework Foundation -fuse-ld=lld -Wl,-adhoc_codesign
@@ -79,8 +82,11 @@ check:
 	done
 	@echo "check: 全部通过"
 
-# 0.9.14：带诊断日志的调试包（不发版，真机排查用；Makefile 里不带 -D 剥离宏）
+# 0.9.14：带诊断日志的调试包（不发版，真机排查用）
 dev: ; $(MAKE) RELEASE=0 deb
+
+# 0.9.14-diag：事实采集包 —— 每 200ms 采样按钮生命周期并落盘（真机排查专用）
+diagdebs: ; $(MAKE) RELEASE=0 EXTRA="-DGAODECLEAN_DIAG_LOG=1" deb
 
 clean:
 	rm -f $(DYLIB64) $(DYLIB64E) $(OUT)/*.deb
