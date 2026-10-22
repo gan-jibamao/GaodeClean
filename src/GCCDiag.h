@@ -78,7 +78,7 @@ static void GCDiagSample(void) {
     if (!win && wins.count) win = wins.firstObject;
     if (!win) { GCDiag(@"S%02d 无窗口", n); return; }
 
-    UIView *widget = nil;
+    NSMutableArray *widgets = [NSMutableArray array];
     NSMutableArray *suspects = [NSMutableArray array];
     CGSize scr = UIScreen.mainScreen.bounds.size;
 
@@ -88,10 +88,7 @@ static void GCDiagSample(void) {
         UIView *v = queue[qi++]; nodes++;
         NSString *cn = NSStringFromClass(v.class);
         if ([cn isEqualToString:@"WINAJXCombinedWidgetView"]) {
-            if (!widget) widget = v;
-            if (v.hidden || v.alpha < 0.1 || CGSizeEqualToSize(v.bounds.size, CGSizeZero)) {
-                // 即便隐藏也记录首个实例（截满 3 个）
-            }
+            if (widgets.count < 5) [widgets addObject:v];   // 0.9.15+diag：全部实例都记
         }
         if (!v.hidden && v.alpha > 0.1 && v.window) {
             CGSize bs = v.bounds.size;
@@ -110,18 +107,22 @@ static void GCDiagSample(void) {
         if (subs.count) [queue addObjectsFromArray:subs];
     }
 
-    NSString *wi = @"none";
-    if (widget) {
-        CGRect r = [widget convertRect:widget.bounds toView:win];
-        wi = [NSString stringWithFormat:@"(%.0f,%.0f,%.0fx%.0f) hid=%d a=%.2f win=%d tag=%@ sup=%@",
-              r.origin.x, r.origin.y, r.size.width, r.size.height,
-              widget.hidden, widget.alpha, widget.window != nil,
-              ObjectGetter(widget, @"getItemTag") ?: @"nil",
-              NSStringFromClass(widget.superview.class)];
+    // 0.9.15+diag：记录**全部** WINAJXCombinedWidgetView 实例（带 tag/AlignedKey/是否被认领），
+    // 上一版只记「第一个」，三个实例（rightTop/rightBottom/rank）混在一起无法分辨 —— 已修。
+    NSMutableArray *wi = [NSMutableArray array];
+    for (UIView *wv in widgets) {
+        CGRect r = [wv convertRect:wv.bounds toView:win];
+        [wi addObject:[NSString stringWithFormat:@"%@@(%.0f,%.0f,%.0fx%.0f)hid%dAl%daA%dCold%dwin%d",
+                       ObjectGetter(wv, @"getItemTag") ?: @"nil",
+                       r.origin.x, r.origin.y, r.size.width, r.size.height,
+                       wv.hidden, (int)(wv.alpha * 100),
+                       objc_getAssociatedObject(wv, &AlignedKey) != nil,
+                       [ColdWidgets containsObject:wv], wv.window != nil]];
     }
-    GCDiag(@"S%02d tick=%ld H=%d SB=%d(%0.f) | W=%@ | mid=%s[%@]",
+    GCDiag(@"S%02d tick=%ld H=%d SB=%d(y=%.0f) | W%lu: %@ | mid=%s[%@]",
            n, (long)ColdTicks, HomeSettled, SearchBarSettled, SearchBarSettledY,
-           wi, suspects.count ? "" : "无", [suspects componentsJoinedByString:@" "]);
+           (unsigned long)widgets.count, [wi componentsJoinedByString:@" "],
+           suspects.count ? "" : "无", [suspects componentsJoinedByString:@" "]);
 
     if (CachedCar != lastCar) { GCDiag(@"   * CachedCar -> %@", CachedCar ? NSStringFromClass(CachedCar.class) : @"nil"); lastCar = CachedCar; }
     if (CachedRight != lastRight) { GCDiag(@"   * CachedRight -> %@", CachedRight ? NSStringFromClass(CachedRight.class) : @"nil"); lastRight = CachedRight; }
@@ -179,8 +180,10 @@ static void GCDiagInstall(void) {
             IMP prev = method_getImplementation(m);
             const char *types = method_getTypeEncoding(m);
             Replace(cls, sel, imp_implementationWithBlock(^(UIView *self, CGFloat a) {
-                GCDiag(@"  setAlpha:%.2f (旧 %.2f) frame=(%.0f,%.0f)",
-                       a, self.alpha, self.frame.origin.x, self.frame.origin.y);
+                GCDiag(@"  setAlpha:%.2f (旧 %.2f) frame=(%.0f,%.0f) tag=%@ aligned=%d",
+                       a, self.alpha, self.frame.origin.x, self.frame.origin.y,
+                       ObjectGetter(self, @"getItemTag") ?: @"nil",
+                       objc_getAssociatedObject(self, &AlignedKey) != nil);
                 ((void (*)(id, SEL, CGFloat))prev)(self, sel, a);
             }), types);
         }
@@ -193,10 +196,38 @@ static void GCDiagInstall(void) {
             Replace(cls, sel, imp_implementationWithBlock(^(UIView *self, CGRect rect) {
                 if (GCDiagFrameBudget > 0) {
                     CGRect r = self.window ? [self.superview convertRect:rect toView:self.window] : rect;
-                    GCDiag(@"  setFrame:->(%.0f,%.0f,%.0fx%.0f) win系(%.0f,%.0f) hid=%d a=%.2f",
+                    id tag = ObjectGetter(self, @"getItemTag");
+                    GCDiag(@"  setFrame:->(%.0f,%.0f,%.0fx%.0f) win系(%.0f,%.0f) hid=%d a=%.2f tag=%@ aligned=%d",
                            rect.origin.x, rect.origin.y, rect.size.width, rect.size.height,
-                           r.origin.x, r.origin.y, self.hidden, self.alpha);
+                           r.origin.x, r.origin.y, self.hidden, self.alpha, tag ?: @"nil",
+                           objc_getAssociatedObject(self, &AlignedKey) != nil);
                     GCDiagFrameBudget--;
+                    // ★ 决定性：写入「中部位置」的那一刻抓调用栈 —— 直接点名是谁写的
+                    //   （我们自己的 AlignOneWidget / 钳位，还是 app 的原生布局）
+                    CGSize scr = UIScreen.mainScreen.bounds.size;
+                    BOOL isMid = self.window && r.origin.y > scr.height * 0.25 && r.origin.y < scr.height * 0.70;
+                    BOOL isBtn = tag && [tag isKindOfClass:NSString.class] && [tag rangeOfString:@"RightBottom"].location != NSNotFound;
+                    static int midStackBudget = 6;
+                    if (isMid && isBtn && midStackBudget > 0 && r.size.height > 40) {
+                        midStackBudget--;
+                        NSArray<NSString *> *st = [NSThread callStackSymbols];
+                        NSMutableArray *keep = [NSMutableArray array];
+                        for (NSUInteger i = 1; i < st.count && keep.count < 14; i++) {
+                            NSString *line = st[i];
+                            // 只留我们自己、app 关键类与 ObjC 派发行，压掉系统噪音
+                            if ([line rangeOfString:@"GaodeClean"].location != NSNotFound
+                                || [line rangeOfString:@"Gaode"].location != NSNotFound
+                                || [line rangeOfString:@"WIN"].location != NSNotFound
+                                || [line rangeOfString:@"AJX"].location != NSNotFound
+                                || [line rangeOfString:@"Align"].location != NSNotFound
+                                || [line rangeOfString:@"Layout"].location != NSNotFound
+                                || [line rangeOfString:@"objc_msgSend"].location != NSNotFound) {
+                                [keep addObject:[line stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceCharacterSet]];
+                            }
+                        }
+                        GCDiag(@"  ★★ 中部写入栈(tag=%@, win系 y=%.0f):", tag, r.origin.y);
+                        for (NSString *k in keep) GCDiag(@"       | %@", k);
+                    }
                 }
                 ((void (*)(id, SEL, CGRect))prev)(self, sel, rect);
             }), types);
