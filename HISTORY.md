@@ -1414,3 +1414,44 @@ strings GaodeClean.dylib | grep -i jibamao
 ```
 [GaodeClean] GaodeClean v0.9.16 | jibamao | https://gan-jibamao.github.io/
 ```
+
+### §AA 附：CI 通道首次打通与产物核验（2026-10-22 07:0x–07:3x）
+
+**踩坑三连（全部为脚本自身缺陷，产物无问题）**
+
+| # | 失败点 | 铁证 | 修法 |
+|:--|:--|:--|:--|
+| 1 | `dpkg-deb` 解析 control | `duplicate value for 'Installed-Size' field` | theos 的 `deb.mk` 会剥掉 `Version:`/`Architecture:` 再自行追加，**但不动 `Installed-Size`** ⇒ control 里手写的那行成了重复字段。删除手写行；`mkdeb.py` 改为「有则替换、无则插入」 |
+| 2 | 载荷路径误判 | homebrew dpkg 的 `dpkg-deb -c` 输出**不带 `./` 前缀** | 正则改 `(^| )(\./)?PATH$` |
+| 3 | 脚本崩溃 | `verify_deb.sh: line 112: NLOG<乱码>: unbound variable` | `$NLOG` 后紧跟**全角逗号**被 bash 并入变量名 ⇒ 一律写 `${NLOG}` |
+
+另修正一处**哨兵设计错误**：正式包**故意保留 8 处 `NSLog`**，拿 `[GaodeClean] ` 当剥离哨兵必然误判；
+哨兵改为只出现在 GCLog 里的文案（`blocked tab guide lottie` / `page=%ld anchor=pending` /
+`splash ad hidden` / `weather row released` / `fog sweep hides`）。
+
+**最终运行**
+
+- `Build GaodeClean`（tag `v0.9.16`，sha `38617ec`）**双 job success**，run `39741000876`；Release `420422431` 已发布，6 资产齐全。
+- 私有仓库额度拦截实测：本月 Linux 496 min + macOS 431.8 min（×10）≈ **4,814 / 免费 2,000**
+  ⇒ 私有仓库 macOS job **steps=0 秒失败**，注解「recent account payments have failed or your spending limit needs to be increased」。
+  本次经授权**临时转公开**（07:10→07:34，24 分钟窗口），跑完立即转回 private。
+
+**CI 产物核验（回下载逐项）**
+
+| 项 | 结果 |
+|:--|:--|
+| 6 资产 SHA256 | **6/6 OK**（与 `SHA256SUMS.txt` 一致） |
+| 架构标签 | rootless `iphoneos-arm64` / roothide `iphoneos-arm64e` |
+| 载荷路径 | `/var/jb/Library/MobileSubstrate/DynamicLibraries/` 与 `Library/MobileSubstrate/DynamicLibraries/` 各就位 |
+| dylib 切片 | **两包均为 fat：arm64（sub 0x0）+ arm64e（sub 0x80000002）** |
+| 过滤器 | `Bundles=[com.autonavi.amap]`，二进制 plist |
+| 维护脚本 | 无（无需路径转换） |
+| 日志剥离 | GCLog 哨兵 0 命中；单切片保留 8 处 NSLog（fat 计 16） |
+| Source.zip | 33 文件，含 `Makefile`/`control`/`src`/`.github/workflows`；`dist/`、`.theos/`、`packages/`、`.git/` **0 命中** |
+
+**与本地已验收二进制的等价性**：同一份源码、不同工具链 ⇒ 二进制不同（theos 走 `-Os`+strip，
+`__text` 58,580 vs 本地 `-O2` 84,964）。静态比对：CI 的 `__cstring` 271 条、`__objc_methname` 199 条
+**全部是本地版对应集合的子集**；私有类名（`WINLiteWidgetGroupView`/`WINMultiStyleRootView`/`WINTabBarControl`）、
+`didMoveToWindow`/`layoutSubviews`/`setHidden`、ARC 运行时符号（`_objc_retain`/`_objc_release`/`_objc_storeStrong`）均在。
+本地版多出的是 `AlignCornerWidgets`/`CachedLiteGroup`/`SearchBarSettledY`/`ColdTicks` 等
+**static 函数与变量名**（只存在于符号表，theos 发布构建会剥掉）—— 属预期的发布加固，非功能缺失。
