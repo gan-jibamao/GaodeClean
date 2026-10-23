@@ -18,7 +18,7 @@
 // ---- jibamao 个人标识（编译进 dylib，可用 strings 核对）----
 static NSString *const kGCAuthor      = @"jibamao";
 static NSString *const kGCRepo        = @"https://gan-jibamao.github.io/";
-static NSString *const kGCVersion     = @"0.9.28+trial1";
+static NSString *const kGCVersion     = @"0.9.28+probe2";
 
 // 0.9.18（A1）：底边间隙**按控件分开**，对表原生（搜索栏白底顶边 = 702.6pt）
 //   车机钮（连接车机 · WINDeviceInterconnectWidget）：原生底 652 → 间隙 50.6 → 取 50
@@ -837,16 +837,19 @@ static void GCProbeJudge(NSMutableString *o, UIView *v, CGRect wn, CGFloat sw) {
 }
 static void GCProbeNodeAt(NSMutableString *o, NSString *indent, UIView *v, CGFloat sw, CGFloat sh) {
     CGRect wn = GCProbeWin(v), f = v.frame;
-    CGFloat cr = 0, bw = 0; BOOL clip = NO; NSString *cts = @"nil";
+    CGFloat cr = 0, bw = 0, shd = 0; BOOL clip = NO; NSString *cts = @"nil", *lbg = @"nil";
     @try { cr = v.layer.cornerRadius; clip = v.layer.masksToBounds; bw = v.layer.borderWidth;
-           id x = v.layer.contents; if (x) cts = NSStringFromClass([x class]); } @catch (__unused NSException *e) {}
+           id x = v.layer.contents; if (x) cts = NSStringFromClass([x class]);
+           CGColorRef cg = v.layer.backgroundColor;
+           if (cg) lbg = GCProbeColorDesc([UIColor colorWithCGColor:cg]);
+           shd = v.layer.shadowOpacity; } @catch (__unused NSException *e) {}
     int bar = (!CGRectIsNull(wn) && wn.size.width >= sw - 170 && wn.size.height >= 18
                && wn.size.height <= 160 && fabs(CGRectGetMidX(wn) - sw * 0.5) <= 8);
-    [o appendFormat:@"%@%@ sup=%@ own=[%.1f,%.1f,%.1f,%.1f] win=[%.1f,%.1f,%.1f,%.1f] hid=%d a=%.2f bg=%@ corner=%.1f clip=%d bw=%.1f contents=%@ sub=%lu gest=%lu%@\n",
+    [o appendFormat:@"%@%@ sup=%@ own=[%.1f,%.1f,%.1f,%.1f] win=[%.1f,%.1f,%.1f,%.1f] hid=%d a=%.2f bg=%@ lbg=%@ shd=%.2f corner=%.1f clip=%d bw=%.1f contents=%@ sub=%lu gest=%lu%@\n",
         indent, NSStringFromClass(v.class), NSStringFromClass(v.superclass),
         f.origin.x, f.origin.y, f.size.width, f.size.height,
         wn.origin.x, wn.origin.y, wn.size.width, wn.size.height,
-        v.hidden, v.alpha, GCProbeColorDesc(v.backgroundColor), cr, clip, bw, cts,
+        v.hidden, v.alpha, GCProbeColorDesc(v.backgroundColor), lbg, shd, cr, clip, bw, cts,
         (unsigned long)v.subviews.count, (unsigned long)v.gestureRecognizers.count,
         bar ? @"   <<<BAR" : @""];
     if (bar) GCProbeJudge(o, v, wn, sw);
