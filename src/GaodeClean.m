@@ -18,7 +18,7 @@
 // ---- jibamao 个人标识（编译进 dylib，可用 strings 核对）----
 static NSString *const kGCAuthor      = @"jibamao";
 static NSString *const kGCRepo        = @"https://gan-jibamao.github.io/";
-static NSString *const kGCVersion     = @"0.9.28+probe3";
+static NSString *const kGCVersion     = @"0.9.28+trial2";
 
 // 0.9.18（A1）：底边间隙**按控件分开**，对表原生（搜索栏白底顶边 = 702.6pt）
 //   车机钮（连接车机 · WINDeviceInterconnectWidget）：原生底 652 → 间隙 50.6 → 取 50
@@ -918,9 +918,9 @@ static void GCProbeDump(NSString *reason) {
     if (!GCProbeBuf) GCProbeBuf = [NSMutableString string];
     UIWindow *kw = GCProbeMainWin();
     CGFloat sw = kw ? kw.bounds.size.width : 0, sh = kw ? kw.bounds.size.height : 0;
-    [GCProbeBuf appendFormat:@"\n===== dump #%ld reason=%@ t=%.1fs =====\n窗口=%.0fx%.0f scale=%.1f 目标=[24,%.1f] 构建=0.9.27+probe1\n",
+    [GCProbeBuf appendFormat:@"\n===== dump #%ld reason=%@ t=%.1fs =====\n窗口=%.0fx%.0f scale=%.1f 目标=[24,%.1f] 构建=%@\n",
         (long)(GCProbeDumps + 1), reason, GCProbeBoot ? CFAbsoluteTimeGetCurrent() - GCProbeBoot : 0.0,
-        sw, sh, kw ? kw.screen.scale : 0.0, sw - 48.0];
+        sw, sh, kw ? kw.screen.scale : 0.0, sw - 48.0, kGCVersion];   // A3：版本串不再写死
     if (sw > 200) {
         UIView *bar = SearchBarView, *tb = CachedTabBar;
         if (bar) {
@@ -1042,7 +1042,9 @@ static UIView *GCNarrowCapsule(UIView *anchor) {
         if (![v isKindOfClass:UIVisualEffectView.class]) continue;
         CGRect f = v.frame;
         if (f.size.height < 40 || f.size.height > 120) continue;
-        if (f.size.width < sw - 140 || f.size.width > sw - 4) continue;
+        // ★A2：下界不能是 sw-140 —— 夹取后胶囊宽 240 会掉出判据，导致下一拍再也找不到胶囊、
+        //   GCNarrowApply 直接 return，App 把伴生层改回原生时我们永久失去纠正能力（trial1 教训）。
+        if (f.size.width < GCNarrowTargetW - 2 || f.size.width > sw - 4) continue;
         if (fabs(CGRectGetMidX(f) - sw * 0.5) > 10) continue;
         if (f.size.width > bw) { best = v; bw = f.size.width; }
     }
@@ -1056,6 +1058,25 @@ static void GCNarrowInnerFix(UIView *v, CGFloat capW, int depth, NSInteger *budg
         CGRect f = c.frame;
         if (f.origin.x <= 2 && f.size.width > capW + 8) { f.size.width = capW; c.frame = f; }
         GCNarrowInnerFix(c, capW, depth + 1, budget);
+    }
+}
+// ★A1（probe3 破案）：App 把搜索栏白底画成**直接挂在 anchor.layer 上的独立 CALayer**，
+//   没有对应 UIView —— 只夹 UIVisualEffectView 时它原地不动，于是"图标缩了、白底还是 377 宽"。
+//   实测：CALayer win=[8,702,377,54] corner=27 bg=rgba(1,1,1,0.90) + 同尺寸 CAGradientLayer。
+//   底栏无此类层（白来自胶囊内部 UICABackdropLayer）⇒ 本函数在底栏天然空转。
+static void GCNarrowStandaloneLayers(UIView *anchor, CGFloat sw, CGFloat x) {
+    NSArray *layers = [anchor.layer.sublayers copy];
+    for (CALayer *la in layers) {
+        if (la.hidden || la.opacity < 0.02f) continue;
+        BOOL backing = NO;
+        for (UIView *v in anchor.subviews) if (v.layer == la) { backing = YES; break; }
+        if (backing) continue;                       // 子视图的 backing layer 已由 UIView 路径处理
+        CGRect f = la.frame;
+        if (f.size.height < 40 || f.size.height > 120) continue;
+        if (f.size.width < GCNarrowTargetW - 2 || f.size.width > sw - 4) continue;
+        if (fabs(CGRectGetMidX(f) - sw * 0.5) > 20) continue;
+        CGRect g = f; g.origin.x = x; g.size.width = GCNarrowTargetW;
+        if (!CGRectEqualToRect(g, f)) la.frame = g;   // 幂等：已达标不写
     }
 }
 // 夹取主函数：只动胶囊 x/w（y/h 不动），伴生物按绝对几何同步 —— 幂等
@@ -1072,6 +1093,7 @@ static void GCNarrowApply(UIView *anchor, BOOL isSearch) {
     if (!CGRectEqualToRect(g, cf)) cap.frame = g;
     NSInteger budget = 24;
     GCNarrowInnerFix(cap, GCNarrowTargetW, 0, &budget);
+    GCNarrowStandaloneLayers(anchor, sw, x);   // A1：独立白底/渐变层一并夹到目标宽
     if (isSearch) {
         // 浮在胶囊右侧的按钮：按绝对几何重排 —— 最右按钮右缘 = 胶囊右缘 - 12，
         // 其余向左依次相邻贴放（与原生排布关系完全一致，天然幂等、与谁最后布局无关）
