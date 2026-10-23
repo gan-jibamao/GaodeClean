@@ -18,7 +18,7 @@
 // ---- jibamao 个人标识（编译进 dylib，可用 strings 核对）----
 static NSString *const kGCAuthor      = @"jibamao";
 static NSString *const kGCRepo        = @"https://gan-jibamao.github.io/";
-static NSString *const kGCVersion     = @"0.9.30+trial2";
+static NSString *const kGCVersion     = @"0.9.30+trial3";
 
 // 0.9.18（A1）：底边间隙**按控件分开**，对表原生（搜索栏白底顶边 = 702.6pt）
 //   车机钮（连接车机 · WINDeviceInterconnectWidget）：原生底 652 → 间隙 50.6 → 取 50
@@ -984,37 +984,53 @@ static void GCStyleCenterIcon(UIView *root, CGFloat d, CGFloat icon, int depth) 
         GCStyleCenterIcon(w, d, icon, depth + 1);
     }
 }
-// 搜索栏 → 单枚 54pt 圆钮；trial14：anchor 自身缩成 54×54（命中=圆钮本体，左右空白不响应），
-//   并下移到底栏同行（行心 = 屏高-54，与双圆钮同排：首页 c-66 / 搜索 c / 我的 c+66）
+// 搜索栏 → 单枚 54pt 圆钮（anchor 保持原生满宽，**不碰 anchor 几何** —— trial2 的
+//   anchor 缩尺寸/移位与 App 启动期布局对撞导致卡启动，trial3 回退）。
+//   圆外触摸由 GCStyleHookSearchHitTest 返回 nil ⇒ 只点圆钮才进搜索。
+static void GCStyleHookSearchHitTest(void) {
+    static BOOL done = NO;
+    if (done) return;
+    Class cls = NSClassFromString(@"WINQuickSearchBarV2");
+    if (!cls) return;
+    done = YES;
+    SEL sel = @selector(hitTest:withEvent:);
+    Method m = class_getInstanceMethod(cls, sel);
+    if (!m) return;
+    IMP original = method_getImplementation(m);
+    Replace(cls, sel, imp_implementationWithBlock(^UIView *(UIView *self, CGPoint point, UIEvent *event) {
+        UIView *cap = GCNarrowCapsule(self);
+        if (cap && !CGRectContainsPoint(cap.frame, point)) return nil;   // 圆外：不响应、不挡地图
+        return ((UIView *(*)(id, SEL, CGPoint, id))original)(self, sel, point, event);
+    }), method_getTypeEncoding(m));
+}
 static void GCStyleSearch(UIView *anchor) {
-    UIView *sup = anchor.superview;
-    UIWindow *win = anchor.window;
-    if (!sup || !win) return;
-    CGFloat sw = win.bounds.size.width, sh = win.bounds.size.height;
-    const CGFloat d = 54.0;
-    CGRect winR = CGRectMake((sw - d) * 0.5, sh - 81.0, d, d);
-    CGRect local = [sup convertRect:winR fromView:nil];
-    if (!CGRectEqualToRect(local, anchor.frame)) anchor.frame = local;
-    anchor.clipsToBounds = YES;
-    CGRect b = anchor.bounds;
+    GCStyleHookSearchHitTest();
+    CGFloat sw = anchor.bounds.size.width;
+    if (sw < 100) return;
+    const CGFloat d = 54.0, x = (sw - d) * 0.5;
     UIView *cap = GCNarrowCapsule(anchor);
     if (cap) {
-        if (!CGRectEqualToRect(b, cap.frame)) cap.frame = b;
-        cap.layer.cornerRadius = b.size.height * 0.5;
+        CGRect f = cap.frame;
+        CGRect g = CGRectMake(x, f.origin.y, d, f.size.height);
+        if (!CGRectEqualToRect(g, f)) cap.frame = g;
+        cap.layer.cornerRadius = f.size.height * 0.5;
         GCStyleCenterIcon(cap, d, 24.0, 0);   // 放大镜居中
     }
-    for (CALayer *la in [anchor.layer.sublayers copy]) {   // 独立白底/渐变层收进圆内
+    for (CALayer *la in [anchor.layer.sublayers copy]) {   // 独立白底/渐变层同夹成圆
         if (la.hidden || la.opacity < 0.02f) continue;
         BOOL backing = NO;
         for (UIView *v in anchor.subviews) if (v.layer == la) { backing = YES; break; }
         if (backing) continue;
-        if (!CGRectEqualToRect(b, la.frame)) { la.frame = b; GCNarrowInvalidateRender(la); }
-        la.cornerRadius = b.size.height * 0.5;
+        CGRect f = la.frame;
+        if (f.size.height < 40 || f.size.height > 120) continue;
+        CGRect g = CGRectMake(x, f.origin.y, d, f.size.height);
+        if (!CGRectEqualToRect(g, f)) { la.frame = g; GCNarrowInvalidateRender(la); }
+        la.cornerRadius = f.size.height * 0.5;
     }
     CALayer *mk = anchor.layer.mask;   // mask 保圆
     if (!mk) { mk = [CALayer layer]; anchor.layer.mask = mk; }
-    mk.frame = b;
-    mk.cornerRadius = b.size.height * 0.5;
+    mk.frame = CGRectMake(x, 0, d, anchor.bounds.size.height);
+    mk.cornerRadius = anchor.bounds.size.height * 0.5;
     mk.backgroundColor = [UIColor blackColor].CGColor;
     for (UIView *v in anchor.subviews) {   // 拍照/语音隐藏
         if ([v isKindOfClass:UIButton.class] ||
