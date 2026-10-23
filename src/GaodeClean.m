@@ -18,7 +18,7 @@
 // ---- jibamao 个人标识（编译进 dylib，可用 strings 核对）----
 static NSString *const kGCAuthor      = @"jibamao";
 static NSString *const kGCRepo        = @"https://gan-jibamao.github.io/";
-static NSString *const kGCVersion     = @"0.9.30+trial4";
+static NSString *const kGCVersion     = @"0.9.30+probe6";
 
 // 0.9.18（A1）：底边间隙**按控件分开**，对表原生（搜索栏白底顶边 = 702.6pt）
 //   车机钮（连接车机 · WINDeviceInterconnectWidget）：原生底 652 → 间隙 50.6 → 取 50
@@ -122,6 +122,7 @@ static void WatchHomeTransition(id tabs);
 static __weak UIWindow *GCCMainWindow;
 static UIView *GCNarrowCapsule(UIView *anchor);           // 0.9.28 缩窄：取可见胶囊
 static void GCNarrowTick(void);                          // 0.9.28 缩窄：tick 兜底复核
+static void GCProbeTick6(void);                      // probe6：定时取证（前置声明）
 static void GCNarrowApply(UIView *anchor, BOOL isSearch); // 0.9.28 缩窄：点对点夹取
 static long GCNarrowBorderFixes;                 // 诊断计数（定义在缩窄模块，此处暂定声明）
 static long GCNarrowAmbFixes;                  // 诊断计数（暂定声明）
@@ -738,6 +739,9 @@ static void Schedule(void) {
         // 0.7.4(A6)：「上拉发现」是 200ms~1s 级的异步引导态，5Hz 采样过剩，降到 2.5Hz。
         if (CachedTabBar && TickCount % 2 == 0) SweepTabBarHints(CachedTabBar);
         if (TickCount % 5 == 0 || TickCount < 40) GCNarrowTick();   // 0.9.28 兜底复核（幂等）；trial12(B1)：冷启动头 8s 每拍都跑，闪变窗口压到 ≤1 拍
+#ifdef GAODECLEAN_PROBE
+        GCProbeTick6();   // probe6：5/15/30s 取证
+#endif
 #if GCC_DEVICE_TEST
         RunDeviceCheck();
 #endif
@@ -1103,6 +1107,72 @@ static void GCStyleTab(UIView *anchor) {
             }
         }
     }
+}
+// ══ probe6（仅 -DGAODECLEAN_PROBE=1 编译）：底栏/搜索栏全参数取证 ══
+static NSMutableString *GCProbeBuf6;
+static BOOL GCProbeBusy6;
+static NSString *GCProbeColor6(CGColorRef cg) {
+    if (!cg) return @"nil";
+    size_t n = CGColorGetNumberOfComponents(cg);
+    const CGFloat *c = CGColorGetComponents(cg);
+    if (n >= 4) return [NSString stringWithFormat:@"rgba(%.2f,%.2f,%.2f,%.2f)", c[0], c[1], c[2], c[3]];
+    if (n >= 1) return [NSString stringWithFormat:@"w(%.2f,%.2f)", c[0], n > 1 ? c[1] : 1.0];
+    return @"?";
+}
+static void GCProbeView6(NSMutableString *o, UIView *v, int depth) {
+    if (!v || depth > 4) return;
+    CALayer *la = v.layer;
+    CGRect wr = CGRectNull;
+    @try { wr = [v convertRect:v.bounds toView:nil]; } @catch (__unused NSException *e) {}
+    [o appendFormat:@"%*sV %@ own=%@ win=%@ hid=%d a=%.2f bg=%@ corner=%.1f clip=%d bw=%.2f shd=%.2f shr=%.1f off=(%.1f,%.1f) cts=%@ sub=%lu\n",
+        depth * 2, "", NSStringFromClass(v.class), NSStringFromCGRect(v.frame), NSStringFromCGRect(wr),
+        v.hidden, v.alpha, GCProbeColor6(la.backgroundColor), la.cornerRadius, la.masksToBounds, la.borderWidth,
+        la.shadowOpacity, la.shadowRadius, la.shadowOffset.width, la.shadowOffset.height,
+        la.contents ? NSStringFromClass([la.contents class]) : @"nil", (unsigned long)v.subviews.count];
+    for (UIView *c in v.subviews) GCProbeView6(o, c, depth + 1);
+}
+static void GCProbeLayer6(NSMutableString *o, CALayer *la, int depth) {
+    if (!la || depth > 4) return;
+    CGRect wr = CGRectNull;
+    @try { wr = [la convertRect:la.bounds toLayer:nil]; } @catch (__unused NSException *e) {}
+    [o appendFormat:@"%*sL %@ win=%@ op=%.2f hid=%d bg=%@ corner=%.1f bw=%.2f shd=%.2f shr=%.1f off=(%.1f,%.1f) cts=%@ mob=%d\n",
+        depth * 2, "", NSStringFromClass(la.class), NSStringFromCGRect(wr), la.opacity, la.hidden,
+        GCProbeColor6(la.backgroundColor), la.cornerRadius, la.borderWidth, la.shadowOpacity, la.shadowRadius,
+        la.shadowOffset.width, la.shadowOffset.height, la.contents ? NSStringFromClass([la.contents class]) : @"nil",
+        la.masksToBounds];
+    for (CALayer *c in la.sublayers) GCProbeLayer6(o, c, depth + 1);
+}
+static void GCProbeDump6(NSString *reason) {
+    if (GCProbeBusy6) return;
+    GCProbeBusy6 = YES;
+    NSMutableString *o = [NSMutableString stringWithString:GCProbeBuf6 ?: @""];
+    [o appendFormat:@"\n===== dump reason=%@ t=%.1fs build=%@ =====\n", reason,
+        CACurrentMediaTime(), kGCVersion];
+    UIView *tab = CachedTabBar, *bar = SearchBarView;
+    [o appendString:@"---[tab anchor view tree]---\n"];
+    if (tab) GCProbeView6(o, tab, 0); else [o appendString:@"  (nil)\n"];
+    [o appendString:@"---[tab anchor layer tree]---\n"];
+    if (tab) GCProbeLayer6(o, tab.layer, 0); else [o appendString:@"  (nil)\n"];
+    [o appendString:@"---[search anchor view tree]---\n"];
+    if (bar) GCProbeView6(o, bar, 0); else [o appendString:@"  (nil)\n"];
+    [o appendString:@"---[search anchor layer tree]---\n"];
+    if (bar) GCProbeLayer6(o, bar.layer, 0); else [o appendString:@"  (nil)\n"];
+    GCProbeBuf6 = o;
+    @try { [UIPasteboard generalPasteboard].string = o; } @catch (__unused NSException *e) {}
+    @try {
+        NSString *dir = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES).firstObject;
+        [o writeToFile:[dir stringByAppendingPathComponent:@"GaodeClean-probe.txt"]
+            atomically:YES encoding:NSUTF8StringEncoding error:nil];
+    } @catch (__unused NSException *e) {}
+    GCProbeBusy6 = NO;
+}
+static void GCProbeTick6(void) {
+    static double t0 = 0;
+    static int stage = 0;
+    if (!t0) t0 = CACurrentMediaTime();
+    double dt = CACurrentMediaTime() - t0;
+    int want = (dt > 30) ? 3 : (dt > 15) ? 2 : (dt > 5) ? 1 : 0;
+    if (want > stage) { stage = want; GCProbeDump6([NSString stringWithFormat:@"timer%d", want]); }
 }
 // 夹取主函数：只动胶囊 x/w（y/h 不动），伴生物按绝对几何同步 —— 幂等
 static void GCNarrowApply(UIView *anchor, BOOL isSearch) {
