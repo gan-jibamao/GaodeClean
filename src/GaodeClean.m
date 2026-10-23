@@ -18,7 +18,7 @@
 // ---- jibamao 个人标识（编译进 dylib，可用 strings 核对）----
 static NSString *const kGCAuthor      = @"jibamao";
 static NSString *const kGCRepo        = @"https://gan-jibamao.github.io/";
-static NSString *const kGCVersion     = @"0.9.30+trial10";
+static NSString *const kGCVersion     = @"0.9.30+trial11";
 
 // 0.9.18（A1）：底边间隙**按控件分开**，对表原生（搜索栏白底顶边 = 702.6pt）
 //   车机钮（连接车机 · WINDeviceInterconnectWidget）：原生底 652 → 间隙 50.6 → 取 50
@@ -107,6 +107,9 @@ static void UpdateMask(UIView *page);
 static void Schedule(void);
 static void LayoutMinimalHome(id handler);
 static void AlignCornerWidgets(UIView *bar);
+static void GCStyleDiscoverWidgets(UIWindow *win);   // trial11：实例发现独立成函数（pin 自给自足）
+static BOOL IsRightBottomWidget(UIView *v);            // trial11：前置声明（discover 用）
+static BOOL GCCIsLiteGroupCapsule(UIView *v);          // trial11：前置声明（discover 用）
 static BOOL FixingHintText;
 static __weak UIView *CachedTabBar;
 static int BarFixStalls;      // 0.6.8：早退续窗次数上限，防止 8ms 自旋
@@ -1226,10 +1229,31 @@ __attribute__((unused)) static void GCProbeTick6(void) {
     int want = (dt > 30) ? 3 : (dt > 15) ? 2 : (dt > 5) ? 1 : 0;
     if (want > stage) { stage = want; GCProbeDump6([NSString stringWithFormat:@"timer%d", want]); }
 }
+// trial11：实例发现（缓存失效才 BFS）—— 从 AlignCornerWidgets 收归，pin 自给自足
+static void GCStyleDiscoverWidgets(UIWindow *win) {
+    if (!win) return;
+    if (!CachedCar || !CachedCar.window) CachedCar = nil;
+    if (!CachedRight || !CachedRight.window) CachedRight = nil;
+    if (!CachedRoute || !CachedRoute.window) CachedRoute = nil;
+    if (!CachedLiteGroup || !CachedLiteGroup.window) CachedLiteGroup = nil;
+    if (CachedCar && CachedRight && CachedRoute && CachedLiteGroup) return;
+    NSMutableArray<UIView *> *queue = [NSMutableArray arrayWithObject:win];
+    for (NSUInteger i = 0; i < queue.count && queue.count < 2000; i++) {
+        UIView *v = queue[i];
+        [queue addObjectsFromArray:v.subviews];
+        NSString *cn = NSStringFromClass(v.class);
+        if ([cn isEqualToString:GCStrAt(140)]) CachedCar = v;
+        else if (IsRightBottomWidget(v)) CachedRight = v;
+        else if ([cn isEqualToString:GCStrAt(141)]) CachedRoute = v;
+        else if (GCCIsLiteGroupCapsule(v)) CachedLiteGroup = v;
+        if (CachedCar && CachedRight && CachedRoute && CachedLiteGroup) break;
+    }
+}
 // ★trial9：角控件绝对钉死（不再对表搜索栏）—— 右胶囊右10/底755；车机钮左10、
 //   天气行原生关系（钮下18、左对齐）⇒ 行底=755 ⇒ 钮底=755-20-18。每 tick/布局钩子覆写 ⇒ 不漂。
 static void GCStylePinWidgets(UIWindow *win) {
     if (!win) return;
+    GCStyleDiscoverWidgets(win);   // trial11：自给自足（3D 模式 handler/bar 链断也能发现+钉）
     CGFloat sw = win.bounds.size.width, sh = win.bounds.size.height;
     const CGFloat pinBottom = sh - 81 - 16;   // 圆钮行顶(771) 上 16pt
     UIView *cap = (CachedLiteGroup && CachedLiteGroup.window) ? CachedLiteGroup : CachedRight;
@@ -1258,6 +1282,8 @@ static void GCStylePinWidgets(UIWindow *win) {
     // trial10：钉完即放行扣留（AlignedKey），控件首 tick 就出现，不再等 settle
     if (car) objc_setAssociatedObject(car, &AlignedKey, @(1), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     if (cap) objc_setAssociatedObject(cap, &AlignedKey, @(1), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    if (CachedRight) objc_setAssociatedObject(CachedRight, &AlignedKey, @(1), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    if (CachedRoute) objc_setAssociatedObject(CachedRoute, &AlignedKey, @(1), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     // trial10：车机钮/胶囊容器类的 layoutSubviews 钩子 —— App 重排（点定位切3D等）落地的
     //   同一布局事务内回钉 ⇒ 零可见跳变。
     static BOOL carHooked = NO, capHooked = NO;
@@ -1428,6 +1454,14 @@ static void GCNarrowTick(void) {
     if (bar) GCNarrowApply(bar, YES);
     UIView *tb = CachedTabBar;
     if (tb) GCNarrowApply(tb, NO);
+    // trial11：pin 脱离 bar/handler 链（3D 模式该链可能断 ⇒ pin 停跑 = 漂移根因）：每 tick 直钉
+    UIWindow *pw = tb.window ?: bar.window;
+    if (!pw) {
+        for (UIWindow *x in GCAllWindows()) {
+            if (!x.hidden && x.bounds.size.width >= 200) { pw = x; break; }
+        }
+    }
+    GCStylePinWidgets(pw);
 }
 
 // 0.9.4：删除 IsBlurOverlayView / GCCColorStr / GCCScreenMapMean
@@ -2479,28 +2513,7 @@ static void AlignCornerWidgets(UIView *bar) {
     // trial10：settle 门删除 —— pin 为绝对坐标（无瞬态位置风险），且该门是
     //   ①点定位切 3D 后 pin 停跑（控件停 App 原生位 = 「没固定」）②启动出现慢 的同一根因。
 
-    // 0.5.0：缓存圆钮实例，每轮直接对齐，只有实例失效时才重扫窗口树
-    if (!CachedCar || !CachedCar.window) CachedCar = nil;
-    if (!CachedRight || !CachedRight.window) CachedRight = nil;
-    if (!CachedRoute || !CachedRoute.window) CachedRoute = nil;
-    if (!CachedLiteGroup || !CachedLiteGroup.window) CachedLiteGroup = nil;
-    if (!CachedCar || !CachedRight || !CachedRoute || !CachedLiteGroup) {
-        NSMutableArray<UIView *> *queue = [NSMutableArray arrayWithObject:win];
-        for (NSUInteger i = 0; i < queue.count && queue.count < 2000; i++) {
-            UIView *v = queue[i];
-            [queue addObjectsFromArray:v.subviews];
-            NSString *cn = NSStringFromClass(v.class);
-            if ([cn isEqualToString:GCStrAt(140)]) CachedCar = v;
-            // 0.9.9：CachedRight 仍用**精确 tag** 判定 —— 1.80s 时 getItemTag 已写入，
-            // 精确判定能找到；几何兜底只用于「显示拦截」这条更早的路径，避免误选实例。
-            else if (IsRightBottomWidget(v)) CachedRight = v;
-            else if ([cn isEqualToString:GCStrAt(141)]) CachedRoute = v;
-            // 0.9.16（A2）：缓存 App 原生组容器 —— 胶囊的背景与图标由它承载，
-            // A1 按住它之后，必须由我们在「正确时刻」放行（与 CachedRight 同步）。
-            else if (GCCIsLiteGroupCapsule(v)) CachedLiteGroup = v;
-            if (CachedCar && CachedRight && CachedRoute && CachedLiteGroup) break;
-        }
-    }
+    GCStyleDiscoverWidgets(win);   // trial11：发现收归独立函数
     // trial9：圆形风格 —— 角控件不再对表搜索栏（bar 位置已不代表视觉重心），改绝对钉死；
     //   实例发现/扣留/放行逻辑保留，只替换摆位。
     GCStylePinWidgets(win);
