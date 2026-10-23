@@ -18,7 +18,7 @@
 // ---- jibamao 个人标识（编译进 dylib，可用 strings 核对）----
 static NSString *const kGCAuthor      = @"jibamao";
 static NSString *const kGCRepo        = @"https://gan-jibamao.github.io/";
-static NSString *const kGCVersion     = @"0.9.28+probe4";
+static NSString *const kGCVersion     = @"0.9.28+trial5";
 
 // 0.9.18（A1）：底边间隙**按控件分开**，对表原生（搜索栏白底顶边 = 702.6pt）
 //   车机钮（连接车机 · WINDeviceInterconnectWidget）：原生底 652 → 间隙 50.6 → 取 50
@@ -128,6 +128,7 @@ static UIView *GCNarrowCapsule(UIView *anchor);           // 0.9.28 缩窄：取
 static void GCNarrowTick(void);                          // 0.9.28 缩窄：tick 兜底复核
 static void GCNarrowApply(UIView *anchor, BOOL isSearch); // 0.9.28 缩窄：点对点夹取
 static long GCNarrowBorderFixes;                 // 诊断计数（定义在缩窄模块，此处暂定声明）
+static long GCNarrowAmbFixes;                  // 诊断计数（暂定声明）
 static CGFloat GCNarrowTargetWidth(void);        // 目标宽访问器（探针在缩窄模块之前，需前置）
 static __weak UIWindow *GCCSplashWindow;      // 已识别的广告窗口，之后拒绝其可见
 static NSInteger GCCSplashTicks;              // 兜底扫描剩余拍数（有界）
@@ -938,6 +939,7 @@ static void GCProbeDump(NSString *reason) {
         [GCProbeBuf appendString:@"\n---[底栏描边匹配 dry-run（与 GCNarrowApply 同判据，逐条真假）]---\n"];
         if (tb) {
             [GCProbeBuf appendFormat:@"  描边同步累计写入次数=%ld\n", (long)GCNarrowBorderFixes];
+            [GCProbeBuf appendFormat:@"  环境层同步累计写入次数=%ld\n", (long)GCNarrowAmbFixes];
             for (UIView *v in tb.subviews) {
                 CGRect f = v.frame;
                 BOOL isIV = [v isKindOfClass:UIImageView.class];
@@ -1048,10 +1050,11 @@ static void HookVoid(NSString *name, NSString *methodName, void (^after)(id)) {
 //        居中后最小 236pt，取整 240（选中底衬距胶囊边留 10pt）。
 // ══════════════════════════════════════════════════════════════════════════
 static const CGFloat GCNarrowTargetW = 240.0;   // 两条栏的目标可见宽
-static CGFloat GCNarrowTargetWidth(void) { return GCNarrowTargetW; }
+__attribute__((unused)) static CGFloat GCNarrowTargetWidth(void) { return GCNarrowTargetW; }
 static const CGFloat GCNarrowBtnGap  = 12.0;    // 原生：最右按钮右缘距胶囊右缘 12pt
 static const CGFloat GCNarrowAmbPad  = 24.0;    // 底栏环境层原生比胶囊每侧外扩 ~24pt（399 vs 351）
 static long GCNarrowBorderFixes = 0;      // 诊断：描边同步累计写入次数
+static long GCNarrowAmbFixes = 0;         // 诊断：环境层同步累计写入次数
 static BOOL GCNarrowSearchHooked = NO;
 
 // 取 anchor 的「可见胶囊」：毛玻璃层 + 栏级尺寸 + 居中
@@ -1161,29 +1164,32 @@ static void GCNarrowApply(UIView *anchor, BOOL isSearch) {
                 v.frame = s; GCNarrowBorderFixes++;
             }
         }
-        // ★trial3（老大指出）：底栏还有**全宽环境层**没跟着缩 —— probe3 实测两条：
-        //     CALayer win=[-3,744,399,108] contents=位图（胶囊的柔光/阴影）
-        //     CALayer win=[0,752.5,393,99.5] + 其子 CAGradientLayer 同尺寸
-        //   原生时它们比胶囊(351)每侧外扩 ~21~24pt，读作"胶囊的光晕"；
-        //   胶囊缩到 240 后它们仍全宽 ⇒ 外扩变成 76pt/侧，视觉上就是"多出来的一层"。
-        //   这里保持原生设计关系：环境层 = 胶囊 + 24pt/侧（288 宽），容器内满宽子层同步。
+        // ★trial5（probe4 干跑定罪）：底栏全宽环境层是**真实 UIView 的 backing layer** ——
+        //     UIView(渐变容器) own=[0,-15.5,393,99.5] + 其子 CAGradientLayer 同尺寸
+        //     UIImageView(柔光位图) own=[-3,-24,399,108]（可见核心≈355 = 老大看到的透明圈）
+        //   trial3 在 CALayer 层找它们并跳过所有 backing layer ⇒ 两条全被跳过 ⇒ 死代码。
+        //   （搜索栏白底是"独立层"所以 A1 那套对；底栏环境层是"真视图"必须走 UIView 路径。）
+        //   绝对匹配：非隐藏、非胶囊、全宽(≥sw-8)、高 60~160、居中±20 ⇒ 写成胶囊+24pt/侧；
+        //   容器内满宽渐变子层同步；已达标(288)时 w<sw-8 天然跳过 ⇒ 幂等。
         {
-            CGFloat ambX = x - GCNarrowAmbPad, ambW = GCNarrowTargetW + 2 * GCNarrowAmbPad;
-            for (CALayer *la in [anchor.layer.sublayers copy]) {
-                if (la.hidden || la.opacity < 0.02f) continue;
-                BOOL backing = NO;
-                for (UIView *v in anchor.subviews) if (v.layer == la) { backing = YES; break; }
-                if (backing) continue;
-                CGRect f = la.frame;
-                if (f.size.width < sw - 8) continue;              // 只认全宽环境层（393/399）
+            CGFloat ambW = GCNarrowTargetW + 2 * GCNarrowAmbPad;
+            for (UIView *v in anchor.subviews) {
+                if (v == cap || v.hidden || v.alpha < 0.05) continue;
+                if ([v isKindOfClass:UIVisualEffectView.class]) continue;
+                CGRect f = v.frame;
+                if (f.size.width < sw - 8) continue;
                 if (f.size.height < 60 || f.size.height > 160) continue;
-                CGRect gg = f; gg.origin.x = ambX; gg.size.width = ambW;
-                if (!CGRectEqualToRect(gg, f)) la.frame = gg;
-                for (CALayer *c in [la.sublayers copy]) {         // 渐变等满宽子层同步
-                    CGRect cf2 = c.frame;
-                    if (cf2.size.width < f.size.width - 8) continue;
-                    CGRect g2 = cf2; g2.origin.x = 0; g2.size.width = ambW;
-                    if (!CGRectEqualToRect(g2, cf2)) c.frame = g2;
+                if (fabs(CGRectGetMidX(f) - sw * 0.5) > 20) continue;
+                CGRect gg = f; gg.origin.x = x - GCNarrowAmbPad; gg.size.width = ambW;
+                if (!CGRectEqualToRect(gg, f)) {
+                    [v.layer removeAllAnimations];
+                    v.frame = gg; GCNarrowAmbFixes++;
+                    for (CALayer *c in [v.layer.sublayers copy]) {
+                        CGRect cf2 = c.frame;
+                        if (cf2.size.width < f.size.width - 8) continue;
+                        CGRect g2 = cf2; g2.origin.x = 0; g2.size.width = ambW;
+                        if (!CGRectEqualToRect(g2, cf2)) c.frame = g2;
+                    }
                 }
             }
         }
