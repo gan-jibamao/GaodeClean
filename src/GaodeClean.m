@@ -18,7 +18,7 @@
 // ---- jibamao 个人标识（编译进 dylib，可用 strings 核对）----
 static NSString *const kGCAuthor      = @"jibamao";
 static NSString *const kGCRepo        = @"https://gan-jibamao.github.io/";
-static NSString *const kGCVersion     = @"0.9.28+trial7";
+static NSString *const kGCVersion     = @"0.9.28+trial8";
 
 // 0.9.18（A1）：底边间隙**按控件分开**，对表原生（搜索栏白底顶边 = 702.6pt）
 //   车机钮（连接车机 · WINDeviceInterconnectWidget）：原生底 652 → 间隙 50.6 → 取 50
@@ -1086,6 +1086,48 @@ static void GCNarrowInnerFix(UIView *v, CGFloat capW, int depth, NSInteger *budg
         GCNarrowInnerFix(c, capW, depth + 1, budget);
     }
 }
+// ★trial8：全窗口 layer 扫荡 —— 收两种漏网形态：
+//   A 透明填充+有边(border/shadow/corner/位图)+高44~64+宽≥0.6sw+同带 ⇒ 夹到胶囊几何
+//     （若为某 UIView 的 backing layer，改写属主 view 的 frame，防被其布局改回）
+//   B 高≤3 的发丝线层+宽≥0.6sw+落在搜索栏带内(±30) ⇒ 只夹宽到 240
+//   已知好层天然不命中：白底(α0.9 不透明)、胶囊/内图(已 240，宽差=0 跳过)、
+//   渐变(无边)、底栏各层(midY 不在带内)。
+static void GCNarrowHairWalk(CALayer *la, CGRect band, CGFloat midY, CGFloat sw, CGFloat x, int depth, NSInteger *budget) {
+    if (!la || depth > 12 || *budget <= 0) return;
+    (*budget)--;
+    CGRect wr = CGRectNull;
+    @try { wr = [la convertRect:la.bounds toLayer:nil]; } @catch (__unused NSException *e) { return; }
+    CGFloat al = la.backgroundColor ? CGColorGetAlpha(la.backgroundColor) : 0.0;
+    BOOL inBandY = fabs(CGRectGetMidY(wr) - midY) <= 6;
+    BOOL wideEnough = (wr.size.width >= sw * 0.6 && wr.size.width <= sw + 10);
+    BOOL edged = (la.borderWidth > 0.01 || la.shadowOpacity > 0.01 || la.cornerRadius > 0.01 || la.contents != nil);
+    BOOL shapeA = (!la.hidden && wideEnough && inBandY && wr.size.height >= 44 && wr.size.height <= 64
+                   && al <= 0.05 && edged && fabs(wr.size.width - GCNarrowTargetW) > 0.5);
+    BOOL shapeB = (!la.hidden && wideEnough && wr.size.height <= 3
+                   && fabs(CGRectGetMidY(wr) - midY) <= 30 && fabs(wr.size.width - GCNarrowTargetW) > 0.5);
+    if (shapeA || shapeB) {
+        CGRect target = shapeA ? CGRectMake(x, band.origin.y, GCNarrowTargetW, band.size.height)
+                               : CGRectMake(x, wr.origin.y, GCNarrowTargetW, wr.size.height);
+        UIView *owner = [la.delegate isKindOfClass:UIView.class] ? (UIView *)la.delegate : nil;
+        if (owner && owner.superview) {
+            CGRect local = [owner.superview convertRect:target fromView:nil];
+            if (!CGRectEqualToRect(local, owner.frame)) owner.frame = local;
+        } else if (la.superlayer) {
+            CGRect local = [la.superlayer convertRect:target fromLayer:nil];
+            if (!CGRectEqualToRect(local, la.frame)) { [la removeAllAnimations]; la.frame = local; }
+        }
+    }
+    for (CALayer *c in [la.sublayers copy]) GCNarrowHairWalk(c, band, midY, sw, x, depth + 1, budget);
+}
+static void GCNarrowHairlineSweep(UIView *anchor, CGFloat sw, CGFloat x) {
+    CGRect band = [anchor convertRect:anchor.bounds toView:nil];
+    CGFloat midY = CGRectGetMidY(band);
+    for (UIWindow *w in GCAllWindows()) {
+        if (w.hidden || w.bounds.size.width < 200) continue;
+        NSInteger budget = 600;
+        GCNarrowHairWalk(w.layer, band, midY, sw, x, 0, &budget);
+    }
+}
 // ★A1（probe3 破案）：App 把搜索栏白底画成**直接挂在 anchor.layer 上的独立 CALayer**，
 //   没有对应 UIView —— 只夹 UIVisualEffectView 时它原地不动，于是"图标缩了、白底还是 377 宽"。
 //   实测：CALayer win=[8,702,377,54] corner=27 bg=rgba(1,1,1,0.90) + 同尺寸 CAGradientLayer。
@@ -1137,32 +1179,7 @@ static void GCNarrowApply(UIView *anchor, BOOL isSearch) {
             if (ax < bx) return NSOrderedDescending;
             return NSOrderedSame;
         }];
-        // ★trial7（老大放大截图定罪）：搜索栏右帽外伸出的**发丝线** = 一个原生宽度、
-        //   填充透明、只有 1px 描边的矩形层，且不在 anchor 子层内（probe4 里 anchor 子层全 240）
-        //   ⇒ 挂在更上层祖先上。兜底网：沿 anchor 上溯 4 层，把任何「非 backing、高 40~70、
-        //   宽≥0.6 屏宽、垂直中心与搜索栏同带、填充几乎透明」的独立层夹到胶囊几何，
-        //   发丝线即贴住胶囊；有实底有位图的层不动（白底已由 A1 处理）。
-        {
-            CGRect winBand = [anchor convertRect:anchor.bounds toView:nil];
-            int depth = 0;
-            for (UIView *anc = anchor.superview; anc && depth < 4; anc = anc.superview, depth++) {
-                for (CALayer *la in [anc.layer.sublayers copy]) {
-                    if (la.hidden || !la.superlayer) continue;
-                    BOOL backing = NO;
-                    for (UIView *v in anc.subviews) if (v.layer == la) { backing = YES; break; }
-                    if (backing) continue;
-                    CGRect wr = [la convertRect:la.bounds toLayer:nil];
-                    if (wr.size.height < 40 || wr.size.height > 70) continue;
-                    if (wr.size.width < sw * 0.6 || wr.size.width > sw + 10) continue;
-                    if (fabs(CGRectGetMidY(wr) - CGRectGetMidY(winBand)) > 6) continue;
-                    CGFloat al = la.backgroundColor ? CGColorGetAlpha(la.backgroundColor) : 0.0;
-                    if (al > 0.05 && la.contents) continue;
-                    CGRect target = CGRectMake(x, winBand.origin.y, GCNarrowTargetW, winBand.size.height);
-                    CGRect local = [la.superlayer convertRect:target fromLayer:nil];
-                    if (!CGRectEqualToRect(local, la.frame)) { [la removeAllAnimations]; la.frame = local; }
-                }
-            }
-        }
+        GCNarrowHairlineSweep(anchor, sw, x);   // trial8：全窗口发丝线/透明描边层扫荡
         CGFloat cursor = right - GCNarrowBtnGap;
         for (UIView *v in btns) {
             CGRect f = v.frame;
