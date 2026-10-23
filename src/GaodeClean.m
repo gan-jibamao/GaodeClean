@@ -18,7 +18,7 @@
 // ---- jibamao 个人标识（编译进 dylib，可用 strings 核对）----
 static NSString *const kGCAuthor      = @"jibamao";
 static NSString *const kGCRepo        = @"https://gan-jibamao.github.io/";
-static NSString *const kGCVersion     = @"0.9.28+trial5";
+static NSString *const kGCVersion     = @"0.9.28+trial6";
 
 // 0.9.18（A1）：底边间隙**按控件分开**，对表原生（搜索栏白底顶边 = 702.6pt）
 //   车机钮（连接车机 · WINDeviceInterconnectWidget）：原生底 652 → 间隙 50.6 → 取 50
@@ -1180,6 +1180,14 @@ static void GCNarrowApply(UIView *anchor, BOOL isSearch) {
                 if (f.size.width < sw - 8) continue;
                 if (f.size.height < 60 || f.size.height > 160) continue;
                 if (fabs(CGRectGetMidX(f) - sw * 0.5) > 20) continue;
+                // ★trial6（老大地球视图截图定罪）：无位图的全宽层 = 渐变容器（子 CAGradientLayer
+                //   白→透明竖渐变）。亮地图上白叠白不可见；地球/暗色视图下是**硬边白带**，
+                //   夹成 288 更糟（硬边白矩形）⇒ 直接隐藏（alpha=0，布局不动，可逆）。
+                //   有位图的全宽层（柔光阴影 399）才夹到 288（软边光晕，暗底下读作胶囊的光）。
+                if (!v.layer.contents) {
+                    if (v.alpha > 0.01) { v.alpha = 0; GCNarrowAmbFixes++; }
+                    continue;
+                }
                 CGRect gg = f; gg.origin.x = x - GCNarrowAmbPad; gg.size.width = ambW;
                 if (!CGRectEqualToRect(gg, f)) {
                     [v.layer removeAllAnimations];

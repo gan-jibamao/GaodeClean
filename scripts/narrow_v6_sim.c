@@ -9,7 +9,7 @@
 #define TARGET_W 240.0
 #define GAP      12.0
 
-typedef struct { double x, w, h; int effect, image, hidden; const char *name; int standalone, ambient; } V;
+typedef struct { double x, w, h; int effect, image, hidden; const char *name; int standalone, ambient, hasimg, gone; } V;
 
 static int pick_capsule(V *a, int n, double sw) {
     int best = -1; double bw = 0;
@@ -57,6 +57,7 @@ static void apply(V *a, int n, double sw, int isSearch) {
             if (i == ci || !a[i].ambient || a[i].hidden) continue;
             if (a[i].w < sw - 8) continue;
             if (a[i].h < 60 || a[i].h > 160) continue;
+            if (!a[i].hasimg) { a[i].gone = 1; continue; }   // trial6：无位图全宽渐变 ⇒ 隐藏
             a[i].x = ambX; a[i].w = ambW;
         }
     }
@@ -164,12 +165,16 @@ int main(void) {
         {0, 393, 99.5, 0, 0, 0, "渐变子层", 0, 1},
         {86.5, 100, 54, 0, 0, 0, "选中底衬", 0, 0},
     };
+    m[1].hasimg = 1;                       // 柔光位图有位图 ⇒ 夹 288
     apply(m, 5, 393, 0);
     tv("柔光位图 x → 52.5", get(m,5,"柔光位图",0), 52.5);
     tv("柔光位图 w → 288", get(m,5,"柔光位图",1), 288);
-    tv("渐变容器 w → 288", get(m,5,"渐变容器",1), 288);
-    tv("渐变子层 w → 288", get(m,5,"渐变子层",1), 288);
+    tv("渐变容器宽不变 393", get(m,5,"渐变容器",1), 393);
+    tv("渐变子层宽不变 393", get(m,5,"渐变子层",1), 393);
     tv("选中底衬不动 100", get(m,5,"选中底衬",1), 100);
+    tv("渐变容器被隐藏 gone=1", m[2].gone, 1);
+    tv("渐变容器宽度不变 393", get(m,5,"渐变容器",1), 393);
+    tv("渐变子层被隐藏 gone=1", m[3].gone, 1);
     puts("\n== 11. trial4 回归：胶囊已 240 + App 把描边图改回 355 ⇒ 必须重新同步（旧 cf 匹配在此永久失效）==");
     V q[] = {
         {76.5, 240, 60, 1, 0, 0, "胶囊", 0, 0},
