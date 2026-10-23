@@ -18,7 +18,7 @@
 // ---- jibamao 个人标识（编译进 dylib，可用 strings 核对）----
 static NSString *const kGCAuthor      = @"jibamao";
 static NSString *const kGCRepo        = @"https://gan-jibamao.github.io/";
-static NSString *const kGCVersion     = @"0.9.28+trial9";
+static NSString *const kGCVersion     = @"0.9.28+probe5";
 
 // 0.9.18（A1）：底边间隙**按控件分开**，对表原生（搜索栏白底顶边 = 702.6pt）
 //   车机钮（连接车机 · WINDeviceInterconnectWidget）：原生底 652 → 间隙 50.6 → 取 50
@@ -129,6 +129,7 @@ static void GCNarrowTick(void);                          // 0.9.28 缩窄：tick
 static void GCNarrowApply(UIView *anchor, BOOL isSearch); // 0.9.28 缩窄：点对点夹取
 static long GCNarrowBorderFixes;                 // 诊断计数（定义在缩窄模块，此处暂定声明）
 static long GCNarrowAmbFixes;                  // 诊断计数（暂定声明）
+static long GCNarrowHairHits;                  // 诊断计数（暂定声明）
 static CGFloat GCNarrowTargetWidth(void);        // 目标宽访问器（探针在缩窄模块之前，需前置）
 static __weak UIWindow *GCCSplashWindow;      // 已识别的广告窗口，之后拒绝其可见
 static NSInteger GCCSplashTicks;              // 兜底扫描剩余拍数（有界）
@@ -915,6 +916,42 @@ static void GCProbeFlush(void) {
     }
     @try { UIPasteboard.generalPasteboard.string = GCProbeBuf; } @catch (__unused NSException *e) {}
 }
+// probe5：搜索栏带内**全层**扫描（所有窗口、无宽度/高度判据）—— 一次命名发丝线真凶
+static void GCProbeBandWalk(NSMutableString *o, CALayer *la, CGRect band, int depth, NSInteger *budget) {
+    if (!la || depth > 16 || *budget <= 0) return;
+    (*budget)--;
+    CGRect wr = CGRectNull;
+    @try { wr = [la convertRect:la.bounds toLayer:nil]; } @catch (__unused NSException *e) { wr = la.frame; }
+    if (CGRectIntersectsRect(wr, band) && wr.size.width > 8 && wr.size.height > 0.2) {
+        NSString *lbg = @"nil", *cts = @"nil", *owner = @"-";
+        @try {
+            if (la.backgroundColor) lbg = GCProbeColorDesc([UIColor colorWithCGColor:la.backgroundColor]);
+            if (la.contents) cts = NSStringFromClass([la.contents class]);
+            if ([la.delegate isKindOfClass:UIView.class]) {
+                UIView *v = (UIView *)la.delegate;
+                owner = NSStringFromClass(v.class);
+                for (int k = 0; k < 2 && v.superview; k++) { v = v.superview; owner = [owner stringByAppendingFormat:@"<%@", NSStringFromClass(v.class)]; }
+            }
+        } @catch (__unused NSException *e) {}
+        [o appendFormat:@"    d%-2d %@ win=[%.1f,%.1f,%.1f,%.1f] op=%.2f hid=%d corner=%.1f bw=%.2f shd=%.2f shr=%.1f off=(%.1f,%.1f) bg=%@ cts=%@ mob=%d owner=%@\n",
+            depth, NSStringFromClass(la.class), wr.origin.x, wr.origin.y, wr.size.width, wr.size.height,
+            la.opacity, la.hidden, la.cornerRadius, la.borderWidth, la.shadowOpacity, la.shadowRadius,
+            la.shadowOffset.width, la.shadowOffset.height, lbg, cts, la.masksToBounds, owner];
+    }
+    for (CALayer *c in la.sublayers) GCProbeBandWalk(o, c, band, depth + 1, budget);
+}
+static void GCProbeBandLayers(NSMutableString *o) {
+    UIView *bar = SearchBarView;
+    if (!bar) { [o appendString:@"  SearchBarView 为空\n"]; return; }
+    CGRect band = CGRectInset([bar convertRect:bar.bounds toView:nil], 0, -6);
+    [o appendFormat:@"  带=%@ 发丝线处理累计=%ld\n", NSStringFromCGRect(band), (long)GCNarrowHairHits];
+    for (UIWindow *w in GCAllWindows()) {
+        if (w.hidden || w.bounds.size.width < 200) continue;
+        NSInteger budget = 4000;
+        [o appendFormat:@"  · 窗口 %@\n", NSStringFromClass(w.class)];
+        GCProbeBandWalk(o, w.layer, band, 0, &budget);
+    }
+}
 static void GCProbeDump(NSString *reason) {
     if (GCProbeBusy) return;
     GCProbeBusy = YES;
@@ -955,6 +992,8 @@ static void GCProbeDump(NSString *reason) {
                     (unsigned long)v.layer.animationKeys.count];
             }
         } else [GCProbeBuf appendString:@"  CachedTabBar 为空\n"];
+        [GCProbeBuf appendString:@"\n---[搜索栏带内全层扫描（所有窗口、无判据）]---\n"];
+        GCProbeBandLayers(GCProbeBuf);
         [GCProbeBuf appendString:@"\n---[layer 树：anchor 兄弟层 + anchor/胶囊子层]---\n"];
         if (bar) {
             NSInteger lb = 90;
