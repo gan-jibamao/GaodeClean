@@ -18,7 +18,7 @@
 // ---- jibamao 个人标识（编译进 dylib，可用 strings 核对）----
 static NSString *const kGCAuthor      = @"jibamao";
 static NSString *const kGCRepo        = @"https://gan-jibamao.github.io/";
-static NSString *const kGCVersion     = @"0.9.29";
+static NSString *const kGCVersion     = @"0.9.30+trial1";
 
 // 0.9.18（A1）：底边间隙**按控件分开**，对表原生（搜索栏白底顶边 = 702.6pt）
 //   车机钮（连接车机 · WINDeviceInterconnectWidget）：原生底 652 → 间隙 50.6 → 取 50
@@ -971,9 +971,95 @@ static void GCNarrowStandaloneLayers(UIView *anchor, CGFloat sw, CGFloat x) {
         if (!CGRectEqualToRect(g, f)) { la.frame = g; GCNarrowInvalidateRender(la); }
     }
 }
+// ★trial13（0.9.30+trial1）：圆形悬浮钮统一风格 —— 幂等、绝对几何
+static void GCStyleCenterIcon(UIView *root, CGFloat d, CGFloat icon, int depth) {
+    if (!root || depth > 4) return;
+    for (UIView *w in root.subviews) {
+        CGRect f = w.frame;
+        if ([w isKindOfClass:UIImageView.class] && fabs(f.size.width - icon) < 1.5 && fabs(f.size.height - icon) < 1.5) {
+            CGRect g = CGRectMake((d - icon) * 0.5, (d - icon) * 0.5, icon, icon);
+            if (!CGRectEqualToRect(g, f)) w.frame = g;
+            continue;
+        }
+        GCStyleCenterIcon(w, d, icon, depth + 1);
+    }
+}
+// 搜索栏 → 单枚 54pt 圆钮（水平居中）；拍照/语音隐藏
+static void GCStyleSearch(UIView *anchor) {
+    CGFloat sw = anchor.bounds.size.width;
+    if (sw < 100) return;
+    const CGFloat d = 54.0, x = (sw - d) * 0.5;
+    UIView *cap = GCNarrowCapsule(anchor);
+    if (cap) {
+        CGRect f = cap.frame;
+        CGRect g = CGRectMake(x, f.origin.y, d, f.size.height);
+        if (!CGRectEqualToRect(g, f)) cap.frame = g;
+        cap.layer.cornerRadius = f.size.height * 0.5;
+        GCStyleCenterIcon(cap, d, 24.0, 0);   // 放大镜居中
+    }
+    for (CALayer *la in [anchor.layer.sublayers copy]) {   // 独立白底/渐变层同夹成圆
+        if (la.hidden || la.opacity < 0.02f) continue;
+        BOOL backing = NO;
+        for (UIView *v in anchor.subviews) if (v.layer == la) { backing = YES; break; }
+        if (backing) continue;
+        CGRect f = la.frame;
+        if (f.size.height < 40 || f.size.height > 120) continue;
+        CGRect g = CGRectMake(x, f.origin.y, d, f.size.height);
+        if (!CGRectEqualToRect(g, f)) { la.frame = g; GCNarrowInvalidateRender(la); }
+        la.cornerRadius = f.size.height * 0.5;
+    }
+    CALayer *mk = anchor.layer.mask;   // mask 收成圆
+    if (!mk) { mk = [CALayer layer]; anchor.layer.mask = mk; }
+    mk.frame = CGRectMake(x, 0, d, anchor.bounds.size.height);
+    mk.cornerRadius = anchor.bounds.size.height * 0.5;
+    mk.backgroundColor = [UIColor blackColor].CGColor;
+    for (UIView *v in anchor.subviews) {   // 拍照/语音：隐藏（视图保留）
+        if ([v isKindOfClass:UIButton.class] ||
+            [NSStringFromClass(v.class) isEqualToString:@"LTMVUIEmojiView"]) v.hidden = YES;
+    }
+}
+// 底栏 → 两枚 54pt 圆钮（中心 c±33，总占地 120 = 原 240 的一半）；pill 族全隐藏
+static void GCStyleTab(UIView *anchor) {
+    CGFloat sw = anchor.bounds.size.width;
+    if (sw < 100) return;
+    const CGFloat d = 54.0, c = sw * 0.5, off = 33.0;
+    for (UIView *v in [anchor.subviews copy]) {
+        if ([v isKindOfClass:UIVisualEffectView.class] || [v isKindOfClass:UIImageView.class]) { v.hidden = YES; continue; }
+        CGRect f = v.frame;   // 选中底衬（100×54 带背景）隐藏
+        if (f.size.height > 40 && f.size.height <= 60 && f.size.width >= 90 && f.size.width <= 110
+            && v.backgroundColor && !v.hidden && ![v isKindOfClass:UIControl.class]) v.hidden = YES;
+    }
+    NSMutableArray *items = [NSMutableArray array];
+    for (UIView *v in anchor.subviews)
+        if ([NSStringFromClass(v.class) isEqualToString:@"WINTabBarItem"]) [items addObject:v];
+    [items sortUsingComparator:^NSComparisonResult(UIView *a, UIView *b) {
+        return a.frame.origin.x < b.frame.origin.x ? NSOrderedAscending : NSOrderedDescending;
+    }];
+    for (NSUInteger i = 0; i < items.count && i < 2; i++) {
+        UIView *it = items[i];
+        CGFloat cx = c + (i == 0 ? -off : off);
+        CGRect g = CGRectMake(cx - d * 0.5, it.frame.origin.y, d, d);
+        if (!CGRectEqualToRect(g, it.frame)) it.frame = g;
+        it.layer.cornerRadius = d * 0.5;
+        it.layer.masksToBounds = YES;
+        if (!it.backgroundColor) it.backgroundColor = [UIColor colorWithWhite:0.96 alpha:0.92];
+        for (UIView *si in it.subviews) {   // subitem 同步 54；图标居中；标签隐藏
+            CGRect sf = CGRectMake(0, 0, d, d);
+            if (!CGRectEqualToRect(sf, si.frame)) si.frame = sf;
+            for (UIView *w in si.subviews) {
+                if ([w isKindOfClass:UIImageView.class]) {
+                    CGRect wf = w.frame;
+                    CGRect wg = CGRectMake((d - wf.size.width) * 0.5, (d - wf.size.height) * 0.5, wf.size.width, wf.size.height);
+                    if (!CGRectEqualToRect(wg, wf)) w.frame = wg;
+                } else if ([w isKindOfClass:UILabel.class]) w.hidden = YES;
+            }
+        }
+    }
+}
 // 夹取主函数：只动胶囊 x/w（y/h 不动），伴生物按绝对几何同步 —— 幂等
 static void GCNarrowApply(UIView *anchor, BOOL isSearch) {
     if (!anchor || !anchor.window) return;
+    if (!isSearch) GCStyleTab(anchor);   // trial13：底栏双圆钮（不依赖胶囊，先于早退执行）
     CGFloat sw = anchor.bounds.size.width;
     UIView *cap = GCNarrowCapsule(anchor);
     if (!cap) return;
@@ -1022,6 +1108,7 @@ static void GCNarrowApply(UIView *anchor, BOOL isSearch) {
         mk.frame = CGRectMake(x, 0, GCNarrowTargetW, anchor.bounds.size.height);
         mk.cornerRadius = anchor.bounds.size.height * 0.5;
         mk.backgroundColor = [UIColor blackColor].CGColor;
+        GCStyleSearch(anchor);   // trial13：搜索栏最后夹成 54 圆钮 + 隐藏拍照/语音
         CGFloat cursor = right - GCNarrowBtnGap;
         for (UIView *v in btns) {
             CGRect f = v.frame;
