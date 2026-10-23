@@ -18,7 +18,7 @@
 // ---- jibamao 个人标识（编译进 dylib，可用 strings 核对）----
 static NSString *const kGCAuthor      = @"jibamao";
 static NSString *const kGCRepo        = @"https://gan-jibamao.github.io/";
-static NSString *const kGCVersion     = @"0.9.30+trial1";
+static NSString *const kGCVersion     = @"0.9.30+trial2";
 
 // 0.9.18（A1）：底边间隙**按控件分开**，对表原生（搜索栏白底顶边 = 702.6pt）
 //   车机钮（连接车机 · WINDeviceInterconnectWidget）：原生底 652 → 间隙 50.6 → 取 50
@@ -851,11 +851,11 @@ static void HookVoid(NSString *name, NSString *methodName, void (^after)(id)) {
 // ══════════════════════════════════════════════════════════════════════════
 static const CGFloat GCNarrowTargetW = 240.0;   // 两条栏的目标可见宽
 __attribute__((unused)) static CGFloat GCNarrowTargetWidth(void) { return GCNarrowTargetW; }
-static const CGFloat GCNarrowBtnGap  = 12.0;    // 原生：最右按钮右缘距胶囊右缘 12pt
-static const CGFloat GCNarrowAmbPad  = 24.0;    // 底栏环境层原生比胶囊每侧外扩 ~24pt（399 vs 351）
-static long GCNarrowBorderFixes = 0;      // 诊断：描边同步累计写入次数
-static long GCNarrowAmbFixes = 0;         // 诊断：环境层同步累计写入次数
-static long GCNarrowHairHits = 0;       // 诊断：发丝线处理累计次数
+__attribute__((unused)) static const CGFloat GCNarrowBtnGap  = 12.0;    // 原生：最右按钮右缘距胶囊右缘 12pt
+__attribute__((unused)) static const CGFloat GCNarrowAmbPad  = 24.0;    // 底栏环境层原生比胶囊每侧外扩 ~24pt（399 vs 351）
+__attribute__((unused)) static long GCNarrowBorderFixes = 0;      // 诊断：描边同步累计写入次数
+__attribute__((unused)) static long GCNarrowAmbFixes = 0;         // 诊断：环境层同步累计写入次数
+__attribute__((unused)) static long GCNarrowHairHits = 0;       // 诊断：发丝线处理累计次数
 static BOOL GCNarrowSearchHooked = NO;
 
 // 取 anchor 的「可见胶囊」：毛玻璃层 + 栏级尺寸 + 居中
@@ -878,7 +878,7 @@ static UIView *GCNarrowCapsule(UIView *anchor) {
     return best;
 }
 // 胶囊内部的满幅背景层（防 autoresizing 未生效）：x≈0 且宽超出胶囊的，收进胶囊
-static void GCNarrowInnerFix(UIView *v, CGFloat capW, int depth, NSInteger *budget) {
+__attribute__((unused)) static void GCNarrowInnerFix(UIView *v, CGFloat capW, int depth, NSInteger *budget) {
     if (!v || depth > 3 || *budget <= 0) return;
     (*budget)--;
     for (UIView *c in v.subviews) {
@@ -893,7 +893,7 @@ static void GCNarrowInnerFix(UIView *v, CGFloat capW, int depth, NSInteger *budg
 //   B 高≤3 的发丝线层+宽≥0.6sw+落在搜索栏带内(±30) ⇒ 只夹宽到 240
 //   已知好层天然不命中：白底(α0.9 不透明)、胶囊/内图(已 240，宽差=0 跳过)、
 //   渐变(无边)、底栏各层(midY 不在带内)。
-static void GCNarrowHairWalk(CALayer *la, CGRect band, CGFloat midY, CGFloat sw, CGFloat x, int depth, NSInteger *budget) {
+__attribute__((unused)) static void GCNarrowHairWalk(CALayer *la, CGRect band, CGFloat midY, CGFloat sw, CGFloat x, int depth, NSInteger *budget) {
     if (!la || depth > 12 || *budget <= 0) return;
     (*budget)--;
     CGRect wr = CGRectNull;
@@ -931,7 +931,7 @@ static void GCNarrowHairWalk(CALayer *la, CGRect band, CGFloat midY, CGFloat sw,
     }
     for (CALayer *c in [la.sublayers copy]) GCNarrowHairWalk(c, band, midY, sw, x, depth + 1, budget);
 }
-static void GCNarrowHairlineSweep(UIView *anchor, CGFloat sw, CGFloat x) {
+__attribute__((unused)) static void GCNarrowHairlineSweep(UIView *anchor, CGFloat sw, CGFloat x) {
     CGRect band = [anchor convertRect:anchor.bounds toView:nil];
     CGFloat midY = CGRectGetMidY(band);
     for (UIWindow *w in GCAllWindows()) {
@@ -956,7 +956,7 @@ static void GCNarrowInvalidateRender(CALayer *la) {
 //   没有对应 UIView —— 只夹 UIVisualEffectView 时它原地不动，于是"图标缩了、白底还是 377 宽"。
 //   实测：CALayer win=[8,702,377,54] corner=27 bg=rgba(1,1,1,0.90) + 同尺寸 CAGradientLayer。
 //   底栏无此类层（白来自胶囊内部 UICABackdropLayer）⇒ 本函数在底栏天然空转。
-static void GCNarrowStandaloneLayers(UIView *anchor, CGFloat sw, CGFloat x) {
+__attribute__((unused)) static void GCNarrowStandaloneLayers(UIView *anchor, CGFloat sw, CGFloat x) {
     NSArray *layers = [anchor.layer.sublayers copy];
     for (CALayer *la in layers) {
         if (la.hidden || la.opacity < 0.02f) continue;
@@ -984,36 +984,39 @@ static void GCStyleCenterIcon(UIView *root, CGFloat d, CGFloat icon, int depth) 
         GCStyleCenterIcon(w, d, icon, depth + 1);
     }
 }
-// 搜索栏 → 单枚 54pt 圆钮（水平居中）；拍照/语音隐藏
+// 搜索栏 → 单枚 54pt 圆钮；trial14：anchor 自身缩成 54×54（命中=圆钮本体，左右空白不响应），
+//   并下移到底栏同行（行心 = 屏高-54，与双圆钮同排：首页 c-66 / 搜索 c / 我的 c+66）
 static void GCStyleSearch(UIView *anchor) {
-    CGFloat sw = anchor.bounds.size.width;
-    if (sw < 100) return;
-    const CGFloat d = 54.0, x = (sw - d) * 0.5;
+    UIView *sup = anchor.superview;
+    UIWindow *win = anchor.window;
+    if (!sup || !win) return;
+    CGFloat sw = win.bounds.size.width, sh = win.bounds.size.height;
+    const CGFloat d = 54.0;
+    CGRect winR = CGRectMake((sw - d) * 0.5, sh - 81.0, d, d);
+    CGRect local = [sup convertRect:winR fromView:nil];
+    if (!CGRectEqualToRect(local, anchor.frame)) anchor.frame = local;
+    anchor.clipsToBounds = YES;
+    CGRect b = anchor.bounds;
     UIView *cap = GCNarrowCapsule(anchor);
     if (cap) {
-        CGRect f = cap.frame;
-        CGRect g = CGRectMake(x, f.origin.y, d, f.size.height);
-        if (!CGRectEqualToRect(g, f)) cap.frame = g;
-        cap.layer.cornerRadius = f.size.height * 0.5;
+        if (!CGRectEqualToRect(b, cap.frame)) cap.frame = b;
+        cap.layer.cornerRadius = b.size.height * 0.5;
         GCStyleCenterIcon(cap, d, 24.0, 0);   // 放大镜居中
     }
-    for (CALayer *la in [anchor.layer.sublayers copy]) {   // 独立白底/渐变层同夹成圆
+    for (CALayer *la in [anchor.layer.sublayers copy]) {   // 独立白底/渐变层收进圆内
         if (la.hidden || la.opacity < 0.02f) continue;
         BOOL backing = NO;
         for (UIView *v in anchor.subviews) if (v.layer == la) { backing = YES; break; }
         if (backing) continue;
-        CGRect f = la.frame;
-        if (f.size.height < 40 || f.size.height > 120) continue;
-        CGRect g = CGRectMake(x, f.origin.y, d, f.size.height);
-        if (!CGRectEqualToRect(g, f)) { la.frame = g; GCNarrowInvalidateRender(la); }
-        la.cornerRadius = f.size.height * 0.5;
+        if (!CGRectEqualToRect(b, la.frame)) { la.frame = b; GCNarrowInvalidateRender(la); }
+        la.cornerRadius = b.size.height * 0.5;
     }
-    CALayer *mk = anchor.layer.mask;   // mask 收成圆
+    CALayer *mk = anchor.layer.mask;   // mask 保圆
     if (!mk) { mk = [CALayer layer]; anchor.layer.mask = mk; }
-    mk.frame = CGRectMake(x, 0, d, anchor.bounds.size.height);
-    mk.cornerRadius = anchor.bounds.size.height * 0.5;
+    mk.frame = b;
+    mk.cornerRadius = b.size.height * 0.5;
     mk.backgroundColor = [UIColor blackColor].CGColor;
-    for (UIView *v in anchor.subviews) {   // 拍照/语音：隐藏（视图保留）
+    for (UIView *v in anchor.subviews) {   // 拍照/语音隐藏
         if ([v isKindOfClass:UIButton.class] ||
             [NSStringFromClass(v.class) isEqualToString:@"LTMVUIEmojiView"]) v.hidden = YES;
     }
@@ -1022,7 +1025,7 @@ static void GCStyleSearch(UIView *anchor) {
 static void GCStyleTab(UIView *anchor) {
     CGFloat sw = anchor.bounds.size.width;
     if (sw < 100) return;
-    const CGFloat d = 54.0, c = sw * 0.5, off = 33.0;
+    const CGFloat d = 54.0, c = sw * 0.5, off = 66.0;   // trial14：三钮同行（首页 c-66 / 搜索 c / 我的 c+66）
     for (UIView *v in [anchor.subviews copy]) {
         if ([v isKindOfClass:UIVisualEffectView.class] || [v isKindOfClass:UIImageView.class]) { v.hidden = YES; continue; }
         CGRect f = v.frame;   // 选中底衬（100×54 带背景）隐藏
@@ -1042,10 +1045,12 @@ static void GCStyleTab(UIView *anchor) {
         if (!CGRectEqualToRect(g, it.frame)) it.frame = g;
         it.layer.cornerRadius = d * 0.5;
         it.layer.masksToBounds = YES;
+        it.layer.shadowOpacity = 0; it.layer.shadowPath = nil;   // trial14：杀 App 遗留阴影（首页左侧灰影真凶）
         if (!it.backgroundColor) it.backgroundColor = [UIColor colorWithWhite:0.96 alpha:0.92];
         for (UIView *si in it.subviews) {   // subitem 同步 54；图标居中；标签隐藏
             CGRect sf = CGRectMake(0, 0, d, d);
             if (!CGRectEqualToRect(sf, si.frame)) si.frame = sf;
+            si.layer.shadowOpacity = 0; si.layer.shadowPath = nil;
             for (UIView *w in si.subviews) {
                 if ([w isKindOfClass:UIImageView.class]) {
                     CGRect wf = w.frame;
@@ -1059,7 +1064,10 @@ static void GCStyleTab(UIView *anchor) {
 // 夹取主函数：只动胶囊 x/w（y/h 不动），伴生物按绝对几何同步 —— 幂等
 static void GCNarrowApply(UIView *anchor, BOOL isSearch) {
     if (!anchor || !anchor.window) return;
-    if (!isSearch) GCStyleTab(anchor);   // trial13：底栏双圆钮（不依赖胶囊，先于早退执行）
+    // trial14：圆形风格全权接管；旧 240 夹取体退役（#if 0 保留备查）
+    if (isSearch) GCStyleSearch(anchor); else GCStyleTab(anchor);
+    return;
+#if 0
     CGFloat sw = anchor.bounds.size.width;
     UIView *cap = GCNarrowCapsule(anchor);
     if (!cap) return;
@@ -1176,6 +1184,7 @@ static void GCNarrowApply(UIView *anchor, BOOL isSearch) {
             }
         }
     }
+#endif
 }
 // 搜索栏 anchor 类只 hook 一次；命中通用基类则放弃钩子（改由 tick 兜底），避免波及全局
 static void GCNarrowEnsureSearchHook(void) {
