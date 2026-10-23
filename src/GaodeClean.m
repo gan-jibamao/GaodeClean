@@ -18,7 +18,7 @@
 // ---- jibamao 个人标识（编译进 dylib，可用 strings 核对）----
 static NSString *const kGCAuthor      = @"jibamao";
 static NSString *const kGCRepo        = @"https://gan-jibamao.github.io/";
-static NSString *const kGCVersion     = @"0.9.28+trial2";
+static NSString *const kGCVersion     = @"0.9.28+trial3";
 
 // 0.9.18（A1）：底边间隙**按控件分开**，对表原生（搜索栏白底顶边 = 702.6pt）
 //   车机钮（连接车机 · WINDeviceInterconnectWidget）：原生底 652 → 间隙 50.6 → 取 50
@@ -1029,6 +1029,7 @@ static void HookVoid(NSString *name, NSString *methodName, void (^after)(id)) {
 // ══════════════════════════════════════════════════════════════════════════
 static const CGFloat GCNarrowTargetW = 240.0;   // 两条栏的目标可见宽
 static const CGFloat GCNarrowBtnGap  = 12.0;    // 原生：最右按钮右缘距胶囊右缘 12pt
+static const CGFloat GCNarrowAmbPad  = 24.0;    // 底栏环境层原生比胶囊每侧外扩 ~24pt（399 vs 351）
 static BOOL GCNarrowSearchHooked = NO;
 
 // 取 anchor 的「可见胶囊」：毛玻璃层 + 栏级尺寸 + 居中
@@ -1128,6 +1129,32 @@ static void GCNarrowApply(UIView *anchor, BOOL isSearch) {
             if (fabs(f.size.height - (cf.size.height + 4)) > 14) continue;
             CGRect s = g; s.origin.x -= 2; s.origin.y -= 2; s.size.width += 4; s.size.height += 4;
             if (!CGRectEqualToRect(s, f)) v.frame = s;
+        }
+        // ★trial3（老大指出）：底栏还有**全宽环境层**没跟着缩 —— probe3 实测两条：
+        //     CALayer win=[-3,744,399,108] contents=位图（胶囊的柔光/阴影）
+        //     CALayer win=[0,752.5,393,99.5] + 其子 CAGradientLayer 同尺寸
+        //   原生时它们比胶囊(351)每侧外扩 ~21~24pt，读作"胶囊的光晕"；
+        //   胶囊缩到 240 后它们仍全宽 ⇒ 外扩变成 76pt/侧，视觉上就是"多出来的一层"。
+        //   这里保持原生设计关系：环境层 = 胶囊 + 24pt/侧（288 宽），容器内满宽子层同步。
+        {
+            CGFloat ambX = x - GCNarrowAmbPad, ambW = GCNarrowTargetW + 2 * GCNarrowAmbPad;
+            for (CALayer *la in [anchor.layer.sublayers copy]) {
+                if (la.hidden || la.opacity < 0.02f) continue;
+                BOOL backing = NO;
+                for (UIView *v in anchor.subviews) if (v.layer == la) { backing = YES; break; }
+                if (backing) continue;
+                CGRect f = la.frame;
+                if (f.size.width < sw - 8) continue;              // 只认全宽环境层（393/399）
+                if (f.size.height < 60 || f.size.height > 160) continue;
+                CGRect gg = f; gg.origin.x = ambX; gg.size.width = ambW;
+                if (!CGRectEqualToRect(gg, f)) la.frame = gg;
+                for (CALayer *c in [la.sublayers copy]) {         // 渐变等满宽子层同步
+                    CGRect cf2 = c.frame;
+                    if (cf2.size.width < f.size.width - 8) continue;
+                    CGRect g2 = cf2; g2.origin.x = 0; g2.size.width = ambW;
+                    if (!CGRectEqualToRect(g2, cf2)) c.frame = g2;
+                }
+            }
         }
     }
 }

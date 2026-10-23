@@ -9,7 +9,7 @@
 #define TARGET_W 240.0
 #define GAP      12.0
 
-typedef struct { double x, w, h; int effect, image, hidden; const char *name; int standalone; } V;
+typedef struct { double x, w, h; int effect, image, hidden; const char *name; int standalone, ambient; } V;
 
 static int pick_capsule(V *a, int n, double sw) {
     int best = -1; double bw = 0;
@@ -51,6 +51,13 @@ static void apply(V *a, int n, double sw, int isSearch) {
             if (fabs(a[i].w - (cfw + 4)) > 14) continue;
             if (fabs(a[i].h - (cfh + 4)) > 14) continue;
             a[i].x = x - 2; a[i].w = TARGET_W + 4; a[i].h = cfh + 4;
+        }
+        double ambX = x - 24.0, ambW = TARGET_W + 48.0;   // trial3：全宽环境层跟随胶囊
+        for (int i = 0; i < n; i++) {
+            if (i == ci || !a[i].ambient || a[i].hidden) continue;
+            if (a[i].w < sw - 8) continue;
+            if (a[i].h < 60 || a[i].h > 160) continue;
+            a[i].x = ambX; a[i].w = ambW;
         }
     }
 }
@@ -149,6 +156,20 @@ int main(void) {
     tv("已达标胶囊仍被识别（不自锁）", get(r,2,"胶囊",1), 240);
     tv("白底层被重新夹回 240", get(r,2,"白底层",1), 240);
     tv("白底层 x → 76.5", get(r,2,"白底层",0), 76.5);
+    puts("\n== 10. trial3：底栏全宽环境层跟随收窄（胶囊+24/侧=288）==");
+    V m[] = {
+        {21, 351, 60, 1, 0, 0, "胶囊", 0, 0},
+        {-3, 399, 108, 0, 1, 0, "柔光位图", 0, 1},
+        {0, 393, 99.5, 0, 0, 0, "渐变容器", 0, 1},
+        {0, 393, 99.5, 0, 0, 0, "渐变子层", 0, 1},
+        {86.5, 100, 54, 0, 0, 0, "选中底衬", 0, 0},
+    };
+    apply(m, 5, 393, 0);
+    tv("柔光位图 x → 52.5", get(m,5,"柔光位图",0), 52.5);
+    tv("柔光位图 w → 288", get(m,5,"柔光位图",1), 288);
+    tv("渐变容器 w → 288", get(m,5,"渐变容器",1), 288);
+    tv("渐变子层 w → 288", get(m,5,"渐变子层",1), 288);
+    tv("选中底衬不动 100", get(m,5,"选中底衬",1), 100);
     printf("\n%s（失败 %d 项）\n", fails ? "FAIL" : "PASS 全部用例通过", fails);
     return fails ? 1 : 0;
 }
