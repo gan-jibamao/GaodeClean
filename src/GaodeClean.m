@@ -18,7 +18,7 @@
 // ---- jibamao 个人标识（编译进 dylib，可用 strings 核对）----
 static NSString *const kGCAuthor      = @"jibamao";
 static NSString *const kGCRepo        = @"https://gan-jibamao.github.io/";
-static NSString *const kGCVersion     = @"0.9.28+probe5";
+static NSString *const kGCVersion     = @"0.9.28+trial10";
 
 // 0.9.18（A1）：底边间隙**按控件分开**，对表原生（搜索栏白底顶边 = 702.6pt）
 //   车机钮（连接车机 · WINDeviceInterconnectWidget）：原生底 652 → 间隙 50.6 → 取 50
@@ -1170,6 +1170,18 @@ static void GCNarrowHairlineSweep(UIView *anchor, CGFloat sw, CGFloat x) {
         GCNarrowHairWalk(w.layer, band, midY, sw, x, 0, &budget);
     }
 }
+// ★trial10（probe5 定罪）：白底层 shd=0.20/shr=20 —— 带阴影的层在 frame 被夹窄后，
+//   显式 shadowPath / shouldRasterize 缓存**不会自动跟随** ⇒ 阴影仍按原生 377 圆角矩形绘制
+//   ⇒ 顶/底切线处的"发丝线"（右到 385、左 8pt 那条被裁图裁掉）。每次写完 frame 必须失效缓存。
+static void GCNarrowInvalidateRender(CALayer *la) {
+    if (!la) return;
+    @try {
+        la.shadowPath = nil;
+        if (la.shouldRasterize) la.shouldRasterize = NO;
+        [la setNeedsDisplay];
+        [la setNeedsLayout];
+    } @catch (__unused NSException *e) {}
+}
 // ★A1（probe3 破案）：App 把搜索栏白底画成**直接挂在 anchor.layer 上的独立 CALayer**，
 //   没有对应 UIView —— 只夹 UIVisualEffectView 时它原地不动，于是"图标缩了、白底还是 377 宽"。
 //   实测：CALayer win=[8,702,377,54] corner=27 bg=rgba(1,1,1,0.90) + 同尺寸 CAGradientLayer。
@@ -1186,7 +1198,7 @@ static void GCNarrowStandaloneLayers(UIView *anchor, CGFloat sw, CGFloat x) {
         if (f.size.width < GCNarrowTargetW - 2 || f.size.width > sw - 4) continue;
         if (fabs(CGRectGetMidX(f) - sw * 0.5) > 20) continue;
         CGRect g = f; g.origin.x = x; g.size.width = GCNarrowTargetW;
-        if (!CGRectEqualToRect(g, f)) la.frame = g;   // 幂等：已达标不写
+        if (!CGRectEqualToRect(g, f)) { la.frame = g; GCNarrowInvalidateRender(la); }
     }
 }
 // 夹取主函数：只动胶囊 x/w（y/h 不动），伴生物按绝对几何同步 —— 幂等
@@ -1209,6 +1221,7 @@ static void GCNarrowApply(UIView *anchor, BOOL isSearch) {
             ((UIVisualEffectView *)cap).effect = nil;
             ((UIVisualEffectView *)cap).effect = fx;
         }
+        GCNarrowInvalidateRender(cap.layer);   // trial10：清 shadowPath/光栅缓存
     }
     NSInteger budget = 24;
     GCNarrowInnerFix(cap, GCNarrowTargetW, 0, &budget);
@@ -1256,6 +1269,7 @@ static void GCNarrowApply(UIView *anchor, BOOL isSearch) {
             if (!CGRectEqualToRect(s, f)) {
                 [v.layer removeAllAnimations];   // 防 App 用动画把描边拽回原生宽
                 v.frame = s; GCNarrowBorderFixes++;
+                GCNarrowInvalidateRender(v.layer);
             }
         }
         // ★trial5（probe4 干跑定罪）：底栏全宽环境层是**真实 UIView 的 backing layer** ——
@@ -1286,6 +1300,7 @@ static void GCNarrowApply(UIView *anchor, BOOL isSearch) {
                 if (!CGRectEqualToRect(gg, f)) {
                     [v.layer removeAllAnimations];
                     v.frame = gg; GCNarrowAmbFixes++;
+                    GCNarrowInvalidateRender(v.layer);
                     for (CALayer *c in [v.layer.sublayers copy]) {
                         CGRect cf2 = c.frame;
                         if (cf2.size.width < f.size.width - 8) continue;
