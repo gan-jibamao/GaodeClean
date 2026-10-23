@@ -26,7 +26,6 @@ static void apply(V *a, int n, double sw, int isSearch) {
     if (sw < 200) return;
     int ci = pick_capsule(a, n, sw);
     if (ci < 0) return;
-    double cfw = a[ci].w, cfh = a[ci].h;
     double x = (sw - TARGET_W) / 2, right = x + TARGET_W;
     a[ci].x = x; a[ci].w = TARGET_W;
     for (int i = 0; i < n; i++) {              // A1：anchor.layer 上的独立栏级层（无对应 UIView）
@@ -48,9 +47,10 @@ static void apply(V *a, int n, double sw, int isSearch) {
     } else {
         for (int i = 0; i < n; i++) {
             if (i == ci || a[i].hidden || !a[i].image) continue;
-            if (fabs(a[i].w - (cfw + 4)) > 14) continue;
-            if (fabs(a[i].h - (cfh + 4)) > 14) continue;
-            a[i].x = x - 2; a[i].w = TARGET_W + 4; a[i].h = cfh + 4;
+            if (a[i].h < 56 || a[i].h > 72) continue;              // trial4：绝对特征匹配
+            if (a[i].w < TARGET_W || a[i].w > 380) continue;
+            if (fabs(a[i].x + a[i].w / 2 - sw / 2) > 20) continue;
+            a[i].x = x - 2; a[i].w = TARGET_W + 4;
         }
         double ambX = x - 24.0, ambW = TARGET_W + 48.0;   // trial3：全宽环境层跟随胶囊
         for (int i = 0; i < n; i++) {
@@ -170,6 +170,16 @@ int main(void) {
     tv("渐变容器 w → 288", get(m,5,"渐变容器",1), 288);
     tv("渐变子层 w → 288", get(m,5,"渐变子层",1), 288);
     tv("选中底衬不动 100", get(m,5,"选中底衬",1), 100);
+    puts("\n== 11. trial4 回归：胶囊已 240 + App 把描边图改回 355 ⇒ 必须重新同步（旧 cf 匹配在此永久失效）==");
+    V q[] = {
+        {76.5, 240, 60, 1, 0, 0, "胶囊", 0, 0},
+        {19, 355, 64, 0, 1, 0, "描边图", 0, 0},
+        {-3, 399, 108, 0, 1, 0, "环境阴影", 0, 0},
+    };
+    apply(q, 3, 393, 0);
+    tv("描边图 x → 74.5", get(q,3,"描边图",0), 74.5);
+    tv("描边图 w → 244", get(q,3,"描边图",1), 244);
+    tv("环境阴影仍不动 399", get(q,3,"环境阴影",1), 399);
     printf("\n%s（失败 %d 项）\n", fails ? "FAIL" : "PASS 全部用例通过", fails);
     return fails ? 1 : 0;
 }
