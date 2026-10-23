@@ -18,7 +18,7 @@
 // ---- jibamao 个人标识（编译进 dylib，可用 strings 核对）----
 static NSString *const kGCAuthor      = @"jibamao";
 static NSString *const kGCRepo        = @"https://gan-jibamao.github.io/";
-static NSString *const kGCVersion     = @"0.9.28+trial6";
+static NSString *const kGCVersion     = @"0.9.28+trial7";
 
 // 0.9.18（A1）：底边间隙**按控件分开**，对表原生（搜索栏白底顶边 = 702.6pt）
 //   车机钮（连接车机 · WINDeviceInterconnectWidget）：原生底 652 → 间隙 50.6 → 取 50
@@ -1137,6 +1137,32 @@ static void GCNarrowApply(UIView *anchor, BOOL isSearch) {
             if (ax < bx) return NSOrderedDescending;
             return NSOrderedSame;
         }];
+        // ★trial7（老大放大截图定罪）：搜索栏右帽外伸出的**发丝线** = 一个原生宽度、
+        //   填充透明、只有 1px 描边的矩形层，且不在 anchor 子层内（probe4 里 anchor 子层全 240）
+        //   ⇒ 挂在更上层祖先上。兜底网：沿 anchor 上溯 4 层，把任何「非 backing、高 40~70、
+        //   宽≥0.6 屏宽、垂直中心与搜索栏同带、填充几乎透明」的独立层夹到胶囊几何，
+        //   发丝线即贴住胶囊；有实底有位图的层不动（白底已由 A1 处理）。
+        {
+            CGRect winBand = [anchor convertRect:anchor.bounds toView:nil];
+            int depth = 0;
+            for (UIView *anc = anchor.superview; anc && depth < 4; anc = anc.superview, depth++) {
+                for (CALayer *la in [anc.layer.sublayers copy]) {
+                    if (la.hidden || !la.superlayer) continue;
+                    BOOL backing = NO;
+                    for (UIView *v in anc.subviews) if (v.layer == la) { backing = YES; break; }
+                    if (backing) continue;
+                    CGRect wr = [la convertRect:la.bounds toLayer:nil];
+                    if (wr.size.height < 40 || wr.size.height > 70) continue;
+                    if (wr.size.width < sw * 0.6 || wr.size.width > sw + 10) continue;
+                    if (fabs(CGRectGetMidY(wr) - CGRectGetMidY(winBand)) > 6) continue;
+                    CGFloat al = la.backgroundColor ? CGColorGetAlpha(la.backgroundColor) : 0.0;
+                    if (al > 0.05 && la.contents) continue;
+                    CGRect target = CGRectMake(x, winBand.origin.y, GCNarrowTargetW, winBand.size.height);
+                    CGRect local = [la.superlayer convertRect:target fromLayer:nil];
+                    if (!CGRectEqualToRect(local, la.frame)) { [la removeAllAnimations]; la.frame = local; }
+                }
+            }
+        }
         CGFloat cursor = right - GCNarrowBtnGap;
         for (UIView *v in btns) {
             CGRect f = v.frame;
