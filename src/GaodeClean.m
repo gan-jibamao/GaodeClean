@@ -18,7 +18,7 @@
 // ---- jibamao 个人标识（编译进 dylib，可用 strings 核对）----
 static NSString *const kGCAuthor      = @"jibamao";
 static NSString *const kGCRepo        = @"https://gan-jibamao.github.io/";
-static NSString *const kGCVersion     = @"0.9.30+trial11";
+static NSString *const kGCVersion     = @"0.9.31+probe7";
 
 // 0.9.18（A1）：底边间隙**按控件分开**，对表原生（搜索栏白底顶边 = 702.6pt）
 //   车机钮（连接车机 · WINDeviceInterconnectWidget）：原生底 652 → 间隙 50.6 → 取 50
@@ -126,6 +126,44 @@ static __weak UIWindow *GCCMainWindow;
 static UIView *GCNarrowCapsule(UIView *anchor);           // 0.9.28 缩窄：取可见胶囊
 static void GCNarrowTick(void);                          // 0.9.28 缩窄：tick 兜底复核
 static void GCProbeTick6(void);                      // probe6：定时取证（前置声明）
+#ifdef GAODECLEAN_PROBE
+static void GCProbeTick7(void);                      // probe7：pin 链路取证（前置声明）
+#endif
+#ifdef GAODECLEAN_PROBE
+// ══ probe7 全局状态（tick/pin/discover 均可见；正式包整块不编译）══
+static double P7T0;
+static int P7NTicks, P7DiscCalls, P7DiscSkips, P7PinCalls, P7WTicks;
+static int P7Writes[6];      // 0=车机 1=右胶囊 2=路线 3=2D 4=天气行 5=保留
+static int P7WGates[3];      // 0=通过 1=bar非视图 2=评估
+static double P7FirstSeen[6], P7FirstPin[6], P7FirstKey;
+static __weak UIView *P7LastPW;
+static CGRect P7LastCont;
+static __weak UIView *P7RowMir;
+static NSMutableString *P7Log;
+static int P7LogN;
+static double P7Now(void) { if (!P7T0) P7T0 = CACurrentMediaTime(); return CACurrentMediaTime() - P7T0; }
+__attribute__((format(NSString, 1, 2)))
+static void P7Note(NSString *fmt, ...) {
+    va_list ap; va_start(ap, fmt);
+    NSString *m = [[NSString alloc] initWithFormat:fmt arguments:ap];
+    va_end(ap);
+    if (!P7Log) P7Log = [NSMutableString string];
+    if (P7LogN > 240) { [P7Log deleteCharactersInRange:NSMakeRange(0, P7Log.length / 2)]; P7LogN /= 2; }
+    [P7Log appendFormat:@"[%6.1fs] %@\n", P7Now(), m];
+    P7LogN++;
+}
+static CGRect P7WR(UIView *v) {
+    if (!v || !v.window) return CGRectNull;
+    @try { return [v convertRect:v.bounds toView:nil]; } @catch (__unused NSException *e) { return CGRectNull; }
+}
+static void P7Write(int idx, CGRect before, CGRect after, CGRect contWin) {
+    P7Writes[idx]++;
+    if (!P7FirstPin[idx]) P7FirstPin[idx] = P7Now();
+    if (P7Writes[idx] <= 8 || P7Writes[idx] % 40 == 0)
+        P7Note(@"WRITE#%d n=%d before=%@ after=%@ cont=%@", idx, P7Writes[idx],
+               NSStringFromCGRect(before), NSStringFromCGRect(after), NSStringFromCGRect(contWin));
+}
+#endif
 static void GCNarrowApply(UIView *anchor, BOOL isSearch); // 0.9.28 缩窄：点对点夹取
 static long GCNarrowBorderFixes;                 // 诊断计数（定义在缩窄模块，此处暂定声明）
 static long GCNarrowAmbFixes;                  // 诊断计数（暂定声明）
@@ -733,7 +771,13 @@ static void Schedule(void) {
             if ([bar isKindOfClass:UIView.class]) {
                 AlignCornerWidgets(bar);
                 AlignWeatherRowTick(bar.window);
+#ifdef GAODECLEAN_PROBE
+                P7WTicks++;
+#endif
             }
+#ifdef GAODECLEAN_PROBE
+            else P7WGates[1]++;
+#endif
         }
         // 0.7.0：开屏广告兜底（有界窗口内）
         SplashAdTick();
@@ -744,6 +788,7 @@ static void Schedule(void) {
         if (TickCount % 5 == 0 || TickCount < 40) GCNarrowTick();   // 0.9.28 兜底复核（幂等）；trial12(B1)：冷启动头 8s 每拍都跑，闪变窗口压到 ≤1 拍
 #ifdef GAODECLEAN_PROBE
         GCProbeTick6();   // probe6：5/15/30s 取证
+        GCProbeTick7();   // probe7：5/15/30/45/60s pin 取证
 #endif
 #if GCC_DEVICE_TEST
         RunDeviceCheck();
@@ -1229,13 +1274,106 @@ __attribute__((unused)) static void GCProbeTick6(void) {
     int want = (dt > 30) ? 3 : (dt > 15) ? 2 : (dt > 5) ? 1 : 0;
     if (want > stage) { stage = want; GCProbeDump6([NSString stringWithFormat:@"timer%d", want]); }
 }
+#ifdef GAODECLEAN_PROBE
+// ══ probe7：pin 链路取证（dump/扫描）══
+static BOOL IsWeatherRowClass(NSString *cn);   // 定义在后，冗余前置声明合法
+static NSString *P7Chain(UIView *v) {
+    NSMutableString *o = [NSMutableString string];
+    UIView *p = v.superview;
+    for (int i = 0; i < 4 && p; i++, p = p.superview)
+        [o appendFormat:@"←%@ ", NSStringFromClass(p.class)];
+    return o;
+}
+static void P7Inst(NSMutableString *o, const char *tag, UIView *v) {
+    [o appendFormat:@"  %-10s ptr=%p alive=%d win=%@ hid=%d a=%.2f key=%d chain=%@\n",
+        tag, (void *)v, v != nil, NSStringFromCGRect(P7WR(v)), v.hidden, v.alpha,
+        (v && objc_getAssociatedObject(v, &AlignedKey)) ? 1 : 0, v ? P7Chain(v) : @"-"];
+}
+static void P7LiveScan(NSMutableString *o) {
+    NSArray *wins = GCAllWindows();
+    int budget = 3000, found = 0;
+    [o appendString:@"---[probe7 全窗口活实例扫描]---\n"];
+    for (UIWindow *w in wins) {
+        if (![w isKindOfClass:UIWindow.class] || w.hidden) continue;
+        NSMutableArray *q = [NSMutableArray arrayWithObject:w];
+        while (q.count && budget-- > 0) {
+            UIView *v = q.firstObject; [q removeObjectAtIndex:0];
+            NSString *cn = NSStringFromClass(v.class);
+            BOOL mCar = [cn isEqualToString:GCStrAt(140)];
+            BOOL mRou = [cn isEqualToString:GCStrAt(141)];
+            BOOL mRight = IsRightBottomWidget(v);
+            BOOL mLite = GCCIsLiteGroupCapsule(v);
+            BOOL mWea = IsWeatherRowClass(cn);
+            BOOL mCont = [cn isEqualToString:@"MapWidgetContainerView"] || [cn isEqualToString:@"WINMapSideBarWidgetContainerView"] || [cn isEqualToString:@"GDTransparentView"];
+            if (mCar || mRou || mRight || mLite || mWea || mCont) {
+                const char *tag = mCar ? "车机" : mRou ? "路线胶囊" : mRight ? "右下控件" : mLite ? "LiteGroup" : mWea ? "天气行" : "容器";
+                BOOL cached = (v == CachedCar) || (v == CachedRight) || (v == CachedRoute) || (v == CachedLiteGroup) || (v == P7RowMir);
+                [o appendFormat:@"  %-12s %@ win=%@ hid=%d a=%.2f key=%d %@sub=%lu chain=%@\n",
+                    tag, cn, NSStringFromCGRect(P7WR(v)), v.hidden, v.alpha,
+                    objc_getAssociatedObject(v, &AlignedKey) ? 1 : 0,
+                    cached ? @"★缓存 " : @"", (unsigned long)v.subviews.count, P7Chain(v)];
+                if (++found > 60) { [o appendString:@"  ...(截断)\n"]; return; }
+            }
+            [q addObjectsFromArray:v.subviews];
+        }
+    }
+    if (!found) [o appendString:@"  (0 命中)\n"];
+}
+static void GCProbeDump7(NSString *reason) {
+    NSMutableString *o = [NSMutableString string];
+    [o appendFormat:@"\n########## probe7 dump reason=%@ t=%.1fs 构建=%@ ##########\n", reason, P7Now(), kGCVersion];
+    [o appendFormat:@"TickCount=%d settled=%d | pin调=%d discover调=%d(早退%d) narrowTick=%d 天气tick=%d\n",
+        TickCount, SearchBarSettled, P7PinCalls, P7DiscCalls, P7DiscSkips, P7NTicks, P7WTicks];
+    [o appendFormat:@"天气行门: 评估=%d 通过=%d bar非视图=%d\n", P7WGates[2], P7WGates[0], P7WGates[1]];
+    [o appendFormat:@"写入次数: 车机=%d 胶囊=%d 路线=%d 2D=%d\n", P7Writes[0], P7Writes[1], P7Writes[2], P7Writes[3]];
+    [o appendFormat:@"时间线(s): 车机 见=%.1f 钉=%.1f | 胶囊 %.1f/%.1f | 路线 %.1f/%.1f | 天气门首过=%.1f | KEY=%.1f\n",
+        P7FirstSeen[0], P7FirstPin[0], P7FirstSeen[1], P7FirstPin[1], P7FirstSeen[2], P7FirstPin[2], P7FirstSeen[4], P7FirstKey];
+    [o appendString:@"---[缓存实例现状]---\n"];
+    P7Inst(o, "车机", CachedCar);
+    P7Inst(o, "右下", CachedRight);
+    P7Inst(o, "路线", CachedRoute);
+    P7Inst(o, "LiteGrp", CachedLiteGroup);
+    P7Inst(o, "天气行", P7RowMir);
+    P7LiveScan(o);
+    [o appendString:@"---[事件日志(近段)]---\n"];
+    [o appendString:P7Log ?: @"(空)\n"];
+    NSMutableString *full = [NSMutableString string];
+    if (GCProbeBuf6.length > 100000)
+        [full appendString:[GCProbeBuf6 substringFromIndex:GCProbeBuf6.length - 100000]];
+    else if (GCProbeBuf6) [full appendString:GCProbeBuf6];
+    [full appendString:o];
+    GCProbeBuf6 = full;
+    @try { [UIPasteboard generalPasteboard].string = full; } @catch (__unused NSException *e) {}
+    @try {
+        NSString *dir = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES).firstObject;
+        [full writeToFile:[dir stringByAppendingPathComponent:@"GaodeClean-probe.txt"] atomically:YES encoding:NSUTF8StringEncoding error:nil];
+    } @catch (__unused NSException *e) {}
+}
+__attribute__((unused)) static void GCProbeTick7(void) {
+    static int stage = 0;
+    double dt = P7Now();
+    int want = (dt > 60) ? 5 : (dt > 45) ? 4 : (dt > 30) ? 3 : (dt > 15) ? 2 : (dt > 5) ? 1 : 0;
+    if (want > stage) { stage = want; GCProbeDump7([NSString stringWithFormat:@"p7定时%d", want]); }
+}
+#endif
+
 // trial11：实例发现（缓存失效才 BFS）—— 从 AlignCornerWidgets 收归，pin 自给自足
 static void GCStyleDiscoverWidgets(UIWindow *win) {
     if (!win) return;
+#ifdef GAODECLEAN_PROBE
+    P7DiscCalls++;
+    __weak UIView *p7oc = CachedCar;
+    __weak UIView *p7or_ = CachedRight;
+    __weak UIView *p7ort = CachedRoute;
+    __weak UIView *p7ol = CachedLiteGroup;
+#endif
     if (!CachedCar || !CachedCar.window) CachedCar = nil;
     if (!CachedRight || !CachedRight.window) CachedRight = nil;
     if (!CachedRoute || !CachedRoute.window) CachedRoute = nil;
     if (!CachedLiteGroup || !CachedLiteGroup.window) CachedLiteGroup = nil;
+#ifdef GAODECLEAN_PROBE
+    if (CachedCar && CachedRight && CachedRoute && CachedLiteGroup) P7DiscSkips++;
+#endif
     if (CachedCar && CachedRight && CachedRoute && CachedLiteGroup) return;
     NSMutableArray<UIView *> *queue = [NSMutableArray arrayWithObject:win];
     for (NSUInteger i = 0; i < queue.count && queue.count < 2000; i++) {
@@ -1248,12 +1386,39 @@ static void GCStyleDiscoverWidgets(UIWindow *win) {
         else if (GCCIsLiteGroupCapsule(v)) CachedLiteGroup = v;
         if (CachedCar && CachedRight && CachedRoute && CachedLiteGroup) break;
     }
+#ifdef GAODECLEAN_PROBE
+    if (CachedCar != p7oc)     P7Note(@"DISC 车机→新实例 old=%p(%@) new=%p(%@)", (__bridge void *)p7oc, NSStringFromCGRect(P7WR(p7oc)), (__bridge void *)CachedCar, NSStringFromCGRect(P7WR(CachedCar)));
+    if (CachedRight != p7or_)  P7Note(@"DISC 右下→新实例 old=%p(%@) new=%p(%@)", (__bridge void *)p7or_, NSStringFromCGRect(P7WR(p7or_)), (__bridge void *)CachedRight, NSStringFromCGRect(P7WR(CachedRight)));
+    if (CachedRoute != p7ort)  P7Note(@"DISC 路线→新实例 old=%p(%@) new=%p(%@)", (__bridge void *)p7ort, NSStringFromCGRect(P7WR(p7ort)), (__bridge void *)CachedRoute, NSStringFromCGRect(P7WR(CachedRoute)));
+    if (CachedLiteGroup != p7ol) P7Note(@"DISC Lite→新实例 old=%p(%@) new=%p(%@)", (__bridge void *)p7ol, NSStringFromCGRect(P7WR(p7ol)), (__bridge void *)CachedLiteGroup, NSStringFromCGRect(P7WR(CachedLiteGroup)));
+    if (CachedCar && !P7FirstSeen[0]) P7FirstSeen[0] = P7Now();
+    if ((CachedRight || CachedLiteGroup) && !P7FirstSeen[1]) P7FirstSeen[1] = P7Now();
+    if (CachedRoute && !P7FirstSeen[2]) P7FirstSeen[2] = P7Now();
+#endif
 }
 // ★trial9：角控件绝对钉死（不再对表搜索栏）—— 右胶囊右10/底755；车机钮左10、
 //   天气行原生关系（钮下18、左对齐）⇒ 行底=755 ⇒ 钮底=755-20-18。每 tick/布局钩子覆写 ⇒ 不漂。
 static void GCStylePinWidgets(UIWindow *win) {
     if (!win) return;
     GCStyleDiscoverWidgets(win);   // trial11：自给自足（3D 模式 handler/bar 链断也能发现+钉）
+#ifdef GAODECLEAN_PROBE
+    P7PinCalls++;
+    if (win != P7LastPW) {
+        P7Note(@"PW pin窗口→%@ cls=%@ bounds=%@", NSStringFromCGRect(P7WR(win)), NSStringFromClass(win.class), NSStringFromCGRect(win.bounds));
+        P7LastPW = win;
+    }
+    UIView *p7cap = (CachedLiteGroup && CachedLiteGroup.window) ? CachedLiteGroup : CachedRight;
+    CGRect p7oc = CGRectNull;
+    for (UIView *av = p7cap; av; av = av.superview) {
+        if (av == win) break;
+        CGRect p7or2 = P7WR(av);
+        if (CGRectGetMinX(p7or2) != 0 || CGRectGetMinY(p7or2) != 0) p7oc = p7or2;
+    }
+    if (!CGRectEqualToRect(p7oc, P7LastCont)) {
+        P7Note(@"CONTMOVE 容器win系 %@ → %@", NSStringFromCGRect(P7LastCont), NSStringFromCGRect(p7oc));
+        P7LastCont = p7oc;
+    }
+#endif
     CGFloat sw = win.bounds.size.width, sh = win.bounds.size.height;
     const CGFloat pinBottom = sh - 81 - 16;   // 圆钮行顶(771) 上 16pt
     UIView *cap = (CachedLiteGroup && CachedLiteGroup.window) ? CachedLiteGroup : CachedRight;
@@ -1262,9 +1427,15 @@ static void GCStylePinWidgets(UIWindow *win) {
         CGRect g = CGRectMake(sw - 10 - wr.size.width, pinBottom - wr.size.height, wr.size.width, wr.size.height);
         CGRect local = [cap.superview convertRect:g fromView:win];
         if (!CGRectEqualToRect(local, cap.frame)) {
+#ifdef GAODECLEAN_PROBE
+            CGRect p7b = P7WR(cap);
+#endif
             [CATransaction begin]; [CATransaction setDisableActions:YES];
             [cap.layer removeAllAnimations]; cap.frame = local;
             [CATransaction commit];
+#ifdef GAODECLEAN_PROBE
+            P7Write(1, p7b, local, p7oc);
+#endif
         }
     }
     UIView *car = CachedCar;
@@ -1274,9 +1445,15 @@ static void GCStylePinWidgets(UIWindow *win) {
         CGRect g = CGRectMake(10, carY, wr.size.width, wr.size.height);
         CGRect local = [car.superview convertRect:g fromView:win];
         if (!CGRectEqualToRect(local, car.frame)) {
+#ifdef GAODECLEAN_PROBE
+            CGRect p7b = P7WR(car);
+#endif
             [CATransaction begin]; [CATransaction setDisableActions:YES];
             [car.layer removeAllAnimations]; car.frame = local;
             [CATransaction commit];
+#ifdef GAODECLEAN_PROBE
+            P7Write(0, p7b, local, p7oc);
+#endif
         }
     }
     // trial10：钉完即放行扣留（AlignedKey），控件首 tick 就出现，不再等 settle
@@ -1284,6 +1461,9 @@ static void GCStylePinWidgets(UIWindow *win) {
     if (cap) objc_setAssociatedObject(cap, &AlignedKey, @(1), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     if (CachedRight) objc_setAssociatedObject(CachedRight, &AlignedKey, @(1), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     if (CachedRoute) objc_setAssociatedObject(CachedRoute, &AlignedKey, @(1), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+#ifdef GAODECLEAN_PROBE
+    if (CachedRoute && !P7FirstKey) { P7FirstKey = P7Now(); P7Note(@"KEY 路线胶囊 AlignedKey 置位"); }
+#endif
     // trial10：车机钮/胶囊容器类的 layoutSubviews 钩子 —— App 重排（点定位切3D等）落地的
     //   同一布局事务内回钉 ⇒ 零可见跳变。
     static BOOL carHooked = NO, capHooked = NO;
@@ -1454,6 +1634,9 @@ static void GCNarrowTick(void) {
     if (bar) GCNarrowApply(bar, YES);
     UIView *tb = CachedTabBar;
     if (tb) GCNarrowApply(tb, NO);
+#ifdef GAODECLEAN_PROBE
+    P7NTicks++;
+#endif
     // trial11：pin 脱离 bar/handler 链（3D 模式该链可能断 ⇒ pin 停跑 = 漂移根因）：每 tick 直钉
     UIWindow *pw = tb.window ?: bar.window;
     if (!pw) {
@@ -2178,8 +2361,21 @@ static void LayoutMinimalHome(id handler) {
                 }
             }
         }
+#ifdef GAODECLEAN_PROBE
+        P7RowMir = CachedRow;
+        P7WGates[2]++;
+        if (!(CachedRow && CachedRow.window && !CachedRow.hidden && CachedCar && CachedCar.window && bar.window && CachedRow.superview) && P7WGates[2] % 100 == 1)
+            P7Note(@"WGATE 跳过 row=%d rowWin=%d rowHid=%d car=%d carWin=%d barWin=%d sup=%d",
+                CachedRow != nil, CachedRow.window != nil, CachedRow.hidden,
+                CachedCar != nil, CachedCar.window != nil, bar.window != nil, CachedRow.superview != nil);
+#endif
         if (CachedRow && CachedRow.window && !CachedRow.hidden
             && CachedCar && CachedCar.window && bar.window && CachedRow.superview) {
+#ifdef GAODECLEAN_PROBE
+            P7WGates[0]++;
+            if (!P7FirstSeen[4]) { P7FirstSeen[4] = P7Now(); P7Note(@"WGATE 首过 天气行放行对齐"); }
+            if (P7WGates[0] % 50 == 1) P7Note(@"WGATE 通过#%d row win=%@", P7WGates[0], NSStringFromCGRect(P7WR(CachedRow)));
+#endif
             objc_setAssociatedObject(CachedRow, &AlignedKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
             AlignWeatherRow(CachedRow);
         }
