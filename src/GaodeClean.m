@@ -18,7 +18,7 @@
 // ---- jibamao 个人标识（编译进 dylib，可用 strings 核对）----
 static NSString *const kGCAuthor      = @"jibamao";
 static NSString *const kGCRepo        = @"https://gan-jibamao.github.io/";
-static NSString *const kGCVersion     = @"0.9.30+trial8";
+static NSString *const kGCVersion     = @"0.9.30+trial9";
 
 // 0.9.18（A1）：底边间隙**按控件分开**，对表原生（搜索栏白底顶边 = 702.6pt）
 //   车机钮（连接车机 · WINDeviceInterconnectWidget）：原生底 652 → 间隙 50.6 → 取 50
@@ -1226,6 +1226,36 @@ __attribute__((unused)) static void GCProbeTick6(void) {
     int want = (dt > 30) ? 3 : (dt > 15) ? 2 : (dt > 5) ? 1 : 0;
     if (want > stage) { stage = want; GCProbeDump6([NSString stringWithFormat:@"timer%d", want]); }
 }
+// ★trial9：角控件绝对钉死（不再对表搜索栏）—— 右胶囊右10/底755；车机钮左10、
+//   天气行原生关系（钮下18、左对齐）⇒ 行底=755 ⇒ 钮底=755-20-18。每 tick/布局钩子覆写 ⇒ 不漂。
+static void GCStylePinWidgets(UIWindow *win) {
+    if (!win) return;
+    CGFloat sw = win.bounds.size.width, sh = win.bounds.size.height;
+    const CGFloat pinBottom = sh - 81 - 16;   // 圆钮行顶(771) 上 16pt
+    UIView *cap = (CachedLiteGroup && CachedLiteGroup.window) ? CachedLiteGroup : CachedRight;
+    if (cap && cap.window && cap.superview) {
+        CGRect wr = [cap convertRect:cap.bounds toView:win];
+        CGRect g = CGRectMake(sw - 10 - wr.size.width, pinBottom - wr.size.height, wr.size.width, wr.size.height);
+        CGRect local = [cap.superview convertRect:g fromView:win];
+        if (!CGRectEqualToRect(local, cap.frame)) {
+            [CATransaction begin]; [CATransaction setDisableActions:YES];
+            [cap.layer removeAllAnimations]; cap.frame = local;
+            [CATransaction commit];
+        }
+    }
+    UIView *car = CachedCar;
+    if (car && car.window && car.superview) {
+        CGRect wr = [car convertRect:car.bounds toView:win];
+        CGFloat carY = pinBottom - 20 - 18 - wr.size.height;   // 天气行高20 + 原生间隙18
+        CGRect g = CGRectMake(10, carY, wr.size.width, wr.size.height);
+        CGRect local = [car.superview convertRect:g fromView:win];
+        if (!CGRectEqualToRect(local, car.frame)) {
+            [CATransaction begin]; [CATransaction setDisableActions:YES];
+            [car.layer removeAllAnimations]; car.frame = local;
+            [CATransaction commit];
+        }
+    }
+}
 // 夹取主函数：只动胶囊 x/w（y/h 不动），伴生物按绝对几何同步 —— 幂等
 static void GCNarrowApply(UIView *anchor, BOOL isSearch) {
     if (!anchor || !anchor.window) return;
@@ -2198,7 +2228,7 @@ static BOOL GCCIsLiteGroupCapsule(UIView *v) {
     return y > win.bounds.size.height * 0.25;
 }
 
-static void AlignOneWidget(UIView *bar, UIView *w, CGFloat barTop, CGFloat gap) {
+__attribute__((unused)) static void AlignOneWidget(UIView *bar, UIView *w, CGFloat barTop, CGFloat gap) {
     if (!w.window) return;
     UIWindow *win = bar.window;
     CGRect r = [w convertRect:w.bounds toView:win];
@@ -2455,9 +2485,9 @@ static void AlignCornerWidgets(UIView *bar) {
             if (CachedCar && CachedRight && CachedRoute && CachedLiteGroup) break;
         }
     }
-    // 0.9.18（A1）：车机钮 50pt / 胶囊 20pt —— 原生两者间隙不同，共用会让车机钮低 30pt
-    if (CachedCar) AlignOneWidget(bar, CachedCar, barTop, GCGapCar);
-    if (CachedRight) AlignOneWidget(bar, CachedRight, barTop, GCGapCapsule);
+    // trial9：圆形风格 —— 角控件不再对表搜索栏（bar 位置已不代表视觉重心），改绝对钉死；
+    //   实例发现/扣留/放行逻辑保留，只替换摆位。
+    GCStylePinWidgets(win);
     if (CachedRight) AlignMapTypeButton(CachedRight);   // 0.9.18（A3）：2D/3D 摆回胶囊正上方
     // 0.5.1：线路按钮（组合按钮下半部分）原生 hid=1，强制显示，保持原位在组合按钮内部
     if (CachedRoute) {
