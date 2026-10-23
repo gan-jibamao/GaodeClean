@@ -18,7 +18,7 @@
 // ---- jibamao 个人标识（编译进 dylib，可用 strings 核对）----
 static NSString *const kGCAuthor      = @"jibamao";
 static NSString *const kGCRepo        = @"https://gan-jibamao.github.io/";
-static NSString *const kGCVersion     = @"0.9.30+trial9";
+static NSString *const kGCVersion     = @"0.9.30+trial10";
 
 // 0.9.18（A1）：底边间隙**按控件分开**，对表原生（搜索栏白底顶边 = 702.6pt）
 //   车机钮（连接车机 · WINDeviceInterconnectWidget）：原生底 652 → 间隙 50.6 → 取 50
@@ -1255,6 +1255,20 @@ static void GCStylePinWidgets(UIWindow *win) {
             [CATransaction commit];
         }
     }
+    // trial10：钉完即放行扣留（AlignedKey），控件首 tick 就出现，不再等 settle
+    if (car) objc_setAssociatedObject(car, &AlignedKey, @(1), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    if (cap) objc_setAssociatedObject(cap, &AlignedKey, @(1), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    // trial10：车机钮/胶囊容器类的 layoutSubviews 钩子 —— App 重排（点定位切3D等）落地的
+    //   同一布局事务内回钉 ⇒ 零可见跳变。
+    static BOOL carHooked = NO, capHooked = NO;
+    if (!carHooked && car) {
+        carHooked = YES;
+        HookVoid(NSStringFromClass(car.class), @"layoutSubviews", ^(UIView *v) { GCStylePinWidgets(v.window); });
+    }
+    if (!capHooked && cap) {
+        capHooked = YES;
+        HookVoid(NSStringFromClass(cap.class), @"layoutSubviews", ^(UIView *v) { GCStylePinWidgets(v.window); });
+    }
 }
 // 夹取主函数：只动胶囊 x/w（y/h 不动），伴生物按绝对几何同步 —— 幂等
 static void GCNarrowApply(UIView *anchor, BOOL isSearch) {
@@ -2425,7 +2439,8 @@ static void AlignMapTypeButton(UIView *capsule) {
     if (!capsule || !capsule.window) return;
     // 0.9.19（A2）：锚点没定格就绝不摆位 —— 这时胶囊本身还在瞬态位（340），
     //   拿它当锚正是 App 摆错的原因，我们不能重蹈覆辙。
-    if (!SearchBarSettled) return;
+    // trial10：settle 前若已钉过（AlignedKey 已置）也放行 —— pin 为绝对坐标无瞬态风险 ⇒ 控件首 tick 出现
+    if (!SearchBarSettled && !objc_getAssociatedObject(capsule, &AlignedKey)) return;
     busy = YES;
     UIWindow *win = capsule.window;
     UIView *btn = GCCFindMapTypeButton(win, capsule);
@@ -2461,7 +2476,8 @@ static void AlignCornerWidgets(UIView *bar) {
     //   21 帧/350ms，直到搜索栏落到最终 701 才被拉到底部（那一下「瞬移」）。
     //   此期间控件保持隐藏（由 layoutSubviews / didMoveToWindow 两条钩子按住），
     //   与搜索栏同一判据（BarStableTicks>=3）解除 —— 二者同时出现、位置都是最终值。
-    if (!SearchBarSettled) return;
+    // trial10：settle 门删除 —— pin 为绝对坐标（无瞬态位置风险），且该门是
+    //   ①点定位切 3D 后 pin 停跑（控件停 App 原生位 = 「没固定」）②启动出现慢 的同一根因。
 
     // 0.5.0：缓存圆钮实例，每轮直接对齐，只有实例失效时才重扫窗口树
     if (!CachedCar || !CachedCar.window) CachedCar = nil;
