@@ -18,7 +18,7 @@
 // ---- jibamao 个人标识（编译进 dylib，可用 strings 核对）----
 static NSString *const kGCAuthor      = @"jibamao";
 static NSString *const kGCRepo        = @"https://gan-jibamao.github.io/";
-static NSString *const kGCVersion     = @"0.9.28+trial10";
+static NSString *const kGCVersion     = @"0.9.28+trial11";
 
 // 0.9.18（A1）：底边间隙**按控件分开**，对表原生（搜索栏白底顶边 = 702.6pt）
 //   车机钮（连接车机 · WINDeviceInterconnectWidget）：原生底 652 → 间隙 50.6 → 取 50
@@ -1147,8 +1147,17 @@ static void GCNarrowHairWalk(CALayer *la, CGRect band, CGFloat midY, CGFloat sw,
     //   高≤4 + 宽≥30 + 带内±34 ⇒ 直接隐藏（alpha=0）。带外（home 指示条/底栏）天然不命中。
     BOOL shapeB = (!la.hidden && wr.size.height <= 4 && wr.size.width >= 30
                    && fabs(CGRectGetMidY(wr) - midY) <= 34 && fabs(wr.size.width - GCNarrowTargetW) > 0.5);
+    // ★trial11 形态C：原生尺寸"快照/描边残留"（probe 取证 5s 之后才出现、不属任何正常层）：
+    //   带位图或描边（contents!=nil 或 borderWidth>0.1）+ 高40~130 + 宽280~屏宽 + 带心±45 ⇒ 直接隐藏。
+    //   白底/胶囊/描边图均 contents=nil 且 bw=0 ⇒ 天然不命中；图标宽<280；地图 Metal 层高852。
+    BOOL shapeC = (!la.hidden && la.opacity > 0.02f && (la.contents != nil || la.borderWidth > 0.1)
+                   && wr.size.height >= 40 && wr.size.height <= 130
+                   && wr.size.width >= 280 && wr.size.width <= sw + 10
+                   && fabs(CGRectGetMidY(wr) - midY) <= 45
+                   && fabs(wr.size.width - GCNarrowTargetW) > 0.5);
+    // trial9 的形态B 曾被错嵌在 if(shapeA) 内 ⇒ 死代码；trial11 修正为独立分支。
+    if (shapeB || shapeC) { if (la.opacity > 0.01f) { la.opacity = 0; GCNarrowHairHits++; } }
     if (shapeA) {
-        if (shapeB) { if (la.opacity > 0.01f) { la.opacity = 0; GCNarrowHairHits++; } }
         CGRect target = CGRectMake(x, band.origin.y, GCNarrowTargetW, band.size.height);
         UIView *owner = [la.delegate isKindOfClass:UIView.class] ? (UIView *)la.delegate : nil;
         if (owner && owner.superview) {
@@ -1244,6 +1253,14 @@ static void GCNarrowApply(UIView *anchor, BOOL isSearch) {
             return NSOrderedSame;
         }];
         GCNarrowHairlineSweep(anchor, sw, x);   // trial8：全窗口发丝线/透明描边层扫荡
+        // ★trial11：给 anchor 加圆角 mask —— 把 anchor 子树画在胶囊矩形外的一切残留
+        //   （原生尺寸描边/快照/残余阴影、切线上下的角弧）一次性裁掉；
+        //   胶囊/放大镜/相机/麦克风全在胶囊矩形内 ⇒ 零影响；mask 只裁渲染、不影响命中。
+        CALayer *mk = anchor.layer.mask;
+        if (!mk) { mk = [CALayer layer]; anchor.layer.mask = mk; }
+        mk.frame = CGRectMake(x, 0, GCNarrowTargetW, anchor.bounds.size.height);
+        mk.cornerRadius = anchor.bounds.size.height * 0.5;
+        mk.backgroundColor = [UIColor blackColor].CGColor;
         CGFloat cursor = right - GCNarrowBtnGap;
         for (UIView *v in btns) {
             CGRect f = v.frame;
