@@ -18,7 +18,7 @@
 // ---- jibamao 个人标识（编译进 dylib，可用 strings 核对）----
 static NSString *const kGCAuthor      = @"jibamao";
 static NSString *const kGCRepo        = @"https://gan-jibamao.github.io/";
-static NSString *const kGCVersion     = @"0.9.30+trial5";
+static NSString *const kGCVersion     = @"0.9.30+trial6";
 
 // 0.9.18（A1）：底边间隙**按控件分开**，对表原生（搜索栏白底顶边 = 702.6pt）
 //   车机钮（连接车机 · WINDeviceInterconnectWidget）：原生底 652 → 间隙 50.6 → 取 50
@@ -1025,17 +1025,50 @@ static void GCStyleHookSearchHitTest(void) {
         return ((UIView *(*)(id, SEL, CGPoint, id))original)(self, sel, point, event);
     }), method_getTypeEncoding(m));
 }
+// ★trial6：祖先 hitTest 路由 —— 搜索圆钮下移后，anchor 原生行不再响应、圆钮矩形内触摸直达胶囊
+//   （触摸命中胶囊后 anchor 的 tap 手势随冒泡触发 ⇒ 搜索照开；其余区域原样返回）。
+static void GCStyleHookAncestorHitTest(UIView *anchor) {
+    static NSHashTable *hooked = nil;
+    UIView *sup = anchor.superview;
+    UIWindow *win = anchor.window;
+    if (!sup || !win) return;
+    if (!hooked) hooked = [NSHashTable weakObjectsHashTable];
+    Class cls = sup.class;
+    if ([hooked containsObject:cls]) return;
+    [hooked addObject:cls];
+    SEL sel = @selector(hitTest:withEvent:);
+    Method m = class_getInstanceMethod(cls, sel);
+    if (!m) return;
+    IMP original = method_getImplementation(m);
+    Replace(cls, sel, imp_implementationWithBlock(^UIView *(UIView *self, CGPoint p, UIEvent *e) {
+        UIView *r = ((UIView *(*)(id, SEL, CGPoint, id))original)(self, sel, p, e);
+        UIView *bar = SearchBarView;
+        if (bar && bar.superview == self && !bar.hidden) {
+            CGRect circleW = CGRectMake((win.bounds.size.width - 54) * 0.5, win.bounds.size.height - 81, 54, 54);
+            CGPoint pw = [self convertPoint:p toView:nil];
+            if (CGRectContainsPoint(circleW, pw)) {
+                UIView *cap = GCStyleCapsule(bar);
+                if (cap) return cap;
+            }
+            if (r == bar || [r isDescendantOfView:bar]) return nil;   // 旧搜索行/anchor 其余区域：不进搜索
+        }
+        return r;
+    }), method_getTypeEncoding(m));
+}
 static void GCStyleSearch(UIView *anchor) {
     GCStyleHookSearchHitTest();
+    GCStyleHookAncestorHitTest(anchor);
     CGFloat sw = anchor.bounds.size.width;
     if (sw < 100) return;
     const CGFloat d = 54.0, x = (sw - d) * 0.5;
+    const CGFloat rowDy = 69.0;   // trial6：搜索行 702 → 底栏行 771（三圆钮同行）；只写 subview center，anchor 零几何改动
     UIView *cap = GCStyleCapsule(anchor);
     if (cap) {
-        CGRect f = cap.frame;
-        CGRect g = CGRectMake(x, f.origin.y, d, f.size.height);
-        if (!CGRectEqualToRect(g, f)) cap.frame = g;
-        cap.layer.cornerRadius = f.size.height * 0.5;
+        CGPoint ct = CGPointMake(x + d * 0.5, d * 0.5 + rowDy);
+        if (!CGPointEqualToPoint(ct, cap.center)) cap.center = ct;
+        CGRect bd = CGRectMake(0, 0, d, d);
+        if (!CGRectEqualToRect(bd, cap.bounds)) cap.bounds = bd;
+        cap.layer.cornerRadius = d * 0.5;
         GCStyleCenterIcon(cap, d, 24.0, 0);   // 放大镜居中
     }
     for (CALayer *la in [anchor.layer.sublayers copy]) {   // 独立白底/渐变层同夹成圆
@@ -1045,14 +1078,14 @@ static void GCStyleSearch(UIView *anchor) {
         if (backing) continue;
         CGRect f = la.frame;
         if (f.size.height < 40 || f.size.height > 120) continue;
-        CGRect g = CGRectMake(x, f.origin.y, d, f.size.height);
+        CGRect g = CGRectMake(x, f.origin.y + rowDy, d, f.size.height);
         if (!CGRectEqualToRect(g, f)) { la.frame = g; GCNarrowInvalidateRender(la); }
         la.cornerRadius = f.size.height * 0.5;
     }
     CALayer *mk = anchor.layer.mask;   // mask 保圆
     if (!mk) { mk = [CALayer layer]; anchor.layer.mask = mk; }
-    mk.frame = CGRectMake(x, 0, d, anchor.bounds.size.height);
-    mk.cornerRadius = anchor.bounds.size.height * 0.5;
+    mk.frame = CGRectMake(x, rowDy, d, d);
+    mk.cornerRadius = d * 0.5;
     mk.backgroundColor = [UIColor blackColor].CGColor;
     for (UIView *v in anchor.subviews) {   // 拍照/语音隐藏
         if ([v isKindOfClass:UIButton.class] ||
@@ -1071,7 +1104,7 @@ static void GCStyleKillShadows(CALayer *la, int depth) {
 static void GCStyleTab(UIView *anchor) {
     CGFloat sw = anchor.bounds.size.width;
     if (sw < 100) return;
-    const CGFloat d = 54.0, c = sw * 0.5, off = 66.0;   // trial14：三钮同行（首页 c-66 / 搜索 c / 我的 c+66）
+    const CGFloat d = 54.0, c = sw * 0.5, off = 72.0;   // trial6：三圆钮同行 @ c-72 / c / c+72（间隙18）
     GCStyleKillShadows(anchor.layer, 0);   // trial4：子树阴影一次扫净
     for (UIView *v in [anchor.subviews copy]) {
         if ([v isKindOfClass:UIVisualEffectView.class] || [v isKindOfClass:UIImageView.class]) { v.hidden = YES; continue; }
