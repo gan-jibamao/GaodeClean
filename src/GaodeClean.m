@@ -18,7 +18,7 @@
 // ---- jibamao 个人标识（编译进 dylib，可用 strings 核对）----
 static NSString *const kGCAuthor      = @"jibamao";
 static NSString *const kGCRepo        = @"https://gan-jibamao.github.io/";
-static NSString *const kGCVersion     = @"0.9.31+probe7";
+static NSString *const kGCVersion     = @"0.9.32+trial24";
 
 // 0.9.18（A1）：底边间隙**按控件分开**，对表原生（搜索栏白底顶边 = 702.6pt）
 //   车机钮（连接车机 · WINDeviceInterconnectWidget）：原生底 652 → 间隙 50.6 → 取 50
@@ -1396,6 +1396,62 @@ static void GCStyleDiscoverWidgets(UIWindow *win) {
     if (CachedRoute && !P7FirstSeen[2]) P7FirstSeen[2] = P7Now();
 #endif
 }
+// ★trial24：单控件实时钳位（setFrame:/setCenter: 钩子专用，轻量：无 BFS、不全量 pin）。
+//   probe7 铁证：App 布局系统直接写 frame、不走控件自身 layoutSubviews（trial10 钩子因此空转），
+//   我们 11Hz tick 追写 60fps 的 App ⇒ before=608/after=673 每拍拉锯、dump 瞬间停在 App 位。
+//   此函数在 App 每次写位置后同事务内改回 pin 目标 ⇒ 零拉锯零闪烁。
+static BOOL GCStylePinOneBusy = NO;
+static void GCStylePinOne(UIView *v) {
+    if (!v || GCStylePinOneBusy) return;                 // 防重入：钳位自身写 frame 会再触发钩子
+    UIWindow *win = v.window;
+    if (!win || !v.superview) return;                    // 断链期间无窗口，重挂后由 tick/layoutSubviews 兜底
+    UIView *capNow = (CachedLiteGroup && CachedLiteGroup.window) ? CachedLiteGroup : CachedRight;
+    BOOL isCar = (v == CachedCar);
+    BOOL isCap = (capNow && v == capNow);
+    if (!isCar && !isCap) return;
+    GCStylePinOneBusy = YES;
+    @try {
+        CGFloat sw = win.bounds.size.width, sh = win.bounds.size.height;
+        const CGFloat pinBottom = sh - 81 - 16;          // 与 GCStylePinWidgets 同源
+        CGRect wr = [v convertRect:v.bounds toView:win];
+        CGRect g = isCar
+            ? CGRectMake(10, pinBottom - 20 - 18 - wr.size.height, wr.size.width, wr.size.height)
+            : CGRectMake(sw - 10 - wr.size.width, pinBottom - wr.size.height, wr.size.width, wr.size.height);
+        CGRect local = [v.superview convertRect:g fromView:win];
+        if (!CGRectEqualToRect(local, v.frame)) {
+            [CATransaction begin]; [CATransaction setDisableActions:YES];
+            [v.layer removeAllAnimations]; v.frame = local;
+            [CATransaction commit];
+        }
+    } @catch (__unused NSException *e) {}
+    GCStylePinOneBusy = NO;
+}
+
+// ★trial24：给 rc 挂 setFrame:/setCenter: 实时钳位。必须走 Replace+imp_implementationWithBlock
+//   （0.6.2 天气行先例的 ABI 正确通道）—— HookVoid 有"恰 2 参"硬门（L693），setFrame: 会被
+//   静默跳过；这正是 trial10 layoutSubviews 钩子拦不住 App 直写 frame 的另一半原因。
+static void GCStyleHookSetPos(Class rc) {
+    if (!rc) return;
+    Method mf = class_getInstanceMethod(rc, @selector(setFrame:));
+    if (mf) {
+        IMP o = method_getImplementation(mf);
+        const char *t = method_getTypeEncoding(mf);
+        Replace(rc, @selector(setFrame:), imp_implementationWithBlock(^(UIView *self, CGRect f) {
+            ((void (*)(id, SEL, CGRect))o)(self, @selector(setFrame:), f);
+            GCStylePinOne(self);
+        }), t);
+    }
+    Method mc = class_getInstanceMethod(rc, @selector(setCenter:));
+    if (mc) {
+        IMP o2 = method_getImplementation(mc);
+        const char *t2 = method_getTypeEncoding(mc);
+        Replace(rc, @selector(setCenter:), imp_implementationWithBlock(^(UIView *self, CGPoint c) {
+            ((void (*)(id, SEL, CGPoint))o2)(self, @selector(setCenter:), c);
+            GCStylePinOne(self);
+        }), t2);
+    }
+}
+
 // ★trial9：角控件绝对钉死（不再对表搜索栏）—— 右胶囊右10/底755；车机钮左10、
 //   天气行原生关系（钮下18、左对齐）⇒ 行底=755 ⇒ 钮底=755-20-18。每 tick/布局钩子覆写 ⇒ 不漂。
 static void GCStylePinWidgets(UIWindow *win) {
@@ -1470,10 +1526,12 @@ static void GCStylePinWidgets(UIWindow *win) {
     if (!carHooked && car) {
         carHooked = YES;
         HookVoid(NSStringFromClass(car.class), @"layoutSubviews", ^(UIView *v) { GCStylePinWidgets(v.window); });
+        GCStyleHookSetPos(car.class);   // trial24：setFrame:/setCenter: 实时钳位（拦 App 直写）
     }
     if (!capHooked && cap) {
         capHooked = YES;
         HookVoid(NSStringFromClass(cap.class), @"layoutSubviews", ^(UIView *v) { GCStylePinWidgets(v.window); });
+        GCStyleHookSetPos(cap.class);   // trial24
     }
 }
 // 夹取主函数：只动胶囊 x/w（y/h 不动），伴生物按绝对几何同步 —— 幂等
@@ -2065,8 +2123,12 @@ static void AlignWeatherRow(UIView *row) {
     //   0.5.33 起这里写的是「搬到车机钮右侧」，那是当年的假设，从没对过表；
     //   原生实测（原生录屏 vs 我们逐元素比对）：车机钮 616..652、天气行 670..690、
     //   两者 x 均为 10 ⇒ 关系是「上下 + 左对齐」，间隙 18pt。
+    // trial24：y 不再读车机钮实际位（拉锯期 608↔673 ⇒ 天气行镜像跳 65pt，probe7 三段
+    //   快照 735/670 铁证）—— 改与 GCStylePinWidgets 同源纯公式：
+    //   车机钮目标 y = sh-97-20-18-44，行顶 = 其底 + 18 ⇒ 行顶恒 = sh-117（钉死）。
+    CGFloat carTgtTop = win.bounds.size.height - 81 - 16 - 20 - 18 - 44;
     CGPoint wantWin = CGPointMake(carRect.origin.x,
-                                  CGRectGetMaxY(carRect) + 18);
+                                  carTgtTop + 44 + 18);
     CGPoint wantInParent = [row.superview convertPoint:wantWin fromView:win];
     CGPoint wantCenter = CGPointMake(wantInParent.x + row.bounds.size.width * 0.5,
                                      wantInParent.y + row.bounds.size.height * 0.5);
