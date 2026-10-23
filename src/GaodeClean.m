@@ -18,7 +18,7 @@
 // ---- jibamao 个人标识（编译进 dylib，可用 strings 核对）----
 static NSString *const kGCAuthor      = @"jibamao";
 static NSString *const kGCRepo        = @"https://gan-jibamao.github.io/";
-static NSString *const kGCVersion     = @"0.9.28+trial11";
+static NSString *const kGCVersion     = @"0.9.28+trial12";
 
 // 0.9.18（A1）：底边间隙**按控件分开**，对表原生（搜索栏白底顶边 = 702.6pt）
 //   车机钮（连接车机 · WINDeviceInterconnectWidget）：原生底 652 → 间隙 50.6 → 取 50
@@ -741,7 +741,7 @@ static void Schedule(void) {
         // 只挂 layout 就是这个 bug 偶发的根因。扫描范围只有底栏子树，开销可忽略。
         // 0.7.4(A6)：「上拉发现」是 200ms~1s 级的异步引导态，5Hz 采样过剩，降到 2.5Hz。
         if (CachedTabBar && TickCount % 2 == 0) SweepTabBarHints(CachedTabBar);
-        if (TickCount % 5 == 0) GCNarrowTick();   // 0.9.28 缩窄：兜底复核（幂等）
+        if (TickCount % 5 == 0 || TickCount < 40) GCNarrowTick();   // 0.9.28 兜底复核（幂等）；trial12(B1)：冷启动头 8s 每拍都跑，闪变窗口压到 ≤1 拍
 #ifdef GAODECLEAN_PROBE
         GCProbeTick();   // 探针：只读取证，不写任何视图
 #endif
@@ -1342,6 +1342,18 @@ static void GCNarrowEnsureSearchHook(void) {
                        @"AMCommonContentBackgroundView", nil];
     if ([deny containsObject:nm]) return;
     HookVoid(nm, @"layoutSubviews", ^(UIView *anchor) { GCNarrowApply(anchor, YES); });
+}
+// ★trial12(B3)：ctor 期按类名预挂搜索栏 anchor 的 layoutSubviews。
+//   懒钩子要等 LayoutMinimalHome 捕获到实例才装（最坏慢一个 tick 周期），冷启动表现为
+//   "原生宽栏可见约 0.3s 再 snap 到 240"（录屏帧 26–28 铁证：370.8pt 宽栏 3 帧）。
+//   ctor 期挂上 ⇒ 第一次 layoutSubviews 就在同一事务内被夹取 ⇒ 零宽帧。
+//   类未加载/类名不存在 ⇒ 静默跳过，懒钩子 + 快窗照旧兜底（GCNarrowSearchHooked 不置位）。
+static void GCNarrowCtorHook(void) {
+    if (GCNarrowSearchHooked) return;
+    Class c = NSClassFromString(@"WINQuickSearchBarV2");
+    if (!c) return;
+    GCNarrowSearchHooked = YES;
+    HookVoid(@"WINQuickSearchBarV2", @"layoutSubviews", ^(UIView *anchor) { GCNarrowApply(anchor, YES); });
 }
 // tick 兜底：每 5 拍复核一次（App 重建视图/漏排时拉回）
 static void GCNarrowTick(void) {
@@ -3648,6 +3660,7 @@ __attribute__((constructor)) static void Initialize(void) {
         HomeHandlers = [NSHashTable weakObjectsHashTable];
         ColdWidgets = [NSHashTable weakObjectsHashTable];
         InstallScrollHooks();
+        GCNarrowCtorHook();   // trial12(B3)：ctor 期预挂搜索栏锚点类，冷启动零宽帧
         InstallMinimalHome();
         HookVoid(GCStrAt(277), GCStrAt(282), ^(id tabs) {
             id params = ObjectGetter(tabs, GCStrAt(38));
