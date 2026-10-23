@@ -18,7 +18,7 @@
 // ---- jibamao 个人标识（编译进 dylib，可用 strings 核对）----
 static NSString *const kGCAuthor      = @"jibamao";
 static NSString *const kGCRepo        = @"https://gan-jibamao.github.io/";
-static NSString *const kGCVersion     = @"0.9.28+trial4";
+static NSString *const kGCVersion     = @"0.9.28+probe4";
 
 // 0.9.18（A1）：底边间隙**按控件分开**，对表原生（搜索栏白底顶边 = 702.6pt）
 //   车机钮（连接车机 · WINDeviceInterconnectWidget）：原生底 652 → 间隙 50.6 → 取 50
@@ -127,6 +127,8 @@ static void GCProbeNoteLayout(void);  // 探针：底栏重排时节流取证
 static UIView *GCNarrowCapsule(UIView *anchor);           // 0.9.28 缩窄：取可见胶囊
 static void GCNarrowTick(void);                          // 0.9.28 缩窄：tick 兜底复核
 static void GCNarrowApply(UIView *anchor, BOOL isSearch); // 0.9.28 缩窄：点对点夹取
+static long GCNarrowBorderFixes;                 // 诊断计数（定义在缩窄模块，此处暂定声明）
+static CGFloat GCNarrowTargetWidth(void);        // 目标宽访问器（探针在缩窄模块之前，需前置）
 static __weak UIWindow *GCCSplashWindow;      // 已识别的广告窗口，之后拒绝其可见
 static NSInteger GCCSplashTicks;              // 兜底扫描剩余拍数（有界）
 static int GCCSplashUntil;                    // 0.7.5(B2)：窗口拉黑失效拍号（60s 后自动解除）
@@ -933,6 +935,24 @@ static void GCProbeDump(NSString *reason) {
             [GCProbeBuf appendString:@"\n---[底栏] anchor 下探 深度≤6 ---\n"];
             NSInteger b = 300; GCProbeDown(GCProbeBuf, tb, 0, 6, &b, sw, sh);
         } else [GCProbeBuf appendString:@"\n---[底栏] CachedTabBar 为空---\n"];
+        [GCProbeBuf appendString:@"\n---[底栏描边匹配 dry-run（与 GCNarrowApply 同判据，逐条真假）]---\n"];
+        if (tb) {
+            [GCProbeBuf appendFormat:@"  描边同步累计写入次数=%ld\n", (long)GCNarrowBorderFixes];
+            for (UIView *v in tb.subviews) {
+                CGRect f = v.frame;
+                BOOL isIV = [v isKindOfClass:UIImageView.class];
+                BOOL aOK = (!v.hidden && v.alpha >= 0.05);
+                BOOL hOK = !(f.size.height < 56 || f.size.height > 72);
+                BOOL wOK = !(f.size.width < GCNarrowTargetWidth() || f.size.width > 380);
+                BOOL cOK = fabs(CGRectGetMidX(f) - sw * 0.5) <= 20;
+                [GCProbeBuf appendFormat:@"  %@ hid=%d a=%.2f own=[%.1f,%.1f,%.1f,%.1f] IV=%d 可见=%d hOK=%d wOK=%d cOK=%d ⇒命中=%d anim=%lu\n",
+                    NSStringFromClass(v.class), v.hidden, v.alpha,
+                    f.origin.x, f.origin.y, f.size.width, f.size.height,
+                    isIV, aOK, hOK, wOK, cOK,
+                    (isIV && aOK && hOK && wOK && cOK),
+                    (unsigned long)v.layer.animationKeys.count];
+            }
+        } else [GCProbeBuf appendString:@"  CachedTabBar 为空\n"];
         [GCProbeBuf appendString:@"\n---[layer 树：anchor 兄弟层 + anchor/胶囊子层]---\n"];
         if (bar) {
             NSInteger lb = 90;
@@ -1028,8 +1048,10 @@ static void HookVoid(NSString *name, NSString *methodName, void (^after)(id)) {
 //        居中后最小 236pt，取整 240（选中底衬距胶囊边留 10pt）。
 // ══════════════════════════════════════════════════════════════════════════
 static const CGFloat GCNarrowTargetW = 240.0;   // 两条栏的目标可见宽
+static CGFloat GCNarrowTargetWidth(void) { return GCNarrowTargetW; }
 static const CGFloat GCNarrowBtnGap  = 12.0;    // 原生：最右按钮右缘距胶囊右缘 12pt
 static const CGFloat GCNarrowAmbPad  = 24.0;    // 底栏环境层原生比胶囊每侧外扩 ~24pt（399 vs 351）
+static long GCNarrowBorderFixes = 0;      // 诊断：描边同步累计写入次数
 static BOOL GCNarrowSearchHooked = NO;
 
 // 取 anchor 的「可见胶囊」：毛玻璃层 + 栏级尺寸 + 居中
@@ -1133,8 +1155,11 @@ static void GCNarrowApply(UIView *anchor, BOOL isSearch) {
             if (f.size.height < 56 || f.size.height > 72) continue;
             if (f.size.width < GCNarrowTargetW || f.size.width > 380) continue;
             if (fabs(CGRectGetMidX(f) - sw * 0.5) > 20) continue;
-            CGRect s = g; s.origin.x -= 2; s.origin.y = f.origin.y; s.size.width += 4;
-            if (!CGRectEqualToRect(s, f)) v.frame = s;
+            CGRect s = g; s.origin.x -= 2; s.origin.y = f.origin.y; s.size.width += 4; s.size.height += 4;
+            if (!CGRectEqualToRect(s, f)) {
+                [v.layer removeAllAnimations];   // 防 App 用动画把描边拽回原生宽
+                v.frame = s; GCNarrowBorderFixes++;
+            }
         }
         // ★trial3（老大指出）：底栏还有**全宽环境层**没跟着缩 —— probe3 实测两条：
         //     CALayer win=[-3,744,399,108] contents=位图（胶囊的柔光/阴影）
