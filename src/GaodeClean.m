@@ -18,7 +18,7 @@
 // ---- jibamao 个人标识（编译进 dylib，可用 strings 核对）----
 static NSString *const kGCAuthor      = @"jibamao";
 static NSString *const kGCRepo        = @"https://gan-jibamao.github.io/";
-static NSString *const kGCVersion     = @"0.9.28+trial8";
+static NSString *const kGCVersion     = @"0.9.28+trial9";
 
 // 0.9.18（A1）：底边间隙**按控件分开**，对表原生（搜索栏白底顶边 = 702.6pt）
 //   车机钮（连接车机 · WINDeviceInterconnectWidget）：原生底 652 → 间隙 50.6 → 取 50
@@ -1055,6 +1055,7 @@ static const CGFloat GCNarrowBtnGap  = 12.0;    // 原生：最右按钮右缘�
 static const CGFloat GCNarrowAmbPad  = 24.0;    // 底栏环境层原生比胶囊每侧外扩 ~24pt（399 vs 351）
 static long GCNarrowBorderFixes = 0;      // 诊断：描边同步累计写入次数
 static long GCNarrowAmbFixes = 0;         // 诊断：环境层同步累计写入次数
+static long GCNarrowHairHits = 0;       // 诊断：发丝线处理累计次数
 static BOOL GCNarrowSearchHooked = NO;
 
 // 取 anchor 的「可见胶囊」：毛玻璃层 + 栏级尺寸 + 居中
@@ -1103,11 +1104,13 @@ static void GCNarrowHairWalk(CALayer *la, CGRect band, CGFloat midY, CGFloat sw,
     BOOL edged = (la.borderWidth > 0.01 || la.shadowOpacity > 0.01 || la.cornerRadius > 0.01 || la.contents != nil);
     BOOL shapeA = (!la.hidden && wideEnough && inBandY && wr.size.height >= 44 && wr.size.height <= 64
                    && al <= 0.05 && edged && fabs(wr.size.width - GCNarrowTargetW) > 0.5);
-    BOOL shapeB = (!la.hidden && wideEnough && wr.size.height <= 3
-                   && fabs(CGRectGetMidY(wr) - midY) <= 30 && fabs(wr.size.width - GCNarrowTargetW) > 0.5);
-    if (shapeA || shapeB) {
-        CGRect target = shapeA ? CGRectMake(x, band.origin.y, GCNarrowTargetW, band.size.height)
-                               : CGRectMake(x, wr.origin.y, GCNarrowTargetW, wr.size.height);
+    // trial9：形态B 放宽 —— 发丝线可能只是 76pt 短线段（trial8 的 ≥0.6sw 漏掉）；
+    //   高≤4 + 宽≥30 + 带内±34 ⇒ 直接隐藏（alpha=0）。带外（home 指示条/底栏）天然不命中。
+    BOOL shapeB = (!la.hidden && wr.size.height <= 4 && wr.size.width >= 30
+                   && fabs(CGRectGetMidY(wr) - midY) <= 34 && fabs(wr.size.width - GCNarrowTargetW) > 0.5);
+    if (shapeA) {
+        if (shapeB) { if (la.opacity > 0.01f) { la.opacity = 0; GCNarrowHairHits++; } }
+        CGRect target = CGRectMake(x, band.origin.y, GCNarrowTargetW, band.size.height);
         UIView *owner = [la.delegate isKindOfClass:UIView.class] ? (UIView *)la.delegate : nil;
         if (owner && owner.superview) {
             CGRect local = [owner.superview convertRect:target fromView:nil];
@@ -1158,7 +1161,16 @@ static void GCNarrowApply(UIView *anchor, BOOL isSearch) {
     CGFloat right = x + GCNarrowTargetW;
     CGRect g = cf;
     g.origin.x = x; g.size.width = GCNarrowTargetW;
-    if (!CGRectEqualToRect(g, cf)) cap.frame = g;
+    if (!CGRectEqualToRect(g, cf)) {
+        cap.frame = g;
+        // ★trial9：UIVisualEffectView 的 backdrop 是 blur 缓存；改尺寸后旧缓存可能仍按
+        //   原生宽度画残留边（"幽灵发丝线"，layer 树里查无此层）⇒ 脉冲 effect 强制重建。
+        if ([cap isKindOfClass:UIVisualEffectView.class]) {
+            UIVisualEffect *fx = ((UIVisualEffectView *)cap).effect;
+            ((UIVisualEffectView *)cap).effect = nil;
+            ((UIVisualEffectView *)cap).effect = fx;
+        }
+    }
     NSInteger budget = 24;
     GCNarrowInnerFix(cap, GCNarrowTargetW, 0, &budget);
     GCNarrowStandaloneLayers(anchor, sw, x);   // A1：独立白底/渐变层一并夹到目标宽
