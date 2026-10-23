@@ -18,7 +18,7 @@
 // ---- jibamao 个人标识（编译进 dylib，可用 strings 核对）----
 static NSString *const kGCAuthor      = @"jibamao";
 static NSString *const kGCRepo        = @"https://gan-jibamao.github.io/";
-static NSString *const kGCVersion     = @"0.9.30+trial3";
+static NSString *const kGCVersion     = @"0.9.30+trial4";
 
 // 0.9.18（A1）：底边间隙**按控件分开**，对表原生（搜索栏白底顶边 = 702.6pt）
 //   车机钮（连接车机 · WINDeviceInterconnectWidget）：原生底 652 → 间隙 50.6 → 取 50
@@ -859,7 +859,7 @@ __attribute__((unused)) static long GCNarrowHairHits = 0;       // 诊断：发�
 static BOOL GCNarrowSearchHooked = NO;
 
 // 取 anchor 的「可见胶囊」：毛玻璃层 + 栏级尺寸 + 居中
-static UIView *GCNarrowCapsule(UIView *anchor) {
+__attribute__((unused)) static UIView *GCNarrowCapsule(UIView *anchor) {
     if (!anchor) return nil;
     CGFloat sw = anchor.bounds.size.width;
     if (sw < 200) return nil;
@@ -987,6 +987,24 @@ static void GCStyleCenterIcon(UIView *root, CGFloat d, CGFloat icon, int depth) 
 // 搜索栏 → 单枚 54pt 圆钮（anchor 保持原生满宽，**不碰 anchor 几何** —— trial2 的
 //   anchor 缩尺寸/移位与 App 启动期布局对撞导致卡启动，trial3 回退）。
 //   圆外触摸由 GCStyleHookSearchHitTest 返回 nil ⇒ 只点圆钮才进搜索。
+// ★trial4：圆形风格专用胶囊匹配 —— 旧 GCNarrowCapsule 下界 238 会让 54 圆钮掉出判据
+//   （hitTest 钩子拿不到圆 ⇒ 全宽放行 = 「左右还能进搜索」真凶）。下界改 40。
+static UIView *GCStyleCapsule(UIView *anchor) {
+    if (!anchor) return nil;
+    CGFloat sw = anchor.bounds.size.width;
+    if (sw < 100) return nil;
+    UIView *best = nil; CGFloat bw = 0;
+    for (UIView *v in anchor.subviews) {
+        if (v.hidden || v.alpha < 0.05) continue;
+        if (![v isKindOfClass:UIVisualEffectView.class]) continue;
+        CGRect f = v.frame;
+        if (f.size.height < 40 || f.size.height > 120) continue;
+        if (f.size.width < 40 || f.size.width > sw - 4) continue;
+        if (fabs(CGRectGetMidX(f) - sw * 0.5) > 10) continue;
+        if (f.size.width > bw) { best = v; bw = f.size.width; }
+    }
+    return best;
+}
 static void GCStyleHookSearchHitTest(void) {
     static BOOL done = NO;
     if (done) return;
@@ -998,7 +1016,7 @@ static void GCStyleHookSearchHitTest(void) {
     if (!m) return;
     IMP original = method_getImplementation(m);
     Replace(cls, sel, imp_implementationWithBlock(^UIView *(UIView *self, CGPoint point, UIEvent *event) {
-        UIView *cap = GCNarrowCapsule(self);
+        UIView *cap = GCStyleCapsule(self);
         if (cap && !CGRectContainsPoint(cap.frame, point)) return nil;   // 圆外：不响应、不挡地图
         return ((UIView *(*)(id, SEL, CGPoint, id))original)(self, sel, point, event);
     }), method_getTypeEncoding(m));
@@ -1008,7 +1026,7 @@ static void GCStyleSearch(UIView *anchor) {
     CGFloat sw = anchor.bounds.size.width;
     if (sw < 100) return;
     const CGFloat d = 54.0, x = (sw - d) * 0.5;
-    UIView *cap = GCNarrowCapsule(anchor);
+    UIView *cap = GCStyleCapsule(anchor);
     if (cap) {
         CGRect f = cap.frame;
         CGRect g = CGRectMake(x, f.origin.y, d, f.size.height);
@@ -1037,11 +1055,20 @@ static void GCStyleSearch(UIView *anchor) {
             [NSStringFromClass(v.class) isEqualToString:@"LTMVUIEmojiView"]) v.hidden = YES;
     }
 }
+// ★trial4：底栏子树递归杀阴影 —— 不论 App 把阴影挂在哪一层（item/subitem/图标/底衬），
+//   一次扫净；每 tick 重扫防 App 选中态回挂（首页旁灰影真凶族）。
+static void GCStyleKillShadows(CALayer *la, int depth) {
+    if (!la || depth > 5) return;
+    if (la.shadowOpacity > 0.001f) { la.shadowOpacity = 0; }
+    la.shadowPath = nil;
+    for (CALayer *c in la.sublayers) GCStyleKillShadows(c, depth + 1);
+}
 // 底栏 → 两枚 54pt 圆钮（中心 c±33，总占地 120 = 原 240 的一半）；pill 族全隐藏
 static void GCStyleTab(UIView *anchor) {
     CGFloat sw = anchor.bounds.size.width;
     if (sw < 100) return;
     const CGFloat d = 54.0, c = sw * 0.5, off = 66.0;   // trial14：三钮同行（首页 c-66 / 搜索 c / 我的 c+66）
+    GCStyleKillShadows(anchor.layer, 0);   // trial4：子树阴影一次扫净
     for (UIView *v in [anchor.subviews copy]) {
         if ([v isKindOfClass:UIVisualEffectView.class] || [v isKindOfClass:UIImageView.class]) { v.hidden = YES; continue; }
         CGRect f = v.frame;   // 选中底衬（100×54 带背景）隐藏
