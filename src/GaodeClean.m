@@ -18,7 +18,7 @@
 // ---- jibamao 个人标识（编译进 dylib，可用 strings 核对）----
 static NSString *const kGCAuthor      = @"jibamao";
 static NSString *const kGCRepo        = @"https://gan-jibamao.github.io/";
-static NSString *const kGCVersion     = @"0.9.28+probe2";
+static NSString *const kGCVersion     = @"0.9.28+probe3";
 
 // 0.9.18（A1）：底边间隙**按控件分开**，对表原生（搜索栏白底顶边 = 702.6pt）
 //   车机钮（连接车机 · WINDeviceInterconnectWidget）：原生底 652 → 间隙 50.6 → 取 50
@@ -124,6 +124,7 @@ static __weak UIWindow *GCCMainWindow;
 static void GCProbeTick(void);        // 探针：定时取证（tick 调用）
 static void GCProbeNoteLayout(void);  // 探针：底栏重排时节流取证
 #endif
+static UIView *GCNarrowCapsule(UIView *anchor);           // 0.9.28 缩窄：取可见胶囊
 static void GCNarrowTick(void);                          // 0.9.28 缩窄：tick 兜底复核
 static void GCNarrowApply(UIView *anchor, BOOL isSearch); // 0.9.28 缩窄：点对点夹取
 static __weak UIWindow *GCCSplashWindow;      // 已识别的广告窗口，之后拒绝其可见
@@ -864,6 +865,27 @@ static void GCProbeUp(NSMutableString *o, UIView *v, CGFloat sw, CGFloat sh) {
     for (int d = 0; v && d <= 14; v = v.superview, d++)
         GCProbeNodeAt(o, [NSString stringWithFormat:@"↑%d ", d], v, sw, sh);
 }
+// 0.9.28+probe3：走 CALayer 子层 —— 白色可能由某个 layer 直接绘制，UIView 树里看不见
+static void GCProbeLayer(NSMutableString *o, CALayer *la, int d, int maxD, NSInteger *budget) {
+    if (!la || d > maxD || *budget <= 0) return;
+    (*budget)--;
+    NSString *lbg = @"nil", *cts = @"nil";
+    CGRect wr = CGRectNull;
+    @try {
+        CGColorRef cg = la.backgroundColor;
+        if (cg) lbg = GCProbeColorDesc([UIColor colorWithCGColor:cg]);
+        if (la.contents) cts = NSStringFromClass([la.contents class]);
+        CGRect b = la.bounds;
+        CGPoint p1 = [la convertPoint:b.origin toLayer:nil];
+        CGPoint p2 = [la convertPoint:CGPointMake(CGRectGetMaxX(b), CGRectGetMaxY(b)) toLayer:nil];
+        wr = CGRectMake(p1.x, p1.y, p2.x - p1.x, p2.y - p1.y);
+    } @catch (__unused NSException *e) {}
+    [o appendFormat:@"%@L %@ win=[%.1f,%.1f,%.1f,%.1f] op=%.2f corner=%.1f bg=%@ contents=%@ hid=%d\n",
+        GCProbePad(d), NSStringFromClass(la.class),
+        wr.origin.x, wr.origin.y, wr.size.width, wr.size.height,
+        la.opacity, la.cornerRadius, lbg, cts, la.hidden];
+    for (CALayer *c in la.sublayers) GCProbeLayer(o, c, d + 1, maxD, budget);
+}
 static void GCProbeStrip(NSMutableString *o, UIView *v, int d, NSInteger *budget, CGFloat sw, CGFloat sh) {
     if (!v || d > 16 || *budget <= 0) return;
     (*budget)--;
@@ -911,6 +933,25 @@ static void GCProbeDump(NSString *reason) {
             [GCProbeBuf appendString:@"\n---[底栏] anchor 下探 深度≤6 ---\n"];
             NSInteger b = 300; GCProbeDown(GCProbeBuf, tb, 0, 6, &b, sw, sh);
         } else [GCProbeBuf appendString:@"\n---[底栏] CachedTabBar 为空---\n"];
+        [GCProbeBuf appendString:@"\n---[layer 树：anchor 兄弟层 + anchor/胶囊子层]---\n"];
+        if (bar) {
+            NSInteger lb = 90;
+            [GCProbeBuf appendString:@"  · 搜索栏 anchor 的兄弟层:\n"];
+            if (bar.superview) GCProbeLayer(GCProbeBuf, bar.superview.layer, 0, 1, &lb);
+            [GCProbeBuf appendString:@"  · 搜索栏 anchor 子层:\n"];
+            GCProbeLayer(GCProbeBuf, bar.layer, 0, 4, &lb);
+            UIView *cp = GCNarrowCapsule(bar);
+            if (cp) { [GCProbeBuf appendString:@"  · 搜索栏胶囊子层:\n"]; GCProbeLayer(GCProbeBuf, cp.layer, 0, 3, &lb); }
+        }
+        if (tb) {
+            NSInteger lb = 90;
+            [GCProbeBuf appendString:@"  · 底栏 anchor 的兄弟层:\n"];
+            if (tb.superview) GCProbeLayer(GCProbeBuf, tb.superview.layer, 0, 1, &lb);
+            [GCProbeBuf appendString:@"  · 底栏 anchor 子层:\n"];
+            GCProbeLayer(GCProbeBuf, tb.layer, 0, 4, &lb);
+            UIView *cp = GCNarrowCapsule(tb);
+            if (cp) { [GCProbeBuf appendString:@"  · 底栏胶囊子层:\n"]; GCProbeLayer(GCProbeBuf, cp.layer, 0, 3, &lb); }
+        }
         [GCProbeBuf appendString:@"\n---[全窗口下屏条带扫描]（宽≥屏宽-170、高18~160、midY>0.60屏高）---\n"];
         for (UIWindow *w in GCAllWindows()) {
             if (w.hidden || w.bounds.size.width < 200) continue;
