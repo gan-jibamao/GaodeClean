@@ -18,7 +18,7 @@
 // ---- jibamao 个人标识（编译进 dylib，可用 strings 核对）----
 static NSString *const kGCAuthor      = @"jibamao";
 static NSString *const kGCRepo        = @"https://gan-jibamao.github.io/";
-static NSString *const kGCVersion     = @"0.9.30+trial6";
+static NSString *const kGCVersion     = @"0.9.30+trial7";
 
 // 0.9.18（A1）：底边间隙**按控件分开**，对表原生（搜索栏白底顶边 = 702.6pt）
 //   车机钮（连接车机 · WINDeviceInterconnectWidget）：原生底 652 → 间隙 50.6 → 取 50
@@ -1042,8 +1042,12 @@ static void GCStyleHookAncestorHitTest(UIView *anchor) {
     IMP original = method_getImplementation(m);
     Replace(cls, sel, imp_implementationWithBlock(^UIView *(UIView *self, CGPoint p, UIEvent *e) {
         UIView *r = ((UIView *(*)(id, SEL, CGPoint, id))original)(self, sel, p, e);
+        // trial7：去掉 bar.superview==self —— 同名 RootView 嵌套两层，hitTest 从外层进入时
+        //   先遍历前置的底栏容器直接返回，内层钩子不被咨询 ⇒ 路由失效 ⇒ 触摸落底栏 ⇒
+        //   App 底栏 tap 手势按 x 判页（中心 x = 我的）= 「点搜索进我的」真凶。
+        //   改用全局弱引用判定：任何一层祖先命中都路由。
         UIView *bar = SearchBarView;
-        if (bar && bar.superview == self && !bar.hidden) {
+        if (bar && !bar.hidden) {
             CGRect circleW = CGRectMake((win.bounds.size.width - 54) * 0.5, win.bounds.size.height - 81, 54, 54);
             CGPoint pw = [self convertPoint:p toView:nil];
             if (CGRectContainsPoint(circleW, pw)) {
