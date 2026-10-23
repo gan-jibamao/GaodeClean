@@ -18,7 +18,7 @@
 // ---- jibamao 个人标识（编译进 dylib，可用 strings 核对）----
 static NSString *const kGCAuthor      = @"jibamao";
 static NSString *const kGCRepo        = @"https://gan-jibamao.github.io/";
-static NSString *const kGCVersion     = @"0.9.30+probe6";
+static NSString *const kGCVersion     = @"0.9.30+trial5";
 
 // 0.9.18（A1）：底边间隙**按控件分开**，对表原生（搜索栏白底顶边 = 702.6pt）
 //   车机钮（连接车机 · WINDeviceInterconnectWidget）：原生底 652 → 间隙 50.6 → 取 50
@@ -1075,9 +1075,16 @@ static void GCStyleTab(UIView *anchor) {
     GCStyleKillShadows(anchor.layer, 0);   // trial4：子树阴影一次扫净
     for (UIView *v in [anchor.subviews copy]) {
         if ([v isKindOfClass:UIVisualEffectView.class] || [v isKindOfClass:UIImageView.class]) { v.hidden = YES; continue; }
-        CGRect f = v.frame;   // 选中底衬（100×54 带背景）隐藏
-        if (f.size.height > 40 && f.size.height <= 60 && f.size.width >= 90 && f.size.width <= 110
-            && v.backgroundColor && !v.hidden && ![v isKindOfClass:UIControl.class]) v.hidden = YES;
+        CGRect f = v.frame;
+        // trial5（probe6 定罪）：选中底衬被 App 改成 70×54 且切页回显 —— 旧宽窗 [90,110] 漏配 = 重影圆真凶。
+        //   改判据：背景α∈(0.01,0.2) + 宽[40,120] + 高(40,60]（圆钮α0.92 天然排除）；每 tick 重隐。
+        CGFloat ba = v.backgroundColor ? CGColorGetAlpha(v.backgroundColor.CGColor) : 0;
+        if (f.size.height > 40 && f.size.height <= 60 && f.size.width >= 40 && f.size.width <= 120
+            && ba > 0.01 && ba < 0.2 && !v.hidden && ![v isKindOfClass:UIControl.class]) v.hidden = YES;
+        // trial5：渐变环境容器（满宽普通 UIView，trial6 逻辑随旧体退役）回补隐藏，防地球视图硬边白带
+        if (f.size.width >= sw - 8 && f.size.height >= 60 && f.size.height <= 160
+            && v.alpha > 0.01 && ![v isKindOfClass:UIControl.class]
+            && ![NSStringFromClass(v.class) isEqualToString:@"WINTabBarItem"]) v.alpha = 0;
     }
     NSMutableArray *items = [NSMutableArray array];
     for (UIView *v in anchor.subviews)
@@ -1166,7 +1173,7 @@ static void GCProbeDump6(NSString *reason) {
     } @catch (__unused NSException *e) {}
     GCProbeBusy6 = NO;
 }
-static void GCProbeTick6(void) {
+__attribute__((unused)) static void GCProbeTick6(void) {
     static double t0 = 0;
     static int stage = 0;
     if (!t0) t0 = CACurrentMediaTime();
