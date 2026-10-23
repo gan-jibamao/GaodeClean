@@ -18,7 +18,7 @@
 // ---- jibamao 个人标识（编译进 dylib，可用 strings 核对）----
 static NSString *const kGCAuthor      = @"jibamao";
 static NSString *const kGCRepo        = @"https://gan-jibamao.github.io/";
-static NSString *const kGCVersion     = @"0.9.32+trial24";
+static NSString *const kGCVersion     = @"0.9.33+trial25";
 
 // 0.9.18（A1）：底边间隙**按控件分开**，对表原生（搜索栏白底顶边 = 702.6pt）
 //   车机钮（连接车机 · WINDeviceInterconnectWidget）：原生底 652 → 间隙 50.6 → 取 50
@@ -108,6 +108,7 @@ static void Schedule(void);
 static void LayoutMinimalHome(id handler);
 static void AlignCornerWidgets(UIView *bar);
 static void GCStyleDiscoverWidgets(UIWindow *win);   // trial11：实例发现独立成函数（pin 自给自足）
+static void GCStylePinWidgets(UIWindow *win);        // trial25(A2)：重入守卫包装前置声明（容器钩子/驱动器用）
 static BOOL IsRightBottomWidget(UIView *v);            // trial11：前置声明（discover 用）
 static BOOL GCCIsLiteGroupCapsule(UIView *v);          // trial11：前置声明（discover 用）
 static BOOL FixingHintText;
@@ -1367,14 +1368,38 @@ static void GCStyleDiscoverWidgets(UIWindow *win) {
     __weak UIView *p7ort = CachedRoute;
     __weak UIView *p7ol = CachedLiteGroup;
 #endif
-    if (!CachedCar || !CachedCar.window) CachedCar = nil;
-    if (!CachedRight || !CachedRight.window) CachedRight = nil;
-    if (!CachedRoute || !CachedRoute.window) CachedRoute = nil;
-    if (!CachedLiteGroup || !CachedLiteGroup.window) CachedLiteGroup = nil;
+    // ★trial25(A3)：失窗不再立即弃缓存 —— probe7 铁证：点定位/切3D 时容器被摘下窗口链
+    //   1~3s（DISC old→new=0x0、CONTMOVE→{{inf,inf}}）后同实例重挂。立即弃 ⇒ 重挂后要等
+    //   BFS 重新发现，期间无人钉 = 上飘空窗。__weak 对真销毁天然归零；此处仅对"活着但
+    //   脱窗"的实例给 1s 宽限，超时（App 真重建）才弃掉交给 BFS 重发现。
+    static CFAbsoluteTime GCStyleGoneAt[4];
+    CFAbsoluteTime gnow = CFAbsoluteTimeGetCurrent();
+    if (CachedCar && !CachedCar.window) {
+        if (!GCStyleGoneAt[0]) GCStyleGoneAt[0] = gnow;
+        if (gnow - GCStyleGoneAt[0] > 1.0) { CachedCar = nil; GCStyleGoneAt[0] = 0; }
+    } else GCStyleGoneAt[0] = 0;
+    if (CachedRight && !CachedRight.window) {
+        if (!GCStyleGoneAt[1]) GCStyleGoneAt[1] = gnow;
+        if (gnow - GCStyleGoneAt[1] > 1.0) { CachedRight = nil; GCStyleGoneAt[1] = 0; }
+    } else GCStyleGoneAt[1] = 0;
+    if (CachedRoute && !CachedRoute.window) {
+        if (!GCStyleGoneAt[2]) GCStyleGoneAt[2] = gnow;
+        if (gnow - GCStyleGoneAt[2] > 1.0) { CachedRoute = nil; GCStyleGoneAt[2] = 0; }
+    } else GCStyleGoneAt[2] = 0;
+    if (CachedLiteGroup && !CachedLiteGroup.window) {
+        if (!GCStyleGoneAt[3]) GCStyleGoneAt[3] = gnow;
+        if (gnow - GCStyleGoneAt[3] > 1.0) { CachedLiteGroup = nil; GCStyleGoneAt[3] = 0; }
+    } else GCStyleGoneAt[3] = 0;
 #ifdef GAODECLEAN_PROBE
     if (CachedCar && CachedRight && CachedRoute && CachedLiteGroup) P7DiscSkips++;
 #endif
     if (CachedCar && CachedRight && CachedRoute && CachedLiteGroup) return;
+    // ★trial25(A4)：BFS 节流 ≥100ms —— display-link 60fps 驱动下，缓存缺员（dump 铁证：
+    //   LiteGroup 0.8s 丢失后 ptr=0x0 长期为 nil）时每帧全树 BFS（预算 2000 节点）白烧。
+    static CFAbsoluteTime GCStyleLastBFS = 0;
+    CFAbsoluteTime bnow = CFAbsoluteTimeGetCurrent();
+    if (bnow - GCStyleLastBFS < 0.1) return;
+    GCStyleLastBFS = bnow;
     NSMutableArray<UIView *> *queue = [NSMutableArray arrayWithObject:win];
     for (NSUInteger i = 0; i < queue.count && queue.count < 2000; i++) {
         UIView *v = queue[i];
@@ -1430,8 +1455,43 @@ static void GCStylePinOne(UIView *v) {
 // ★trial24：给 rc 挂 setFrame:/setCenter: 实时钳位。必须走 Replace+imp_implementationWithBlock
 //   （0.6.2 天气行先例的 ABI 正确通道）—— HookVoid 有"恰 2 参"硬门（L693），setFrame: 会被
 //   静默跳过；这正是 trial10 layoutSubviews 钩子拦不住 App 直写 frame 的另一半原因。
+// ★trial25(A5)：容器类 setFrame:/setCenter: 钩子 —— probe7 CONTMOVE 铁证：App 点定位/切3D
+//   搬的是容器，子控件 setFrame 不触发（trial24 盲区）；容器钩子内同事务全量回钉。
+//   与 GCStyleHookSetPos 共用已挂类集合，防同类双挂。
+static NSMutableSet<NSString *> *GCStylePosHookedClasses(void) {
+    static NSMutableSet *s;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ s = [NSMutableSet set]; });
+    return s;
+}
+static void GCStyleHookContainerPos(Class rc) {
+    if (!rc) return;
+    NSString *nm = NSStringFromClass(rc);
+    if (!nm || [GCStylePosHookedClasses() containsObject:nm]) return;
+    [GCStylePosHookedClasses() addObject:nm];
+    Method mf = class_getInstanceMethod(rc, @selector(setFrame:));
+    if (mf) {
+        IMP o = method_getImplementation(mf);
+        const char *t = method_getTypeEncoding(mf);
+        Replace(rc, @selector(setFrame:), imp_implementationWithBlock(^(UIView *self, CGRect f) {
+            ((void (*)(id, SEL, CGRect))o)(self, @selector(setFrame:), f);
+            GCStylePinWidgets(self.window);
+        }), t);
+    }
+    Method mc = class_getInstanceMethod(rc, @selector(setCenter:));
+    if (mc) {
+        IMP o2 = method_getImplementation(mc);
+        const char *t2 = method_getTypeEncoding(mc);
+        Replace(rc, @selector(setCenter:), imp_implementationWithBlock(^(UIView *self, CGPoint c) {
+            ((void (*)(id, SEL, CGPoint))o2)(self, @selector(setCenter:), c);
+            GCStylePinWidgets(self.window);
+        }), t2);
+    }
+}
 static void GCStyleHookSetPos(Class rc) {
     if (!rc) return;
+    NSString *nm25 = NSStringFromClass(rc);   // trial25：与容器钩子共用登记表
+    if (nm25) [GCStylePosHookedClasses() addObject:nm25];
     Method mf = class_getInstanceMethod(rc, @selector(setFrame:));
     if (mf) {
         IMP o = method_getImplementation(mf);
@@ -1454,7 +1514,7 @@ static void GCStyleHookSetPos(Class rc) {
 
 // ★trial9：角控件绝对钉死（不再对表搜索栏）—— 右胶囊右10/底755；车机钮左10、
 //   天气行原生关系（钮下18、左对齐）⇒ 行底=755 ⇒ 钮底=755-20-18。每 tick/布局钩子覆写 ⇒ 不漂。
-static void GCStylePinWidgets(UIWindow *win) {
+static void GCStylePinWidgetsInner(UIWindow *win) {   // trial25(A2)：原体改名，对外经重入守卫包装
     if (!win) return;
     GCStyleDiscoverWidgets(win);   // trial11：自给自足（3D 模式 handler/bar 链断也能发现+钉）
 #ifdef GAODECLEAN_PROBE
@@ -1534,6 +1594,37 @@ static void GCStylePinWidgets(UIWindow *win) {
         GCStyleHookSetPos(cap.class);   // trial24
     }
 }
+// ★trial25(A2)：重入守卫包装 —— pin 现有帧级驱动/容器钩子/子控件钩子/layoutSubviews 钩子
+//   四路并发，写 frame 会级联触发钩子，无守卫有自激风暴风险。
+static BOOL GCStylePinBusy = NO;
+static void GCStylePinWidgets(UIWindow *win) {
+    if (GCStylePinBusy) return;
+    GCStylePinBusy = YES;
+    GCStylePinWidgetsInner(win);
+    GCStylePinBusy = NO;
+}
+// ★trial25(A1)：帧级钉位驱动器。probe7 铁证：①慢出现——车机 见=1.0/钉=1.0，tick 仅 5Hz，
+//   发现+钉+放行串行叠加；②上飘——WRITE before=608 after=614 拉锯 + CONTMOVE 容器摘挂，
+//   5Hz 追写追不上 App 60fps。CADisplayLink 与刷新同步：任何通道动控件，下一帧提交前纠回；
+//   发现延迟 ≤200ms→≤16ms。后台 RunLoop 停 ⇒ 自动暂停零耗。
+@interface GCStylePinDriver : NSObject
+- (void)fire;
+@end
+@implementation GCStylePinDriver
+- (void)fire {
+    UIView *av = CachedCar ?: CachedRight ?: CachedRoute;
+    UIWindow *pw = av.window ?: CachedTabBar.window ?: SearchBarView.window;
+    if (!pw) {
+        for (UIWindow *x in GCAllWindows()) {
+            if (!x.hidden && x.bounds.size.width >= 200) { pw = x; break; }
+        }
+    }
+    if (!pw) return;
+    GCStylePinWidgets(pw);
+    AlignWeatherRowTick(pw);   // 天气行同享帧级跟随（probe7：天气门首过=1.2s 慢门）
+}
+@end
+static GCStylePinDriver *GCStylePinDrv = nil;
 // 夹取主函数：只动胶囊 x/w（y/h 不动），伴生物按绝对几何同步 —— 幂等
 static void GCNarrowApply(UIView *anchor, BOOL isSearch) {
     if (!anchor || !anchor.window) return;
@@ -4093,6 +4184,18 @@ __attribute__((constructor)) static void Initialize(void) {
             // 0.4.44：GCD 计时器（模式无关，比 NSTimer 更可靠；NSTimer 在 1.4s 后曾停止）
             // 0.7.4(A3)：改为 GCCArmTick() 整备，节拍随前台/后台自动切换
             GCCArmTick();
+            // ★trial25(A5)：预挂 probe7 活体扫描锁定的三个容器类（类不存在静默跳过，
+            //   trial12 先例）；dylib ctor 时主二进制已加载，类均已注册。
+            GCStyleHookContainerPos(NSClassFromString(@"MapWidgetContainerView"));
+            GCStyleHookContainerPos(NSClassFromString(@"WINMapSideBarWidgetContainerView"));
+            GCStyleHookContainerPos(NSClassFromString(@"GDTransparentView"));
+            // ★trial25(A1)：帧级钉位循环（详见 GCStylePinDriver 注释）。RunLoop 持有 link，
+            //   static 强引用持有 target；CommonModes 保证滚动/手势 tracking 期间照跑。
+            if (!GCStylePinDrv) {
+                GCStylePinDrv = [GCStylePinDriver new];
+                CADisplayLink *pdl = [CADisplayLink displayLinkWithTarget:GCStylePinDrv selector:@selector(fire)];
+                [pdl addToRunLoop:NSRunLoop.mainRunLoop forMode:NSRunLoopCommonModes];
+            }
         });
 
     }
