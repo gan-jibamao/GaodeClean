@@ -18,7 +18,7 @@
 // ---- jibamao 个人标识（编译进 dylib，可用 strings 核对）----
 static NSString *const kGCAuthor      = @"jibamao";
 static NSString *const kGCRepo        = @"https://gan-jibamao.github.io/";
-static NSString *const kGCVersion     = @"0.9.28+trial12";
+static NSString *const kGCVersion     = @"0.9.29";
 
 // 0.9.18（A1）：底边间隙**按控件分开**，对表原生（搜索栏白底顶边 = 702.6pt）
 //   车机钮（连接车机 · WINDeviceInterconnectWidget）：原生底 652 → 间隙 50.6 → 取 50
@@ -120,10 +120,6 @@ static void KickBarFix(void);
 static void KickBarFixFor(NSTimeInterval seconds);
 static void WatchHomeTransition(id tabs);
 static __weak UIWindow *GCCMainWindow;
-#ifdef GAODECLEAN_PROBE
-static void GCProbeTick(void);        // 探针：定时取证（tick 调用）
-static void GCProbeNoteLayout(void);  // 探针：底栏重排时节流取证
-#endif
 static UIView *GCNarrowCapsule(UIView *anchor);           // 0.9.28 缩窄：取可见胶囊
 static void GCNarrowTick(void);                          // 0.9.28 缩窄：tick 兜底复核
 static void GCNarrowApply(UIView *anchor, BOOL isSearch); // 0.9.28 缩窄：点对点夹取
@@ -742,9 +738,6 @@ static void Schedule(void) {
         // 0.7.4(A6)：「上拉发现」是 200ms~1s 级的异步引导态，5Hz 采样过剩，降到 2.5Hz。
         if (CachedTabBar && TickCount % 2 == 0) SweepTabBarHints(CachedTabBar);
         if (TickCount % 5 == 0 || TickCount < 40) GCNarrowTick();   // 0.9.28 兜底复核（幂等）；trial12(B1)：冷启动头 8s 每拍都跑，闪变窗口压到 ≤1 拍
-#ifdef GAODECLEAN_PROBE
-        GCProbeTick();   // 探针：只读取证，不写任何视图
-#endif
 #if GCC_DEVICE_TEST
         RunDeviceCheck();
 #endif
@@ -804,242 +797,10 @@ static NSArray<UIWindow *> *GCAllWindows(void) {
 #pragma clang diagnostic pop
 }
 
-// ══ 探针模块（仅 -DGAODECLEAN_PROBE=1 编译）：**只读取证，不改任何视图** ══
 // 目的：一次拿到搜索栏 / 底栏的真实视图层级 + 规则 dry-run 判定 ——
 //       终结「靠截图反推层级」（0.9.22~0.9.26 五版全部栽在层级猜错上）。
 // 取数据：最新全文自动写入**系统剪贴板**（回聊天直接粘贴给我）；同时写
 //         Documents/GaodeClean-probe.txt，并 NSLog 出完整路径作后备。
-#ifdef GAODECLEAN_PROBE
-static CFAbsoluteTime   GCProbeBoot = 0, GCProbeLast = 0;
-static NSMutableString *GCProbeBuf = nil;
-static NSInteger        GCProbeDumps = 0, GCProbePlanIdx = 0;
-static BOOL             GCProbeBusy = NO;
-static const double     GCProbePlan[3] = { 5.0, 15.0, 30.0 };
-
-static NSString *GCProbePad(int d) {
-    int n = d * 2; if (n > 28) n = 28;
-    return [@"                            " substringToIndex:n];
-}
-static NSString *GCProbeColorDesc(UIColor *c) {
-    if (!c) return @"nil";
-    CGFloat a = 0, r = 0, g = 0, b = 0, w = 0;
-    if ([c getRed:&r green:&g blue:&b alpha:&a]) return [NSString stringWithFormat:@"rgba(%.2f,%.2f,%.2f,%.2f)", r, g, b, a];
-    if ([c getWhite:&w alpha:&a]) return [NSString stringWithFormat:@"white(%.3f,%.2f)", w, a];
-    return @"other";
-}
-static CGRect GCProbeWin(UIView *v) {
-    if (!v || !v.window) return CGRectNull;
-    CGRect r = CGRectNull;
-    @try { r = [v convertRect:v.bounds toView:nil]; } @catch (__unused NSException *e) {}
-    return r;
-}
-static void GCProbeJudge(NSMutableString *o, UIView *v, CGRect wn, CGFloat sw) {
-    CGFloat t = sw - 48.0, w = wn.size.width, h = wn.size.height, dx = fabs(CGRectGetMidX(wn) - sw * 0.5);
-    [o appendFormat:@"        判定: 满宽=%d 内层胶囊=%d 宽栏=%d 回补带=%d | 现宽%.1f=%.0f%%目标(%.0f) 高%.1f 居中偏%.1f\n",
-        w > sw - 12, (w >= sw - 120 && w <= sw - 12 && h >= 20 && h <= 110 && dx <= 6),
-        (w >= sw - 60 && h >= 20 && h <= sw * 0.35 && dx <= 4), (w >= t * 0.82 && w < t),
-        w, t > 0 ? w / t * 100.0 : 0.0, t, h, dx];
-}
-static void GCProbeNodeAt(NSMutableString *o, NSString *indent, UIView *v, CGFloat sw, CGFloat sh) {
-    CGRect wn = GCProbeWin(v), f = v.frame;
-    CGFloat cr = 0, bw = 0, shd = 0; BOOL clip = NO; NSString *cts = @"nil", *lbg = @"nil";
-    @try { cr = v.layer.cornerRadius; clip = v.layer.masksToBounds; bw = v.layer.borderWidth;
-           id x = v.layer.contents; if (x) cts = NSStringFromClass([x class]);
-           CGColorRef cg = v.layer.backgroundColor;
-           if (cg) lbg = GCProbeColorDesc([UIColor colorWithCGColor:cg]);
-           shd = v.layer.shadowOpacity; } @catch (__unused NSException *e) {}
-    int bar = (!CGRectIsNull(wn) && wn.size.width >= sw - 170 && wn.size.height >= 18
-               && wn.size.height <= 160 && fabs(CGRectGetMidX(wn) - sw * 0.5) <= 8);
-    [o appendFormat:@"%@%@ sup=%@ own=[%.1f,%.1f,%.1f,%.1f] win=[%.1f,%.1f,%.1f,%.1f] hid=%d a=%.2f bg=%@ lbg=%@ shd=%.2f corner=%.1f clip=%d bw=%.1f contents=%@ sub=%lu gest=%lu%@\n",
-        indent, NSStringFromClass(v.class), NSStringFromClass(v.superclass),
-        f.origin.x, f.origin.y, f.size.width, f.size.height,
-        wn.origin.x, wn.origin.y, wn.size.width, wn.size.height,
-        v.hidden, v.alpha, GCProbeColorDesc(v.backgroundColor), lbg, shd, cr, clip, bw, cts,
-        (unsigned long)v.subviews.count, (unsigned long)v.gestureRecognizers.count,
-        bar ? @"   <<<BAR" : @""];
-    if (bar) GCProbeJudge(o, v, wn, sw);
-}
-static void GCProbeDown(NSMutableString *o, UIView *v, int d, int maxD, NSInteger *budget, CGFloat sw, CGFloat sh) {
-    if (!v || d > maxD || *budget <= 0) return;
-    (*budget)--;
-    GCProbeNodeAt(o, GCProbePad(d), v, sw, sh);
-    for (UIView *c in v.subviews) GCProbeDown(o, c, d + 1, maxD, budget, sw, sh);
-}
-static void GCProbeUp(NSMutableString *o, UIView *v, CGFloat sw, CGFloat sh) {
-    for (int d = 0; v && d <= 14; v = v.superview, d++)
-        GCProbeNodeAt(o, [NSString stringWithFormat:@"↑%d ", d], v, sw, sh);
-}
-// 0.9.28+probe3：走 CALayer 子层 —— 白色可能由某个 layer 直接绘制，UIView 树里看不见
-static void GCProbeLayer(NSMutableString *o, CALayer *la, int d, int maxD, NSInteger *budget) {
-    if (!la || d > maxD || *budget <= 0) return;
-    (*budget)--;
-    NSString *lbg = @"nil", *cts = @"nil";
-    CGRect wr = CGRectNull;
-    @try {
-        CGColorRef cg = la.backgroundColor;
-        if (cg) lbg = GCProbeColorDesc([UIColor colorWithCGColor:cg]);
-        if (la.contents) cts = NSStringFromClass([la.contents class]);
-        CGRect b = la.bounds;
-        CGPoint p1 = [la convertPoint:b.origin toLayer:nil];
-        CGPoint p2 = [la convertPoint:CGPointMake(CGRectGetMaxX(b), CGRectGetMaxY(b)) toLayer:nil];
-        wr = CGRectMake(p1.x, p1.y, p2.x - p1.x, p2.y - p1.y);
-    } @catch (__unused NSException *e) {}
-    [o appendFormat:@"%@L %@ win=[%.1f,%.1f,%.1f,%.1f] op=%.2f corner=%.1f bg=%@ contents=%@ hid=%d\n",
-        GCProbePad(d), NSStringFromClass(la.class),
-        wr.origin.x, wr.origin.y, wr.size.width, wr.size.height,
-        la.opacity, la.cornerRadius, lbg, cts, la.hidden];
-    for (CALayer *c in la.sublayers) GCProbeLayer(o, c, d + 1, maxD, budget);
-}
-static void GCProbeStrip(NSMutableString *o, UIView *v, int d, NSInteger *budget, CGFloat sw, CGFloat sh) {
-    if (!v || d > 16 || *budget <= 0) return;
-    (*budget)--;
-    CGRect wn = GCProbeWin(v);
-    if (!CGRectIsNull(wn) && wn.size.width >= sw - 170 && wn.size.height >= 18 && wn.size.height <= 160
-        && CGRectGetMidY(wn) > sh * 0.60) GCProbeNodeAt(o, GCProbePad(d), v, sw, sh);
-    for (UIView *c in v.subviews) GCProbeStrip(o, c, d + 1, budget, sw, sh);
-}
-static UIWindow *GCProbeMainWin(void) {
-    UIWindow *best = nil;
-    for (UIWindow *w in GCAllWindows()) {
-        if (w.hidden || w.alpha < 0.05) continue;
-        if (w.isKeyWindow) return w;
-        if (!best || w.bounds.size.width > best.bounds.size.width) best = w;
-    }
-    return best;
-}
-static void GCProbeFlush(void) {
-    NSString *dir = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES).firstObject;
-    if (dir.length) {
-        NSString *p = [dir stringByAppendingPathComponent:@"GaodeClean-probe.txt"];
-        @try { [GCProbeBuf writeToFile:p atomically:YES encoding:NSUTF8StringEncoding error:nil];
-               GCLog(@"[probe] 文件 %@", p); } @catch (__unused NSException *e) {}
-    }
-    @try { UIPasteboard.generalPasteboard.string = GCProbeBuf; } @catch (__unused NSException *e) {}
-}
-// probe5：搜索栏带内**全层**扫描（所有窗口、无宽度/高度判据）—— 一次命名发丝线真凶
-static void GCProbeBandWalk(NSMutableString *o, CALayer *la, CGRect band, int depth, NSInteger *budget) {
-    if (!la || depth > 16 || *budget <= 0) return;
-    (*budget)--;
-    CGRect wr = CGRectNull;
-    @try { wr = [la convertRect:la.bounds toLayer:nil]; } @catch (__unused NSException *e) { wr = la.frame; }
-    if (CGRectIntersectsRect(wr, band) && wr.size.width > 8 && wr.size.height > 0.2) {
-        NSString *lbg = @"nil", *cts = @"nil", *owner = @"-";
-        @try {
-            if (la.backgroundColor) lbg = GCProbeColorDesc([UIColor colorWithCGColor:la.backgroundColor]);
-            if (la.contents) cts = NSStringFromClass([la.contents class]);
-            if ([la.delegate isKindOfClass:UIView.class]) {
-                UIView *v = (UIView *)la.delegate;
-                owner = NSStringFromClass(v.class);
-                for (int k = 0; k < 2 && v.superview; k++) { v = v.superview; owner = [owner stringByAppendingFormat:@"<%@", NSStringFromClass(v.class)]; }
-            }
-        } @catch (__unused NSException *e) {}
-        [o appendFormat:@"    d%-2d %@ win=[%.1f,%.1f,%.1f,%.1f] op=%.2f hid=%d corner=%.1f bw=%.2f shd=%.2f shr=%.1f off=(%.1f,%.1f) bg=%@ cts=%@ mob=%d owner=%@\n",
-            depth, NSStringFromClass(la.class), wr.origin.x, wr.origin.y, wr.size.width, wr.size.height,
-            la.opacity, la.hidden, la.cornerRadius, la.borderWidth, la.shadowOpacity, la.shadowRadius,
-            la.shadowOffset.width, la.shadowOffset.height, lbg, cts, la.masksToBounds, owner];
-    }
-    for (CALayer *c in la.sublayers) GCProbeBandWalk(o, c, band, depth + 1, budget);
-}
-static void GCProbeBandLayers(NSMutableString *o) {
-    UIView *bar = SearchBarView;
-    if (!bar) { [o appendString:@"  SearchBarView 为空\n"]; return; }
-    CGRect band = CGRectInset([bar convertRect:bar.bounds toView:nil], 0, -6);
-    [o appendFormat:@"  带=%@ 发丝线处理累计=%ld\n", NSStringFromCGRect(band), (long)GCNarrowHairHits];
-    for (UIWindow *w in GCAllWindows()) {
-        if (w.hidden || w.bounds.size.width < 200) continue;
-        NSInteger budget = 4000;
-        [o appendFormat:@"  · 窗口 %@\n", NSStringFromClass(w.class)];
-        GCProbeBandWalk(o, w.layer, band, 0, &budget);
-    }
-}
-static void GCProbeDump(NSString *reason) {
-    if (GCProbeBusy) return;
-    GCProbeBusy = YES;
-    if (!GCProbeBuf) GCProbeBuf = [NSMutableString string];
-    UIWindow *kw = GCProbeMainWin();
-    CGFloat sw = kw ? kw.bounds.size.width : 0, sh = kw ? kw.bounds.size.height : 0;
-    [GCProbeBuf appendFormat:@"\n===== dump #%ld reason=%@ t=%.1fs =====\n窗口=%.0fx%.0f scale=%.1f 目标=[24,%.1f] 构建=%@\n",
-        (long)(GCProbeDumps + 1), reason, GCProbeBoot ? CFAbsoluteTimeGetCurrent() - GCProbeBoot : 0.0,
-        sw, sh, kw ? kw.screen.scale : 0.0, sw - 48.0, kGCVersion];   // A3：版本串不再写死
-    if (sw > 200) {
-        UIView *bar = SearchBarView, *tb = CachedTabBar;
-        if (bar) {
-            [GCProbeBuf appendString:@"\n---[搜索栏] anchor 上溯链（↑n=向上第 n 层）---\n"]; GCProbeUp(GCProbeBuf, bar, sw, sh);
-            [GCProbeBuf appendString:@"\n---[搜索栏] anchor 下探 深度≤6 ---\n"];
-            NSInteger b = 300; GCProbeDown(GCProbeBuf, bar, 0, 6, &b, sw, sh);
-        } else [GCProbeBuf appendString:@"\n---[搜索栏] SearchBarView 为空（未进首页？）---\n"];
-        if (tb) {
-            [GCProbeBuf appendString:@"\n---[底栏] anchor 上溯链---\n"]; GCProbeUp(GCProbeBuf, tb, sw, sh);
-            [GCProbeBuf appendString:@"\n---[底栏] anchor 下探 深度≤6 ---\n"];
-            NSInteger b = 300; GCProbeDown(GCProbeBuf, tb, 0, 6, &b, sw, sh);
-        } else [GCProbeBuf appendString:@"\n---[底栏] CachedTabBar 为空---\n"];
-        [GCProbeBuf appendString:@"\n---[底栏描边匹配 dry-run（与 GCNarrowApply 同判据，逐条真假）]---\n"];
-        if (tb) {
-            [GCProbeBuf appendFormat:@"  描边同步累计写入次数=%ld\n", (long)GCNarrowBorderFixes];
-            [GCProbeBuf appendFormat:@"  环境层同步累计写入次数=%ld\n", (long)GCNarrowAmbFixes];
-            for (UIView *v in tb.subviews) {
-                CGRect f = v.frame;
-                BOOL isIV = [v isKindOfClass:UIImageView.class];
-                BOOL aOK = (!v.hidden && v.alpha >= 0.05);
-                BOOL hOK = !(f.size.height < 56 || f.size.height > 72);
-                BOOL wOK = !(f.size.width < GCNarrowTargetWidth() || f.size.width > 380);
-                BOOL cOK = fabs(CGRectGetMidX(f) - sw * 0.5) <= 20;
-                [GCProbeBuf appendFormat:@"  %@ hid=%d a=%.2f own=[%.1f,%.1f,%.1f,%.1f] IV=%d 可见=%d hOK=%d wOK=%d cOK=%d ⇒命中=%d anim=%lu\n",
-                    NSStringFromClass(v.class), v.hidden, v.alpha,
-                    f.origin.x, f.origin.y, f.size.width, f.size.height,
-                    isIV, aOK, hOK, wOK, cOK,
-                    (isIV && aOK && hOK && wOK && cOK),
-                    (unsigned long)v.layer.animationKeys.count];
-            }
-        } else [GCProbeBuf appendString:@"  CachedTabBar 为空\n"];
-        [GCProbeBuf appendString:@"\n---[搜索栏带内全层扫描（所有窗口、无判据）]---\n"];
-        GCProbeBandLayers(GCProbeBuf);
-        [GCProbeBuf appendString:@"\n---[layer 树：anchor 兄弟层 + anchor/胶囊子层]---\n"];
-        if (bar) {
-            NSInteger lb = 90;
-            [GCProbeBuf appendString:@"  · 搜索栏 anchor 的兄弟层:\n"];
-            if (bar.superview) GCProbeLayer(GCProbeBuf, bar.superview.layer, 0, 1, &lb);
-            [GCProbeBuf appendString:@"  · 搜索栏 anchor 子层:\n"];
-            GCProbeLayer(GCProbeBuf, bar.layer, 0, 4, &lb);
-            UIView *cp = GCNarrowCapsule(bar);
-            if (cp) { [GCProbeBuf appendString:@"  · 搜索栏胶囊子层:\n"]; GCProbeLayer(GCProbeBuf, cp.layer, 0, 3, &lb); }
-        }
-        if (tb) {
-            NSInteger lb = 90;
-            [GCProbeBuf appendString:@"  · 底栏 anchor 的兄弟层:\n"];
-            if (tb.superview) GCProbeLayer(GCProbeBuf, tb.superview.layer, 0, 1, &lb);
-            [GCProbeBuf appendString:@"  · 底栏 anchor 子层:\n"];
-            GCProbeLayer(GCProbeBuf, tb.layer, 0, 4, &lb);
-            UIView *cp = GCNarrowCapsule(tb);
-            if (cp) { [GCProbeBuf appendString:@"  · 底栏胶囊子层:\n"]; GCProbeLayer(GCProbeBuf, cp.layer, 0, 3, &lb); }
-        }
-        [GCProbeBuf appendString:@"\n---[全窗口下屏条带扫描]（宽≥屏宽-170、高18~160、midY>0.60屏高）---\n"];
-        for (UIWindow *w in GCAllWindows()) {
-            if (w.hidden || w.bounds.size.width < 200) continue;
-            [GCProbeBuf appendFormat:@"· 窗口 %@ %.0fx%.0f\n", NSStringFromClass(w.class), w.bounds.size.width, w.bounds.size.height];
-            NSInteger b = 200; UIView *root = w.rootViewController.view ?: w;
-            GCProbeStrip(GCProbeBuf, root, 0, &b, w.bounds.size.width, w.bounds.size.height);
-        }
-    }
-    GCProbeDumps++; GCProbeLast = CFAbsoluteTimeGetCurrent();
-    GCProbeFlush();
-    GCLog(@"[probe] dump #%ld 完成，%lu 字已进剪贴板", (long)GCProbeDumps, (unsigned long)GCProbeBuf.length);
-    GCProbeBusy = NO;
-}
-static void GCProbeTick(void) {
-    if (!GCProbeBoot) GCProbeBoot = CFAbsoluteTimeGetCurrent();
-    double el = CFAbsoluteTimeGetCurrent() - GCProbeBoot;
-    if (GCProbePlanIdx < 3 && el >= GCProbePlan[GCProbePlanIdx]) {
-        GCProbePlanIdx++;
-        GCProbeDump([NSString stringWithFormat:@"定时%.0fs", el]);
-    }
-}
-static void GCProbeNoteLayout(void) {
-    if (GCProbeDumps >= 11) return;
-    if (GCProbeLast && CFAbsoluteTimeGetCurrent() - GCProbeLast < 5.0) return;
-    GCProbeDump(@"底栏重排");
-}
-#endif
 
 // Install on a class's own method table, preserving inherited implementations.
 static void Replace(Class cls, SEL sel, IMP replacement, const char *types) {
@@ -3199,9 +2960,6 @@ static void InstallMinimalHome(void) {
     InstallSplashAdGuard();
     HookVoid(GCStrAt(88), GCStrAt(91), ^(UIView *bar) { CachedTabBar = bar; CenterTabButtons(bar); SweepTabBarHints(bar);
         GCNarrowApply(bar, NO);   // 0.9.28 缩窄：底栏重排后立即夹回
-#ifdef GAODECLEAN_PROBE
-        GCProbeNoteLayout();   // 探针：底栏重排后再取一份快照
-#endif
     });
     InstallTabBarHintHooks();
     // 0.9.1：「上拉发现」引导 Lottie 拦截（17.01.1 GuideLottie 机制）
