@@ -120,6 +120,10 @@ static void KickBarFix(void);
 static void KickBarFixFor(NSTimeInterval seconds);
 static void WatchHomeTransition(id tabs);
 static __weak UIWindow *GCCMainWindow;
+#ifdef GAODECLEAN_PROBE
+static void GCProbeTick(void);        // 探针：定时取证（tick 调用）
+static void GCProbeNoteLayout(void);  // 探针：底栏重排时节流取证
+#endif
 static __weak UIWindow *GCCSplashWindow;      // 已识别的广告窗口，之后拒绝其可见
 static NSInteger GCCSplashTicks;              // 兜底扫描剩余拍数（有界）
 static int GCCSplashUntil;                    // 0.7.5(B2)：窗口拉黑失效拍号（60s 后自动解除）
@@ -730,6 +734,9 @@ static void Schedule(void) {
         // 只挂 layout 就是这个 bug 偶发的根因。扫描范围只有底栏子树，开销可忽略。
         // 0.7.4(A6)：「上拉发现」是 200ms~1s 级的异步引导态，5Hz 采样过剩，降到 2.5Hz。
         if (CachedTabBar && TickCount % 2 == 0) SweepTabBarHints(CachedTabBar);
+#ifdef GAODECLEAN_PROBE
+        GCProbeTick();   // 探针：只读取证，不写任何视图
+#endif
 #if GCC_DEVICE_TEST
         RunDeviceCheck();
 #endif
@@ -788,6 +795,143 @@ static NSArray<UIWindow *> *GCAllWindows(void) {
     return UIApplication.sharedApplication.windows;
 #pragma clang diagnostic pop
 }
+
+// ══ 探针模块（仅 -DGAODECLEAN_PROBE=1 编译）：**只读取证，不改任何视图** ══
+// 目的：一次拿到搜索栏 / 底栏的真实视图层级 + 规则 dry-run 判定 ——
+//       终结「靠截图反推层级」（0.9.22~0.9.26 五版全部栽在层级猜错上）。
+// 取数据：最新全文自动写入**系统剪贴板**（回聊天直接粘贴给我）；同时写
+//         Documents/GaodeClean-probe.txt，并 NSLog 出完整路径作后备。
+#ifdef GAODECLEAN_PROBE
+static CFAbsoluteTime   GCProbeBoot = 0, GCProbeLast = 0;
+static NSMutableString *GCProbeBuf = nil;
+static NSInteger        GCProbeDumps = 0, GCProbePlanIdx = 0;
+static BOOL             GCProbeBusy = NO;
+static const double     GCProbePlan[3] = { 5.0, 15.0, 30.0 };
+
+static NSString *GCProbePad(int d) {
+    int n = d * 2; if (n > 28) n = 28;
+    return [@"                            " substringToIndex:n];
+}
+static NSString *GCProbeColorDesc(UIColor *c) {
+    if (!c) return @"nil";
+    CGFloat a = 0, r = 0, g = 0, b = 0, w = 0;
+    if ([c getRed:&r green:&g blue:&b alpha:&a]) return [NSString stringWithFormat:@"rgba(%.2f,%.2f,%.2f,%.2f)", r, g, b, a];
+    if ([c getWhite:&w alpha:&a]) return [NSString stringWithFormat:@"white(%.3f,%.2f)", w, a];
+    return @"other";
+}
+static CGRect GCProbeWin(UIView *v) {
+    if (!v || !v.window) return CGRectNull;
+    CGRect r = CGRectNull;
+    @try { r = [v convertRect:v.bounds toView:nil]; } @catch (__unused NSException *e) {}
+    return r;
+}
+static void GCProbeJudge(NSMutableString *o, UIView *v, CGRect wn, CGFloat sw) {
+    CGFloat t = sw - 48.0, w = wn.size.width, h = wn.size.height, dx = fabs(CGRectGetMidX(wn) - sw * 0.5);
+    [o appendFormat:@"        判定: 满宽=%d 内层胶囊=%d 宽栏=%d 回补带=%d | 现宽%.1f=%.0f%%目标(%.0f) 高%.1f 居中偏%.1f\n",
+        w > sw - 12, (w >= sw - 120 && w <= sw - 12 && h >= 20 && h <= 110 && dx <= 6),
+        (w >= sw - 60 && h >= 20 && h <= sw * 0.35 && dx <= 4), (w >= t * 0.82 && w < t),
+        w, t > 0 ? w / t * 100.0 : 0.0, t, h, dx];
+}
+static void GCProbeNodeAt(NSMutableString *o, NSString *indent, UIView *v, CGFloat sw, CGFloat sh) {
+    CGRect wn = GCProbeWin(v), f = v.frame;
+    CGFloat cr = 0, bw = 0; BOOL clip = NO; NSString *cts = @"nil";
+    @try { cr = v.layer.cornerRadius; clip = v.layer.masksToBounds; bw = v.layer.borderWidth;
+           id x = v.layer.contents; if (x) cts = NSStringFromClass([x class]); } @catch (__unused NSException *e) {}
+    int bar = (!CGRectIsNull(wn) && wn.size.width >= sw - 170 && wn.size.height >= 18
+               && wn.size.height <= 160 && fabs(CGRectGetMidX(wn) - sw * 0.5) <= 8);
+    [o appendFormat:@"%@%@ sup=%@ own=[%.1f,%.1f,%.1f,%.1f] win=[%.1f,%.1f,%.1f,%.1f] hid=%d a=%.2f bg=%@ corner=%.1f clip=%d bw=%.1f contents=%@ sub=%lu gest=%lu%@\n",
+        indent, NSStringFromClass(v.class), NSStringFromClass(v.superclass),
+        f.origin.x, f.origin.y, f.size.width, f.size.height,
+        wn.origin.x, wn.origin.y, wn.size.width, wn.size.height,
+        v.hidden, v.alpha, GCProbeColorDesc(v.backgroundColor), cr, clip, bw, cts,
+        (unsigned long)v.subviews.count, (unsigned long)v.gestureRecognizers.count,
+        bar ? @"   <<<BAR" : @""];
+    if (bar) GCProbeJudge(o, v, wn, sw);
+}
+static void GCProbeDown(NSMutableString *o, UIView *v, int d, int maxD, NSInteger *budget, CGFloat sw, CGFloat sh) {
+    if (!v || d > maxD || *budget <= 0) return;
+    (*budget)--;
+    GCProbeNodeAt(o, GCProbePad(d), v, sw, sh);
+    for (UIView *c in v.subviews) GCProbeDown(o, c, d + 1, maxD, budget, sw, sh);
+}
+static void GCProbeUp(NSMutableString *o, UIView *v, CGFloat sw, CGFloat sh) {
+    for (int d = 0; v && d <= 14; v = v.superview, d++)
+        GCProbeNodeAt(o, [NSString stringWithFormat:@"↑%d ", d], v, sw, sh);
+}
+static void GCProbeStrip(NSMutableString *o, UIView *v, int d, NSInteger *budget, CGFloat sw, CGFloat sh) {
+    if (!v || d > 16 || *budget <= 0) return;
+    (*budget)--;
+    CGRect wn = GCProbeWin(v);
+    if (!CGRectIsNull(wn) && wn.size.width >= sw - 170 && wn.size.height >= 18 && wn.size.height <= 160
+        && CGRectGetMidY(wn) > sh * 0.60) GCProbeNodeAt(o, GCProbePad(d), v, sw, sh);
+    for (UIView *c in v.subviews) GCProbeStrip(o, c, d + 1, budget, sw, sh);
+}
+static UIWindow *GCProbeMainWin(void) {
+    UIWindow *best = nil;
+    for (UIWindow *w in GCAllWindows()) {
+        if (w.hidden || w.alpha < 0.05) continue;
+        if (w.isKeyWindow) return w;
+        if (!best || w.bounds.size.width > best.bounds.size.width) best = w;
+    }
+    return best;
+}
+static void GCProbeFlush(void) {
+    NSString *dir = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES).firstObject;
+    if (dir.length) {
+        NSString *p = [dir stringByAppendingPathComponent:@"GaodeClean-probe.txt"];
+        @try { [GCProbeBuf writeToFile:p atomically:YES encoding:NSUTF8StringEncoding error:nil];
+               GCLog(@"[probe] 文件 %@", p); } @catch (__unused NSException *e) {}
+    }
+    @try { UIPasteboard.generalPasteboard.string = GCProbeBuf; } @catch (__unused NSException *e) {}
+}
+static void GCProbeDump(NSString *reason) {
+    if (GCProbeBusy) return;
+    GCProbeBusy = YES;
+    if (!GCProbeBuf) GCProbeBuf = [NSMutableString string];
+    UIWindow *kw = GCProbeMainWin();
+    CGFloat sw = kw ? kw.bounds.size.width : 0, sh = kw ? kw.bounds.size.height : 0;
+    [GCProbeBuf appendFormat:@"\n===== dump #%ld reason=%@ t=%.1fs =====\n窗口=%.0fx%.0f scale=%.1f 目标=[24,%.1f] 构建=0.9.27+probe1\n",
+        (long)(GCProbeDumps + 1), reason, GCProbeBoot ? CFAbsoluteTimeGetCurrent() - GCProbeBoot : 0.0,
+        sw, sh, kw ? kw.screen.scale : 0.0, sw - 48.0];
+    if (sw > 200) {
+        UIView *bar = SearchBarView, *tb = CachedTabBar;
+        if (bar) {
+            [GCProbeBuf appendString:@"\n---[搜索栏] anchor 上溯链（↑n=向上第 n 层）---\n"]; GCProbeUp(GCProbeBuf, bar, sw, sh);
+            [GCProbeBuf appendString:@"\n---[搜索栏] anchor 下探 深度≤6 ---\n"];
+            NSInteger b = 300; GCProbeDown(GCProbeBuf, bar, 0, 6, &b, sw, sh);
+        } else [GCProbeBuf appendString:@"\n---[搜索栏] SearchBarView 为空（未进首页？）---\n"];
+        if (tb) {
+            [GCProbeBuf appendString:@"\n---[底栏] anchor 上溯链---\n"]; GCProbeUp(GCProbeBuf, tb, sw, sh);
+            [GCProbeBuf appendString:@"\n---[底栏] anchor 下探 深度≤6 ---\n"];
+            NSInteger b = 300; GCProbeDown(GCProbeBuf, tb, 0, 6, &b, sw, sh);
+        } else [GCProbeBuf appendString:@"\n---[底栏] CachedTabBar 为空---\n"];
+        [GCProbeBuf appendString:@"\n---[全窗口下屏条带扫描]（宽≥屏宽-170、高18~160、midY>0.60屏高）---\n"];
+        for (UIWindow *w in GCAllWindows()) {
+            if (w.hidden || w.bounds.size.width < 200) continue;
+            [GCProbeBuf appendFormat:@"· 窗口 %@ %.0fx%.0f\n", NSStringFromClass(w.class), w.bounds.size.width, w.bounds.size.height];
+            NSInteger b = 200; UIView *root = w.rootViewController.view ?: w;
+            GCProbeStrip(GCProbeBuf, root, 0, &b, w.bounds.size.width, w.bounds.size.height);
+        }
+    }
+    GCProbeDumps++; GCProbeLast = CFAbsoluteTimeGetCurrent();
+    GCProbeFlush();
+    GCLog(@"[probe] dump #%ld 完成，%lu 字已进剪贴板", (long)GCProbeDumps, (unsigned long)GCProbeBuf.length);
+    GCProbeBusy = NO;
+}
+static void GCProbeTick(void) {
+    if (!GCProbeBoot) GCProbeBoot = CFAbsoluteTimeGetCurrent();
+    double el = CFAbsoluteTimeGetCurrent() - GCProbeBoot;
+    if (GCProbePlanIdx < 3 && el >= GCProbePlan[GCProbePlanIdx]) {
+        GCProbePlanIdx++;
+        GCProbeDump([NSString stringWithFormat:@"定时%.0fs", el]);
+    }
+}
+static void GCProbeNoteLayout(void) {
+    if (GCProbeDumps >= 11) return;
+    if (GCProbeLast && CFAbsoluteTimeGetCurrent() - GCProbeLast < 5.0) return;
+    GCProbeDump(@"底栏重排");
+}
+#endif
 
 // Install on a class's own method table, preserving inherited implementations.
 static void Replace(Class cls, SEL sel, IMP replacement, const char *types) {
@@ -2649,7 +2793,11 @@ static void InstallSplashAdGuard(void) {
 static void InstallMinimalHome(void) {
     // 0.7.0：开屏广告移除
     InstallSplashAdGuard();
-    HookVoid(GCStrAt(88), GCStrAt(91), ^(UIView *bar) { CachedTabBar = bar; CenterTabButtons(bar); SweepTabBarHints(bar); });
+    HookVoid(GCStrAt(88), GCStrAt(91), ^(UIView *bar) { CachedTabBar = bar; CenterTabButtons(bar); SweepTabBarHints(bar);
+#ifdef GAODECLEAN_PROBE
+        GCProbeNoteLayout();   // 探针：底栏重排后再取一份快照
+#endif
+    });
     InstallTabBarHintHooks();
     // 0.9.1：「上拉发现」引导 Lottie 拦截（17.01.1 GuideLottie 机制）
     InstallTabBarGuideLottieBlock();
