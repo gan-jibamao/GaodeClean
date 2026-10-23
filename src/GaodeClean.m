@@ -18,7 +18,7 @@
 // ---- jibamao 个人标识（编译进 dylib，可用 strings 核对）----
 static NSString *const kGCAuthor      = @"jibamao";
 static NSString *const kGCRepo        = @"https://gan-jibamao.github.io/";
-static NSString *const kGCVersion     = @"0.9.27+probe1";
+static NSString *const kGCVersion     = @"0.9.28+trial1";
 
 // 0.9.18（A1）：底边间隙**按控件分开**，对表原生（搜索栏白底顶边 = 702.6pt）
 //   车机钮（连接车机 · WINDeviceInterconnectWidget）：原生底 652 → 间隙 50.6 → 取 50
@@ -124,6 +124,8 @@ static __weak UIWindow *GCCMainWindow;
 static void GCProbeTick(void);        // 探针：定时取证（tick 调用）
 static void GCProbeNoteLayout(void);  // 探针：底栏重排时节流取证
 #endif
+static void GCNarrowTick(void);                          // 0.9.28 缩窄：tick 兜底复核
+static void GCNarrowApply(UIView *anchor, BOOL isSearch); // 0.9.28 缩窄：点对点夹取
 static __weak UIWindow *GCCSplashWindow;      // 已识别的广告窗口，之后拒绝其可见
 static NSInteger GCCSplashTicks;              // 兜底扫描剩余拍数（有界）
 static int GCCSplashUntil;                    // 0.7.5(B2)：窗口拉黑失效拍号（60s 后自动解除）
@@ -734,6 +736,7 @@ static void Schedule(void) {
         // 只挂 layout 就是这个 bug 偶发的根因。扫描范围只有底栏子树，开销可忽略。
         // 0.7.4(A6)：「上拉发现」是 200ms~1s 级的异步引导态，5Hz 采样过剩，降到 2.5Hz。
         if (CachedTabBar && TickCount % 2 == 0) SweepTabBarHints(CachedTabBar);
+        if (TickCount % 5 == 0) GCNarrowTick();   // 0.9.28 缩窄：兜底复核（幂等）
 #ifdef GAODECLEAN_PROBE
         GCProbeTick();   // 探针：只读取证，不写任何视图
 #endif
@@ -958,6 +961,131 @@ static void HookVoid(NSString *name, NSString *methodName, void (^after)(id)) {
         after(self);
     });
     Replace(cls, sel, imp, method_getTypeEncoding(m));
+}
+
+// ══════════════════════════════════════════════════════════════════════════
+//  缩窄 v6（0.9.28 试验版）—— 依据 0.9.27+probe1 真机层级实测，点对点夹取
+// ───────────────────────────────────────────────────────────────────────────
+//  实测结构（393×852pt，探针 dump #2）：
+//   · 搜索栏 anchor = WINQuickSearchBarV2  win=[0,702,393,54]（满宽、透明）
+//       └ 可见白胶囊 = 直接子层 UIVisualEffectView win=[8,702,377,54] corner=27
+//       └ 相机 UIButton own=[293,3,48,48]、语音 LTMVUIEmojiView own=[341,11,32,32]
+//         （两枚按钮浮在胶囊上、挂在 anchor 上，右缘距胶囊右缘 12pt、彼此相邻）
+//   · 底栏 anchor = WINTabBar  win=[0,768,393,60]（满宽、透明）
+//       └ 可见胶囊 = 直接子层 UIVisualEffectView win=[21,768,351,60] corner=30
+//       └ 描边高亮图 UIImageView own=[19,-2,355,64]（= 胶囊外扩 2pt）
+//       └ 环境阴影图 own=[-3,-24,399,108]（整条栏的，不属于胶囊 ⇒ 不动）
+//       └ 页签 WINTabBarItem 中心 ±60、选中底衬 [86.5,771,100,54]
+//         都在 anchor 上、不在胶囊内 ⇒ 改胶囊宽度不会拽动页签，无需动按钮。
+//  策略：只 hook 这两个 anchor 类的 layoutSubviews（App 具体类，作用域天然受限），
+//        原实现执行完后按**绝对几何**写胶囊 x/w；全程幂等、不 hook 任何系统类。
+//  定值：目标可见宽 240pt —— 由内容边界决定的最小等宽值：
+//        底栏必须包住「页签 94.5..298.5 + 选中底衬 86.5..186.5」= 并集 86.5..298.5，
+//        居中后最小 236pt，取整 240（选中底衬距胶囊边留 10pt）。
+// ══════════════════════════════════════════════════════════════════════════
+static const CGFloat GCNarrowTargetW = 240.0;   // 两条栏的目标可见宽
+static const CGFloat GCNarrowBtnGap  = 12.0;    // 原生：最右按钮右缘距胶囊右缘 12pt
+static BOOL GCNarrowSearchHooked = NO;
+
+// 取 anchor 的「可见胶囊」：毛玻璃层 + 栏级尺寸 + 居中
+static UIView *GCNarrowCapsule(UIView *anchor) {
+    if (!anchor) return nil;
+    CGFloat sw = anchor.bounds.size.width;
+    if (sw < 200) return nil;
+    UIView *best = nil; CGFloat bw = 0;
+    for (UIView *v in anchor.subviews) {
+        if (v.hidden || v.alpha < 0.05) continue;
+        if (![v isKindOfClass:UIVisualEffectView.class]) continue;
+        CGRect f = v.frame;
+        if (f.size.height < 40 || f.size.height > 120) continue;
+        if (f.size.width < sw - 140 || f.size.width > sw - 4) continue;
+        if (fabs(CGRectGetMidX(f) - sw * 0.5) > 10) continue;
+        if (f.size.width > bw) { best = v; bw = f.size.width; }
+    }
+    return best;
+}
+// 胶囊内部的满幅背景层（防 autoresizing 未生效）：x≈0 且宽超出胶囊的，收进胶囊
+static void GCNarrowInnerFix(UIView *v, CGFloat capW, int depth, NSInteger *budget) {
+    if (!v || depth > 3 || *budget <= 0) return;
+    (*budget)--;
+    for (UIView *c in v.subviews) {
+        CGRect f = c.frame;
+        if (f.origin.x <= 2 && f.size.width > capW + 8) { f.size.width = capW; c.frame = f; }
+        GCNarrowInnerFix(c, capW, depth + 1, budget);
+    }
+}
+// 夹取主函数：只动胶囊 x/w（y/h 不动），伴生物按绝对几何同步 —— 幂等
+static void GCNarrowApply(UIView *anchor, BOOL isSearch) {
+    if (!anchor || !anchor.window) return;
+    CGFloat sw = anchor.bounds.size.width;
+    UIView *cap = GCNarrowCapsule(anchor);
+    if (!cap) return;
+    CGRect cf = cap.frame;                       // 写之前的原帧（App 刚布完的原生态或已达状态）
+    CGFloat x = (sw - GCNarrowTargetW) * 0.5;
+    CGFloat right = x + GCNarrowTargetW;
+    CGRect g = cf;
+    g.origin.x = x; g.size.width = GCNarrowTargetW;
+    if (!CGRectEqualToRect(g, cf)) cap.frame = g;
+    NSInteger budget = 24;
+    GCNarrowInnerFix(cap, GCNarrowTargetW, 0, &budget);
+    if (isSearch) {
+        // 浮在胶囊右侧的按钮：按绝对几何重排 —— 最右按钮右缘 = 胶囊右缘 - 12，
+        // 其余向左依次相邻贴放（与原生排布关系完全一致，天然幂等、与谁最后布局无关）
+        NSMutableArray *btns = [NSMutableArray array];
+        for (UIView *v in anchor.subviews) {
+            if (v == cap || v.hidden || v.alpha < 0.05) continue;
+            CGRect f = v.frame;
+            if (f.size.width > 60 || f.size.height > 60) continue;
+            if (f.origin.x < sw * 0.55) continue;
+            [btns addObject:v];
+        }
+        [btns sortUsingComparator:^NSComparisonResult(UIView *a, UIView *b) {
+            CGFloat ax = a.frame.origin.x, bx = b.frame.origin.x;
+            if (ax > bx) return NSOrderedAscending;
+            if (ax < bx) return NSOrderedDescending;
+            return NSOrderedSame;
+        }];
+        CGFloat cursor = right - GCNarrowBtnGap;
+        for (UIView *v in btns) {
+            CGRect f = v.frame;
+            CGFloat nx = cursor - f.size.width;
+            cursor = nx;
+            if (fabs(f.origin.x - nx) > 0.5) { f.origin.x = nx; v.frame = f; }
+        }
+    } else {
+        // 底栏：胶囊外扩 2pt 的描边/高亮图同步（环境阴影图宽差大，天然不命中）
+        for (UIView *v in anchor.subviews) {
+            if (v == cap || v.hidden || v.alpha < 0.05) continue;
+            if (![v isKindOfClass:UIImageView.class]) continue;
+            CGRect f = v.frame;
+            if (fabs(f.size.width - (cf.size.width + 4)) > 14) continue;
+            if (fabs(f.size.height - (cf.size.height + 4)) > 14) continue;
+            CGRect s = g; s.origin.x -= 2; s.origin.y -= 2; s.size.width += 4; s.size.height += 4;
+            if (!CGRectEqualToRect(s, f)) v.frame = s;
+        }
+    }
+}
+// 搜索栏 anchor 类只 hook 一次；命中通用基类则放弃钩子（改由 tick 兜底），避免波及全局
+static void GCNarrowEnsureSearchHook(void) {
+    if (GCNarrowSearchHooked) return;
+    UIView *bar = SearchBarView;
+    if (!bar) return;
+    GCNarrowSearchHooked = YES;
+    NSString *nm = NSStringFromClass(bar.class);
+    static NSSet *deny;
+    if (!deny) deny = [NSSet setWithObjects:@"UIView", @"UIResponder", @"LTMBaseView",
+                       @"NMMoveContentView", @"WINRootView", @"WINMultiStyleRootView",
+                       @"AMCommonContentBackgroundView", nil];
+    if ([deny containsObject:nm]) return;
+    HookVoid(nm, @"layoutSubviews", ^(UIView *anchor) { GCNarrowApply(anchor, YES); });
+}
+// tick 兜底：每 5 拍复核一次（App 重建视图/漏排时拉回）
+static void GCNarrowTick(void) {
+    GCNarrowEnsureSearchHook();
+    UIView *bar = SearchBarView;
+    if (bar) GCNarrowApply(bar, YES);
+    UIView *tb = CachedTabBar;
+    if (tb) GCNarrowApply(tb, NO);
 }
 
 // 0.9.4：删除 IsBlurOverlayView / GCCColorStr / GCCScreenMapMean
@@ -2794,6 +2922,7 @@ static void InstallMinimalHome(void) {
     // 0.7.0：开屏广告移除
     InstallSplashAdGuard();
     HookVoid(GCStrAt(88), GCStrAt(91), ^(UIView *bar) { CachedTabBar = bar; CenterTabButtons(bar); SweepTabBarHints(bar);
+        GCNarrowApply(bar, NO);   // 0.9.28 缩窄：底栏重排后立即夹回
 #ifdef GAODECLEAN_PROBE
         GCProbeNoteLayout();   // 探针：底栏重排后再取一份快照
 #endif
