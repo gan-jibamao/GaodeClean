@@ -18,7 +18,7 @@
 // ---- jibamao 个人标识（编译进 dylib，可用 strings 核对）----
 static NSString *const kGCAuthor      = @"jibamao";
 static NSString *const kGCRepo        = @"https://gan-jibamao.github.io/";
-static NSString *const kGCVersion     = @"0.9.28+trial3";
+static NSString *const kGCVersion     = @"0.9.28+trial4";
 
 // 0.9.18（A1）：底边间隙**按控件分开**，对表原生（搜索栏白底顶边 = 702.6pt）
 //   车机钮（连接车机 · WINDeviceInterconnectWidget）：原生底 652 → 间隙 50.6 → 取 50
@@ -1120,14 +1120,20 @@ static void GCNarrowApply(UIView *anchor, BOOL isSearch) {
             if (fabs(f.origin.x - nx) > 0.5) { f.origin.x = nx; v.frame = f; }
         }
     } else {
-        // 底栏：胶囊外扩 2pt 的描边/高亮图同步（环境阴影图宽差大，天然不命中）
+        // ★trial4（老大截图指出"还有一层透明的没缩"）：描边/高亮图匹配改为**绝对特征**。
+        //   trial1~3 的真 bug：旧匹配依赖「胶囊写前帧 cf + 4」。App 在某时刻把描边图
+        //   重建/重排回原生 355 宽时，胶囊已是 240 ⇒ |355-244|=111>14 永远落空
+        //   ⇒ 描边图钉死在原生宽度，即胶囊外那圈透明圆角矩形（实测 ~355pt）。
+        //   绝对特征：非隐藏 UIImageView + 高 56~72 + 宽 [240,380] + 居中 ⇒ 写成胶囊外扩 2pt；
+        //   环境阴影图(高108/宽399)、页签(84)、隐藏备用图(hidden) 全部天然不命中。
         for (UIView *v in anchor.subviews) {
             if (v == cap || v.hidden || v.alpha < 0.05) continue;
             if (![v isKindOfClass:UIImageView.class]) continue;
             CGRect f = v.frame;
-            if (fabs(f.size.width - (cf.size.width + 4)) > 14) continue;
-            if (fabs(f.size.height - (cf.size.height + 4)) > 14) continue;
-            CGRect s = g; s.origin.x -= 2; s.origin.y -= 2; s.size.width += 4; s.size.height += 4;
+            if (f.size.height < 56 || f.size.height > 72) continue;
+            if (f.size.width < GCNarrowTargetW || f.size.width > 380) continue;
+            if (fabs(CGRectGetMidX(f) - sw * 0.5) > 20) continue;
+            CGRect s = g; s.origin.x -= 2; s.origin.y = f.origin.y; s.size.width += 4;
             if (!CGRectEqualToRect(s, f)) v.frame = s;
         }
         // ★trial3（老大指出）：底栏还有**全宽环境层**没跟着缩 —— probe3 实测两条：
