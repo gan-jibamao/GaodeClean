@@ -256,7 +256,7 @@ static void P33Watch(UIView *v, int tag) {
 #define P37_EVN 6
 #define P37_EVF 40
 #define P37_LOG 40
-typedef struct { float mx, my, px, py, a; short hid; short idx; } P37Cell;
+typedef struct { float mx, my, px, py, mw, mh, a; short hid; short idx; } P37Cell;
 typedef struct { float t; short tag, from, to, a0, a1; } P37Jmp;   // from/to 为 pt（×1）
 static P37Cell P37Ring[P37_RING][P37_MAX];
 static float P37RT[P37_RING];
@@ -323,6 +323,8 @@ static BOOL  P25Act[P37_MAX], P25WasNil[P37_MAX];
 static float P25FromX[P37_MAX], P25FromY[P37_MAX], P25FromA[P37_MAX];
 static float P25LastX[P37_MAX], P25LastY[P37_MAX], P25LastA[P37_MAX];
 static float P25StartT[P37_MAX];
+static float P25LastT[P37_MAX];
+static float P25FromW[P37_MAX], P25FromH[P37_MAX], P25LastW[P37_MAX], P25LastH[P37_MAX];
 static int   P25Frames[P37_MAX], P25Quiet[P37_MAX];
 static int   P25FromHid[P37_MAX], P25LastHid[P37_MAX];
 static NSMutableString *P25Buf;
@@ -353,7 +355,7 @@ static NSString *P25Name(int i) {
     return s.length ? s : @"?";
 }
 
-static void P25Episode(int i, float x, float y, float a, int hid, float t) {
+static void P25Episode(int i, float x, float y, float w, float h, float a, int hid, float t) {
     if (i < 0 || i >= P37_MAX) return;
     if (P25WasNil[i]) {                    // 弱引用恢复：重置基线并记一行
         P25WasNil[i] = NO; P25Act[i] = NO;
@@ -363,23 +365,27 @@ static void P25Episode(int i, float x, float y, float a, int hid, float t) {
         return;
     }
     BOOL moved = (fabsf(x - P25LastX[i]) > 0.5f || fabsf(y - P25LastY[i]) > 0.5f
+                  || fabsf(w - P25LastW[i]) > 0.5f || fabsf(h - P25LastH[i]) > 0.5f
                   || fabsf(a - P25LastA[i]) > 0.02f || hid != P25LastHid[i]);
     if (moved) {
         if (!P25Act[i]) {                  // 开新段落
             P25Act[i] = YES;
             P25FromX[i] = P25LastX[i]; P25FromY[i] = P25LastY[i];
             P25FromA[i] = P25LastA[i]; P25FromHid[i] = P25LastHid[i];
+            P25FromW[i] = P25LastW[i]; P25FromH[i] = P25LastH[i];
             P25StartT[i] = t; P25Frames[i] = 0;
         }
         P25LastX[i] = x; P25LastY[i] = y; P25LastA[i] = a; P25LastHid[i] = hid;
+        P25LastW[i] = w; P25LastH[i] = h; P25LastT[i] = t;
         P25Frames[i]++; P25Quiet[i] = 0;
     } else if (P25Act[i] && ++P25Quiet[i] >= P25_QUIET) {   // 静止 3 帧 → 收笔
         P25Act[i] = NO;
         P25Append([NSString stringWithFormat:
-            @"t=%.2f→%.2f (%d帧) %@ (%.1f,%.1f)→(%.1f,%.1f) d=(%+.1f,%+.1f) a=%.2f→%.2f hid=%d→%d\n",
-            P25StartT[i], t, P25Frames[i], P25Name(i),
+            @"t=%.2f→%.2f (%d帧) %@ (%.1f,%.1f)→(%.1f,%.1f) d=(%+.1f,%+.1f) sz=%.0fx%.0f→%.0fx%.0f a=%.2f→%.2f hid=%d→%d\n",
+            P25StartT[i], P25LastT[i], P25Frames[i], P25Name(i),
             P25FromX[i], P25FromY[i], P25LastX[i], P25LastY[i],
             P25LastX[i] - P25FromX[i], P25LastY[i] - P25FromY[i],
+            P25FromW[i], P25FromH[i], P25LastW[i], P25LastH[i],
             P25FromA[i], P25LastA[i], P25FromHid[i], P25LastHid[i]]);
     }
 }
@@ -420,26 +426,31 @@ static BOOL  P25PAct[P37_MAX];
 static float P25PFromX[P37_MAX], P25PFromY[P37_MAX];
 static float P25PLastX[P37_MAX], P25PLastY[P37_MAX];
 static float P25PStartT[P37_MAX];
+static float P25PLastT[P37_MAX];
+static float P25PFromW[P37_MAX], P25PFromH[P37_MAX], P25PLastW[P37_MAX], P25PLastH[P37_MAX];
 static int   P25PFrames[P37_MAX], P25PQuiet[P37_MAX];
 
-static void P25EpisodeP(int i, float x, float y, float t) {
+static void P25EpisodeP(int i, float x, float y, float w, float h, float t) {
     if (i < 0 || i >= P37_MAX) return;
-    BOOL moved = (fabsf(x - P25PLastX[i]) > 0.5f || fabsf(y - P25PLastY[i]) > 0.5f);
+    BOOL moved = (fabsf(x - P25PLastX[i]) > 0.5f || fabsf(y - P25PLastY[i]) > 0.5f
+                  || fabsf(w - P25PLastW[i]) > 0.5f || fabsf(h - P25PLastH[i]) > 0.5f);
     if (moved) {
         if (!P25PAct[i]) {
             P25PAct[i] = YES;
             P25PFromX[i] = P25PLastX[i]; P25PFromY[i] = P25PLastY[i];
+            P25PFromW[i] = P25PLastW[i]; P25PFromH[i] = P25PLastH[i];
             P25PStartT[i] = t; P25PFrames[i] = 0;
         }
-        P25PLastX[i] = x; P25PLastY[i] = y;
+        P25PLastX[i] = x; P25PLastY[i] = y; P25PLastW[i] = w; P25PLastH[i] = h; P25PLastT[i] = t;
         P25PFrames[i]++; P25PQuiet[i] = 0;
     } else if (P25PAct[i] && ++P25PQuiet[i] >= P25_QUIET) {
         P25PAct[i] = NO;
         P25Append([NSString stringWithFormat:
-            @"t=%.2f→%.2f (%d帧) P %@ (%.1f,%.1f)→(%.1f,%.1f) d=(%+.1f,%+.1f)\n",
-            P25PStartT[i], t, P25PFrames[i], P25Name(i),
+            @"t=%.2f→%.2f (%d帧) P %@ (%.1f,%.1f)→(%.1f,%.1f) d=(%+.1f,%+.1f) sz=%.0fx%.0f→%.0fx%.0f\n",
+            P25PStartT[i], P25PLastT[i], P25PFrames[i], P25Name(i),
             P25PFromX[i], P25PFromY[i], P25PLastX[i], P25PLastY[i],
-            P25PLastX[i] - P25PFromX[i], P25PLastY[i] - P25PFromY[i]]);
+            P25PLastX[i] - P25PFromX[i], P25PLastY[i] - P25PFromY[i],
+            P25PFromW[i], P25PFromH[i], P25PLastW[i], P25PLastH[i]]);
     }
 }
 
@@ -475,8 +486,15 @@ static int P26Collect(UIWindow *win, P26Node *out, int max) {
 }
 
 static void P26LogNode(char kind, const P26Node *c, const P26Node *p, float t) {
-    if (P26Lines >= 60) { P26Skipped++; return; }
-    P26Lines++;
+    if (kind == '~') {
+        // probe28(A4)：先做显著性过滤再占配额，避免路名标签把网眼堵死
+        BOOL big = (c->h >= 30.0f || fabsf(c->x - p->x) >= 8.0f || fabsf(c->y - p->y) >= 8.0f
+                    || fabsf(c->w - p->w) >= 8.0f || fabsf(c->h - p->h) >= 8.0f);
+        BOOL vis2 = (fabsf(c->a - p->a) > 0.02f || c->hid != p->hid || c->z != p->z);
+        if (!big && !vis2) { P26Skipped++; return; }
+        if (P26Lines >= 120) { P26Skipped++; return; }
+        P26Lines++;
+    }
     if (kind == '~') {
         BOOL moved = (fabsf(c->x - p->x) > 0.5f || fabsf(c->y - p->y) > 0.5f
                       || fabsf(c->w - p->w) > 0.5f || fabsf(c->h - p->h) > 0.5f);
@@ -549,6 +567,7 @@ static void P37Sample(void) {
         if (v.window && v.superview) {
             CGRect mr = [v convertRect:v.bounds toView:v.window];
             c->mx = (float)mr.origin.x; c->my = (float)mr.origin.y;
+            c->mw = (float)mr.size.width; c->mh = (float)mr.size.height;
             CALayer *pl = v.layer.presentationLayer;
             CALayer *svp = v.superview.layer.presentationLayer;
             if (pl && svp && v.window.layer) {
@@ -565,8 +584,8 @@ static void P37Sample(void) {
                 if (jumpIdx < 0) { jumpIdx = i; jumpFrom = -1; jumpTo = -1; jumpA0 = c->a; jumpA1 = c->a; }
             }
             P37LastPtr[i] = p;
-            P25Episode(i, c->mx, c->my, c->a, c->hid, t);
-            P25EpisodeP(i, c->px, c->py, t);
+            P25Episode(i, c->mx, c->my, c->mw, c->mh, c->a, c->hid, t);
+            P25EpisodeP(i, c->px, c->py, c->mw, c->mh, t);
             if (P37LastPy[i] > 0 && fabsf(c->py - P37LastPy[i]) > 0.5f) {
                 P37Jumps[i]++;
                 if (jumpIdx < 0) { jumpIdx = i; jumpFrom = P37LastPy[i]; jumpTo = c->py; jumpA0 = c->a; jumpA1 = c->a; }
@@ -2741,6 +2760,7 @@ static void GCStyleMapTypeAlign(UIWindow *win) {
     if (!win) return;
     UIView *mt = CachedMapType;
     if (!mt || !mt.window) return;
+    if (mt.hidden || mt.alpha < 0.05f) return;   // probe28(A5)：隐形时不钉，避免与 App 隐藏态打架
     UIView *cap = (CachedLiteGroup && CachedLiteGroup.window) ? (UIView *)CachedLiteGroup : (UIView *)CachedRight;
     if (!cap || !cap.window) return;                       // 无胶囊 ⇒ 无参照，不动
     CGRect cr = [cap convertRect:cap.bounds toView:win];
@@ -2754,8 +2774,8 @@ static void GCStyleMapTypeAlign(UIWindow *win) {
     [mt.layer removeAllAnimations];
     mt.frame = f;
 #ifdef GAODECLEAN_PROBE
-    P25Append([NSString stringWithFormat:@"t=%.2f PIN 2D钮 y %.1f→%.1f\n",
-               P7Now(), CGRectGetMaxY(mr), targetBottom]);
+    P25Append([NSString stringWithFormat:@"t=%.2f PIN 2D钮 y %.1f→%.1f a=%.2f hid=%d\n",
+               P7Now(), CGRectGetMaxY(mr), targetBottom, mt.alpha, mt.hidden ? 1 : 0]);
 #endif
     [CATransaction commit];
 }
