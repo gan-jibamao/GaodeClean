@@ -18,7 +18,7 @@
 // ---- jibamao 个人标识（编译进 dylib，可用 strings 核对）----
 static NSString *const kGCAuthor      = @"jibamao";
 static NSString *const kGCRepo        = @"https://gan-jibamao.github.io/";
-static NSString *const kGCVersion     = @"0.9.60+trial43";
+static NSString *const kGCVersion     = @"0.9.61+trial44";
 
 // 0.9.18（A1）：底边间隙**按控件分开**，对表原生（搜索栏白底顶边 = 702.6pt）
 //   车机钮（连接车机 · WINDeviceInterconnectWidget）：原生底 652 → 间隙 50.6 → 取 50
@@ -131,12 +131,22 @@ static CGFloat GCPinBottom(UIWindow *win) {
     CGFloat sh = win ? win.bounds.size.height : 852.0;
     CGFloat fb = sh - 81 - 16;
     UIView *tb = CachedTabBar;
+    CGFloat raw = fb;
     if (win && tb && tb.window == win) {
         CGRect r = GCModelWinRect(tb, win);   // trial43(D1)：底栏也用模型层，避免动画期整组按钮跟着漂
         if (r.size.height > 20 && r.size.height < 140 && r.origin.y > sh * 0.30)
-            return r.origin.y - 13.0;
+            raw = r.origin.y - 13.0;
     }
-    return fb;
+    // ★trial44(E2)：0.5 秒锁定 —— App 在缩放/过渡时会连续搬动底栏；我们若逐帧跟随，
+    //   2D 钮/车机/天气行就整组跟着跑（老大看到的「2D 图标跳动」）。
+    //   规则：与锁定值相差 >0.5pt 时先不动，连续偏离满 0.5s 才采纳新值
+    //   ⇒ 瞬态动画被忽略，真实布局变更（换机型/切页）仍会跟上。
+    static CGFloat locked; static double stableSince; static BOOL has;
+    double now = CACurrentMediaTime();
+    if (!has) { locked = raw; stableSince = now; has = YES; return locked; }
+    if (fabs(raw - locked) <= 0.5) { stableSince = now; return locked; }
+    if (now - stableSince > 0.5) { locked = raw; stableSince = now; }
+    return locked;
 }
 static int BarFixStalls;      // 0.6.8：早退续窗次数上限，防止 8ms 自旋
 static int BarFixIdle;        // 0.6.9：连续「无改动」拍数，够了就立刻收窗
@@ -629,11 +639,13 @@ static void P43Snap(void) {
     }
     [s appendString:P43One(@"天气", (UIView *)P7RowMir, w)];
     [s appendString:P43One(@"底栏", CachedTabBar, w)];
+    if (CachedTabBar)   // trial44：记录底栏 transform（a=缩放, ty=平移）—— 判定 App 是否用缩放挤按钮
+        [s appendString:[NSString stringWithFormat:@" 栏T=%.2f,%.2f", CachedTabBar.transform.a, CachedTabBar.transform.ty]];
     if (CachedTabBar) {
         NSArray *subs = [CachedTabBar.subviews copy];
         int k = 0;
         for (UIView *sv in subs) {
-            if (![NSStringFromClass(sv.class) isEqualToString:GCStrAt(150)]) continue;  // WINTabBarItem
+            if (![NSStringFromClass(sv.class) isEqualToString:GCStrAt(149)]) continue;  // WINTabBarItem（trial44：索引 150 是“Tip”）
             [s appendString:P43One([NSString stringWithFormat:@"钮%d", k++], sv, w)];
             if (k >= 3) break;
         }
@@ -2681,7 +2693,7 @@ static void GCStylePinTabItems(UIWindow *win) {
     if (!CachedTabItemA || !CachedTabItemB) {
         NSMutableArray<UIView *> *items = [NSMutableArray array];
         for (UIView *v in CachedTabBar.subviews)
-            if ([NSStringFromClass(v.class) isEqualToString:GCStrAt(150)]) [items addObject:v];  // WINTabBarItem
+            if ([NSStringFromClass(v.class) isEqualToString:GCStrAt(149)]) [items addObject:v];  // WINTabBarItem（trial44：索引原写 150=“Tip”，导致本函数空转）
         if (items.count < 2) return;
         [items sortUsingComparator:^NSComparisonResult(UIView *a, UIView *b) {
             return a.frame.origin.x < b.frame.origin.x ? NSOrderedAscending : NSOrderedDescending;
@@ -2693,6 +2705,12 @@ static void GCStylePinTabItems(UIWindow *win) {
     for (int i = 0; i < 2; i++) {
         UIView *it = arr[i];
         if (!it || !it.superview || !it.window) continue;
+        if (!CGAffineTransformIsIdentity(it.transform)) {   // trial44(E3)：App 用缩放把两钮往中间挤
+            [CATransaction begin]; [CATransaction setDisableActions:YES];
+            [it.layer removeAllAnimations];
+            it.transform = CGAffineTransformIdentity;
+            [CATransaction commit];
+        }
         CGFloat wantX = c + (i == 0 ? -off : off) - d * 0.5;          // 目标左沿（窗口系）
         CGFloat localX = [it.superview convertPoint:CGPointMake(wantX, 0) fromView:win].x;
         if (fabs(it.frame.origin.x - localX) > 0.5) {
