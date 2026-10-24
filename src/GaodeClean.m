@@ -18,7 +18,7 @@
 // ---- jibamao 个人标识（编译进 dylib，可用 strings 核对）----
 static NSString *const kGCAuthor      = @"jibamao";
 static NSString *const kGCRepo        = @"https://gan-jibamao.github.io/";
-static NSString *const kGCVersion     = @"0.9.33+trial25";
+static NSString *const kGCVersion     = @"0.9.34+probe8";
 
 // 0.9.18（A1）：底边间隙**按控件分开**，对表原生（搜索栏白底顶边 = 702.6pt）
 //   车机钮（连接车机 · WINDeviceInterconnectWidget）：原生底 652 → 间隙 50.6 → 取 50
@@ -163,6 +163,32 @@ static void P7Write(int idx, CGRect before, CGRect after, CGRect contWin) {
     if (P7Writes[idx] <= 8 || P7Writes[idx] % 40 == 0)
         P7Note(@"WRITE#%d n=%d before=%@ after=%@ cont=%@", idx, P7Writes[idx],
                NSStringFromCGRect(before), NSStringFromCGRect(after), NSStringFromCGRect(contWin));
+}
+// ══ probe8：2D/3D 切换车机位漂移定罪（帧级 presentation 分歧 + 驱动率 + 容器钩子）══
+static long P8Fires, P8Busy, P8NoWin, P8ContHooks, P8Diverge;
+static double P8CarMinY = 1e9, P8CarMaxY = -1e9, P8LastDvLog = -100;
+static NSMutableSet<NSString *> *GCStylePosHookedClasses(void);   // dump 打印前置声明（定义在后）
+__attribute__((unused)) static void P8Trace(void) {
+    P8Fires++;
+    UIView *car = CachedCar;
+    if (!car || !car.window) return;
+    double y = P7WR(car).origin.y;
+    if (y < P8CarMinY) P8CarMinY = y;
+    if (y > P8CarMaxY) P8CarMaxY = y;
+    // 分歧检测：车机自身 layer + 祖先链 —— presentationLayer.frame ≠ layer.frame
+    //   ⇒ 该层正被动画/过渡驱动（写模型层拦不住显示层），当场抓出类名与动画键
+    for (UIView *v = car; v && v != v.window; v = v.superview) {
+        CALayer *pl = v.layer.presentationLayer;
+        if (pl && !CGRectEqualToRect(pl.frame, v.layer.frame)) {
+            P8Diverge++;
+            if (P7Now() - P8LastDvLog > 0.4) {
+                P8LastDvLog = P7Now();
+                P7Note(@"P8DIVERGE %@ model=%@ pres=%@ keys=%@", NSStringFromClass(v.class),
+                       NSStringFromCGRect(v.layer.frame), NSStringFromCGRect(pl.frame), v.layer.animationKeys ?: @[]);
+            }
+            break;
+        }
+    }
 }
 #endif
 static void GCNarrowApply(UIView *anchor, BOOL isSearch); // 0.9.28 缩窄：点对点夹取
@@ -1329,6 +1355,32 @@ static void GCProbeDump7(NSString *reason) {
     [o appendFormat:@"写入次数: 车机=%d 胶囊=%d 路线=%d 2D=%d\n", P7Writes[0], P7Writes[1], P7Writes[2], P7Writes[3]];
     [o appendFormat:@"时间线(s): 车机 见=%.1f 钉=%.1f | 胶囊 %.1f/%.1f | 路线 %.1f/%.1f | 天气门首过=%.1f | KEY=%.1f\n",
         P7FirstSeen[0], P7FirstPin[0], P7FirstSeen[1], P7FirstPin[1], P7FirstSeen[2], P7FirstPin[2], P7FirstSeen[4], P7FirstKey];
+    [o appendFormat:@"P8驱动: fires=%ld(%.0f/s) busySkip=%ld noWin=%ld 容器钩=%ld 分歧帧=%ld 车机Y[min=%.1f max=%.1f 跨度=%.1f]\n",
+        P8Fires, P8Fires / (P7Now() > 0.5 ? P7Now() : 0.5), P8Busy, P8NoWin, P8ContHooks, P8Diverge,
+        P8CarMinY > 1e8 ? -1.0 : P8CarMinY, P8CarMaxY < -1e8 ? -1.0 : P8CarMaxY,
+        (P8CarMinY > 1e8 || P8CarMaxY < -1e8) ? -1.0 : P8CarMaxY - P8CarMinY];
+    if (CachedCar) {
+        CALayer *p8pl = CachedCar.layer.presentationLayer;
+        NSMutableString *p8tf = [NSMutableString string];
+        for (UIView *v = CachedCar; v && v != v.window; v = v.superview)
+            if (!CGAffineTransformIsIdentity(v.transform))
+                [p8tf appendFormat:@"%@=%@ ", NSStringFromClass(v.class), NSStringFromCGAffineTransform(v.transform)];
+        [o appendFormat:@"P8车机: ptr=%p win=%@ model=%@ pres=%@ animKeys=%@ transform=%@ 祖先变换=%@ sup=%@\n",
+            (__bridge void *)CachedCar, NSStringFromCGRect(P7WR(CachedCar)),
+            NSStringFromCGRect(CachedCar.layer.frame),
+            p8pl ? NSStringFromCGRect(p8pl.frame) : @"(无分歧)",
+            CachedCar.layer.animationKeys ?: @[],
+            NSStringFromCGAffineTransform(CachedCar.transform),
+            p8tf.length ? p8tf : @"(全identity)",
+            NSStringFromClass(CachedCar.superview.class)];
+    } else {
+        [o appendString:@"P8车机: CachedCar=nil\n"];
+    }
+    [o appendFormat:@"P8容器类: MapWidget=%d SideBar=%d GDTrans=%d 已挂=%@\n",
+        NSClassFromString(@"MapWidgetContainerView") != nil,
+        NSClassFromString(@"WINMapSideBarWidgetContainerView") != nil,
+        NSClassFromString(@"GDTransparentView") != nil,
+        [GCStylePosHookedClasses() allObjects]];
     [o appendString:@"---[缓存实例现状]---\n"];
     P7Inst(o, "车机", CachedCar);
     P7Inst(o, "右下", CachedRight);
@@ -1338,6 +1390,7 @@ static void GCProbeDump7(NSString *reason) {
     P7LiveScan(o);
     [o appendString:@"---[事件日志(近段)]---\n"];
     [o appendString:P7Log ?: @"(空)\n"];
+    P8CarMinY = 1e9; P8CarMaxY = -1e9;   // probe8：每段 dump 的车机 Y 跨度独立统计
     NSMutableString *full = [NSMutableString string];
     if (GCProbeBuf6.length > 100000)
         [full appendString:[GCProbeBuf6 substringFromIndex:GCProbeBuf6.length - 100000]];
@@ -1353,7 +1406,7 @@ static void GCProbeDump7(NSString *reason) {
 __attribute__((unused)) static void GCProbeTick7(void) {
     static int stage = 0;
     double dt = P7Now();
-    int want = (dt > 60) ? 5 : (dt > 45) ? 4 : (dt > 30) ? 3 : (dt > 15) ? 2 : (dt > 5) ? 1 : 0;
+    int want = (dt > 120) ? 7 : (dt > 90) ? 6 : (dt > 60) ? 5 : (dt > 45) ? 4 : (dt > 30) ? 3 : (dt > 15) ? 2 : (dt > 5) ? 1 : 0;
     if (want > stage) { stage = want; GCProbeDump7([NSString stringWithFormat:@"p7定时%d", want]); }
 }
 #endif
@@ -1475,6 +1528,9 @@ static void GCStyleHookContainerPos(Class rc) {
         const char *t = method_getTypeEncoding(mf);
         Replace(rc, @selector(setFrame:), imp_implementationWithBlock(^(UIView *self, CGRect f) {
             ((void (*)(id, SEL, CGRect))o)(self, @selector(setFrame:), f);
+#ifdef GAODECLEAN_PROBE
+            P8ContHooks++;
+#endif
             GCStylePinWidgets(self.window);
         }), t);
     }
@@ -1598,7 +1654,12 @@ static void GCStylePinWidgetsInner(UIWindow *win) {   // trial25(A2)：原体改
 //   四路并发，写 frame 会级联触发钩子，无守卫有自激风暴风险。
 static BOOL GCStylePinBusy = NO;
 static void GCStylePinWidgets(UIWindow *win) {
-    if (GCStylePinBusy) return;
+    if (GCStylePinBusy) {
+#ifdef GAODECLEAN_PROBE
+        P8Busy++;
+#endif
+        return;
+    }
     GCStylePinBusy = YES;
     GCStylePinWidgetsInner(win);
     GCStylePinBusy = NO;
@@ -1612,6 +1673,9 @@ static void GCStylePinWidgets(UIWindow *win) {
 @end
 @implementation GCStylePinDriver
 - (void)fire {
+#ifdef GAODECLEAN_PROBE
+    P8Trace();
+#endif
     UIView *av = CachedCar ?: CachedRight ?: CachedRoute;
     UIWindow *pw = av.window ?: CachedTabBar.window ?: SearchBarView.window;
     if (!pw) {
@@ -1619,7 +1683,12 @@ static void GCStylePinWidgets(UIWindow *win) {
             if (!x.hidden && x.bounds.size.width >= 200) { pw = x; break; }
         }
     }
-    if (!pw) return;
+    if (!pw) {
+#ifdef GAODECLEAN_PROBE
+        P8NoWin++;
+#endif
+        return;
+    }
     GCStylePinWidgets(pw);
     AlignWeatherRowTick(pw);   // 天气行同享帧级跟随（probe7：天气门首过=1.2s 慢门）
 }
