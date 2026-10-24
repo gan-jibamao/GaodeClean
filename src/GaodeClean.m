@@ -18,7 +18,7 @@
 // ---- jibamao 个人标识（编译进 dylib，可用 strings 核对）----
 static NSString *const kGCAuthor      = @"jibamao";
 static NSString *const kGCRepo        = @"https://gan-jibamao.github.io/";
-static NSString *const kGCVersion     = @"0.9.49+probe12";
+static NSString *const kGCVersion     = @"0.9.50+probe13";
 
 // 0.9.18（A1）：底边间隙**按控件分开**，对表原生（搜索栏白底顶边 = 702.6pt）
 //   车机钮（连接车机 · WINDeviceInterconnectWidget）：原生底 652 → 间隙 50.6 → 取 50
@@ -427,7 +427,7 @@ static void P39Sample(void) {
             [q addObjectsFromArray:x.subviews];
             if (x.layer.contents && x.alpha > 0.05 && !x.hidden && x.layer.opacity > 0.05) anyContent = YES;
         }
-        int inkBad = (!anyContent && bgA < 0.1) ? 1 : 0;
+        int inkBad = anyContent ? 0 : 1;   // probe13：只看内容层（bgA 是我们写的白底，不算墨）
         if (inkBad != P39LastInkBad) {
             P39LastInkBad = inkBad;
             NSMutableString *s = [NSMutableString stringWithFormat:
@@ -438,6 +438,70 @@ static void P39Sample(void) {
             P39Store(P39Ink, s);
         }
     }
+}
+// ══ probe13：替身/可见性取证（纯只读）══
+//   probe12 教训：墨量判据把「我们自己写的白底」当成墨 ⇒ 永远判不出透明；
+//   且未检查祖先与 window 可见性、未查是否存在第二个实例。
+static NSString *P40WeatherList(void) {
+    NSMutableString *s = [NSMutableString string];
+    for (UIWindow *w in GCAllWindows()) {
+        NSMutableArray *q = [NSMutableArray arrayWithObject:w];
+        for (NSUInteger i = 0; i < q.count && q.count < 2000; i++) {
+            UIView *v = q[i];
+            [q addObjectsFromArray:v.subviews];
+            if (!v.window) continue;
+            if (!IsWeatherRowClass(NSStringFromClass(v.class))) continue;
+            [s appendFormat:@"%@ %@ a=%.2f h=%d%@ winh=%d wina=%.2f / ",
+                NSStringFromClass(v.class), NSStringFromCGRect([v convertRect:v.bounds toView:nil]),
+                v.alpha, (int)v.hidden, (v == P7RowMir) ? @"★缓存" : @"",
+                (int)v.window.hidden, v.window.alpha];
+        }
+    }
+    return s.length ? s : @"(无)";
+}
+static NSString *P40BtnInfo(void) {
+    NSMutableString *s = [NSMutableString string];
+    UIView *b = Cached2D;
+    if (!b) return @"Cached2D=nil";
+    [s appendString:@"祖先链: "];
+    int n = 0;
+    for (UIView *p = b; p && n < 14; p = p.superview, n++) {
+        [s appendFormat:@"%@ h=%d a=%.2f op=%.2f | ",
+            NSStringFromClass(p.class), (int)p.hidden, p.alpha, p.layer.opacity];
+        if (p == p.window) break;
+    }
+    UIWindow *w = b.window;
+    if (w) [s appendFormat:@"window h=%d a=%.2f bounds=%@ key=%d | ",
+        (int)w.hidden, w.alpha, NSStringFromCGRect(w.bounds), (int)w.isKeyWindow];
+    [s appendString:@"候选: "];
+    Class cItem = NSClassFromString(@"WINAJXCombinedItemView");
+    Class cLot = NSClassFromString(@"LOTAnimationView");
+    int cnt = 0;
+    for (UIWindow *ww in GCAllWindows()) {
+        NSMutableArray *q = [NSMutableArray arrayWithObject:ww];
+        for (NSUInteger i = 0; i < q.count && q.count < 2000; i++) {
+            UIView *v = q[i];
+            [q addObjectsFromArray:v.subviews];
+            if (!v.window) continue;
+            CGRect r = [v convertRect:v.bounds toView:nil];
+            if (r.size.width < 30 || r.size.width > 60) continue;
+            if (fabs(r.size.width - r.size.height) > 10) continue;
+            if (CGRectGetMidX(r) < v.window.bounds.size.width - 64) continue;
+            BOOL hit = NO;
+            NSMutableArray *qq = [NSMutableArray arrayWithObject:v];
+            for (NSUInteger k = 0; k < qq.count && k < 20; k++) {
+                UIView *x = qq[k];
+                [qq addObjectsFromArray:x.subviews];
+                if ((cItem && [x isKindOfClass:cItem]) || (cLot && [x isKindOfClass:cLot])) { hit = YES; break; }
+            }
+            if (!hit) continue;
+            cnt++;
+            [s appendFormat:@"%@ %@ a=%.2f h=%d%@ / ", NSStringFromClass(v.class), NSStringFromCGRect(r),
+                v.alpha, (int)v.hidden, (v == b) ? @"★我们盯的" : @""];
+        }
+    }
+    if (!cnt) [s appendString:@"(无)"];
+    return s;
 }
 #endif
 #endif
@@ -1767,6 +1831,8 @@ static void GCProbeDump7(NSString *reason) {
         for (NSString *s39 in P39Wx) [o appendFormat:@"  · %@\n", s39];
         [o appendFormat:@"P39墨量快照(%lu份)\n", (unsigned long)(P39Ink ? P39Ink.count : 0)];
         for (NSString *s39 in P39Ink) [o appendFormat:@"  · %@\n", s39];
+        [o appendFormat:@"P40天气实例: %@\n", P40WeatherList()];
+        [o appendFormat:@"P40 2D钮: %@\n", P40BtnInfo()];
     }
 #endif
     if (CachedCar) {
