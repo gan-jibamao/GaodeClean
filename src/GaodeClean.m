@@ -342,6 +342,8 @@ static void P25Flush(void) {
 
 static void P25Append(NSString *s) {
     if (!P25Buf) P25Buf = [NSMutableString string];
+    static BOOL hdr;
+    if (!hdr) { hdr = YES; [P25Buf appendFormat:@"\n===== 构建 %@ =====\n", kGCVersion]; }
     [P25Buf appendString:s];
     if (P25Buf.length > 8192) P25Flush();
 }
@@ -382,6 +384,8 @@ static void P25Episode(int i, float x, float y, float a, int hid, float t) {
     }
 }
 
+static void *P25Ptr[P37_MAX];          // 独立实例基线：不被 P37RefreshTargets 清零
+
 static void P25Swap(int i, float x, float y, float a, int hid, float t) {
     if (i < 0 || i >= P37_MAX) return;
     P25Act[i] = NO; P25Quiet[i] = 0; P25WasNil[i] = NO;
@@ -391,7 +395,15 @@ static void P25Swap(int i, float x, float y, float a, int hid, float t) {
 
 static long P25FrameCnt;
 static double P25FpsT0;
+static void P25EnvOnce(void) {
+    static BOOL done;
+    if (done) return; done = YES;
+    id v = NSBundle.mainBundle.infoDictionary[@"CADisableMinimumFrameDurationOnPhone"];
+    P25Append([NSString stringWithFormat:@"环境: CADisableMinimumFrameDurationOnPhone=%@ 屏上限=%ld\n",
+               v ?: @"（缺失）", (long)UIScreen.mainScreen.maximumFramesPerSecond]);
+}
 static void P25FpsTick(void) {
+    P25EnvOnce();
     P25FrameCnt++;
     double now = CACurrentMediaTime();
     if (P25FpsT0 <= 0) { P25FpsT0 = now; return; }
@@ -401,6 +413,119 @@ static void P25FpsTick(void) {
                    P7Now(), P25FrameCnt / dt, (long)UIScreen.mainScreen.maximumFramesPerSecond]);
         P25FrameCnt = 0; P25FpsT0 = now;
     }
+}
+
+// ── A1：表现层（CAAnimation 的屏幕上位置）独立通道 ──────────────────────
+static BOOL  P25PAct[P37_MAX];
+static float P25PFromX[P37_MAX], P25PFromY[P37_MAX];
+static float P25PLastX[P37_MAX], P25PLastY[P37_MAX];
+static float P25PStartT[P37_MAX];
+static int   P25PFrames[P37_MAX], P25PQuiet[P37_MAX];
+
+static void P25EpisodeP(int i, float x, float y, float t) {
+    if (i < 0 || i >= P37_MAX) return;
+    BOOL moved = (fabsf(x - P25PLastX[i]) > 0.5f || fabsf(y - P25PLastY[i]) > 0.5f);
+    if (moved) {
+        if (!P25PAct[i]) {
+            P25PAct[i] = YES;
+            P25PFromX[i] = P25PLastX[i]; P25PFromY[i] = P25PLastY[i];
+            P25PStartT[i] = t; P25PFrames[i] = 0;
+        }
+        P25PLastX[i] = x; P25PLastY[i] = y;
+        P25PFrames[i]++; P25PQuiet[i] = 0;
+    } else if (P25PAct[i] && ++P25PQuiet[i] >= P25_QUIET) {
+        P25PAct[i] = NO;
+        P25Append([NSString stringWithFormat:
+            @"t=%.2f→%.2f (%d帧) P %@ (%.1f,%.1f)→(%.1f,%.1f) d=(%+.1f,%+.1f)\n",
+            P25PStartT[i], t, P25PFrames[i], P25Name(i),
+            P25PFromX[i], P25PFromY[i], P25PLastX[i], P25PLastY[i],
+            P25PLastX[i] - P25PFromX[i], P25PLastY[i] - P25PFromY[i]]);
+    }
+}
+
+// ── A2：全树差分（20Hz 兜底，不再依赖 12 个白名单目标）────────────────
+#define P26_MAXN 1200
+typedef struct { void *p; float x, y, w, h, a; int hid; int z; uintptr_t cls; } P26Node;
+static P26Node P26Cur[P26_MAXN], P26Prev[P26_MAXN];
+static int P26NPrev, P26Tick;
+static int P26Lines, P26Skipped;          // 限流：每秒最多 60 行，超出只计数
+
+static int P26Cmp(const void *a, const void *b) {
+    const P26Node *x = a, *y = b;
+    return (x->p < y->p) ? -1 : (x->p > y->p) ? 1 : 0;
+}
+
+static int P26Collect(UIWindow *win, P26Node *out, int max) {
+    int n = 0;
+    NSMutableArray *st = [NSMutableArray arrayWithObject:win];
+    while (st.count && n < max) {
+        UIView *v = [st lastObject]; [st removeLastObject];
+        CGRect r = [v convertRect:v.bounds toView:win];
+        if (CGRectGetMaxY(r) < 0 || r.origin.y > win.bounds.size.height) continue;
+        P26Node *d = &out[n++];
+        d->p = (__bridge void *)v;
+        d->x = (float)r.origin.x; d->y = (float)r.origin.y;
+        d->w = (float)r.size.width; d->h = (float)r.size.height;
+        d->a = (float)v.alpha; d->hid = v.hidden ? 1 : 0;
+        d->z = (int)[v.superview.subviews indexOfObject:v];
+        d->cls = (uintptr_t)v.class;
+        if (!v.hidden && v.alpha > 0.01f) [st addObjectsFromArray:v.subviews];
+    }
+    return n;
+}
+
+static void P26LogNode(char kind, const P26Node *c, const P26Node *p, float t) {
+    if (P26Lines >= 60) { P26Skipped++; return; }
+    P26Lines++;
+    if (kind == '~') {
+        BOOL moved = (fabsf(c->x - p->x) > 0.5f || fabsf(c->y - p->y) > 0.5f
+                      || fabsf(c->w - p->w) > 0.5f || fabsf(c->h - p->h) > 0.5f);
+        BOOL vis = (fabsf(c->a - p->a) > 0.02f || c->hid != p->hid || c->z != p->z);
+        if (!moved && !vis) return;
+        if (moved) {
+            P25Append([NSString stringWithFormat:
+                @"t=%.2f ~ %@ (%.1f,%.1f,%.1f,%.1f)→(%.1f,%.1f,%.1f,%.1f) d=(%+.1f,%+.1f)\n",
+                t, NSStringFromClass((__bridge id)(void *)c->cls),
+                p->x, p->y, p->w, p->h, c->x, c->y, c->w, c->h,
+                c->x - p->x, c->y - p->y]);
+        }
+        if (vis) {
+            P25Append([NSString stringWithFormat:@"t=%.2f ~ %@ a=%.2f→%.2f hid=%d→%d z=%d→%d\n",
+                t, NSStringFromClass((__bridge id)(void *)c->cls),
+                p->a, c->a, p->hid, c->hid, p->z, c->z]);
+        }
+        return;
+    }
+    P25Append([NSString stringWithFormat:@"t=%.2f %c %@ (%.1f,%.1f,%.1f,%.1f) a=%.2f hid=%d\n",
+               t, kind, NSStringFromClass((__bridge id)(void *)c->cls),
+               c->x, c->y, c->w, c->h, c->a, c->hid]);
+}
+
+static void P26TreeDiff(UIWindow *win, float t) {
+    if (!win) return;
+    static int calls;
+    if (++calls % 20 == 0) {               // 每 20 次(≈1秒)重置配额
+        if (P26Skipped) P25Append([NSString stringWithFormat:@"t=%.2f （全树差分超限，省略 %d 条）\n", t, P26Skipped]);
+        P26Lines = 0; P26Skipped = 0;
+    }
+    int n = P26Collect(win, P26Cur, P26_MAXN);
+    if (P26NPrev == 0) {                       // 首帧只建基线，不刷 1200 行"+"
+        memcpy(P26Prev, P26Cur, sizeof(P26Node) * (size_t)n);
+        P26NPrev = n;
+        return;
+    }
+    qsort(P26Cur, (size_t)n, sizeof(P26Node), P26Cmp);
+    qsort(P26Prev, (size_t)P26NPrev, sizeof(P26Node), P26Cmp);
+    int i = 0, j = 0;
+    while (i < n || j < P26NPrev) {
+        if (j >= P26NPrev) { P26LogNode('+', &P26Cur[i], NULL, t); i++; continue; }
+        if (i >= n)        { P26LogNode('-', &P26Prev[j], NULL, t); j++; continue; }
+        if (P26Cur[i].p < P26Prev[j].p)      { P26LogNode('+', &P26Cur[i], NULL, t); i++; }
+        else if (P26Cur[i].p > P26Prev[j].p) { P26LogNode('-', &P26Prev[j], NULL, t); j++; }
+        else { P26LogNode('~', &P26Cur[i], &P26Prev[j], t); i++; j++; }
+    }
+    memcpy(P26Prev, P26Cur, sizeof(P26Node) * (size_t)n);
+    P26NPrev = n;
 }
 
 static void P25Lost(int i, float t) {
@@ -431,15 +556,17 @@ static void P37Sample(void) {
                 c->px = (float)pr.origin.x; c->py = (float)pr.origin.y;
             } else { c->px = c->mx; c->py = c->my; }
             void *p = (__bridge void *)v;
-            if (P37LastPtr[i] && P37LastPtr[i] != p) {
+            if (P25Ptr[i] && P25Ptr[i] != p) {
                 P25Swap(i, c->mx, c->my, c->a, c->hid, t);
-                if (i < P37Fixed) {
-                    P37PtrSwap++;
-                    if (jumpIdx < 0) { jumpIdx = i; jumpFrom = -1; jumpTo = -1; jumpA0 = c->a; jumpA1 = c->a; }
-                }
+            }
+            P25Ptr[i] = p;
+            if (i < P37Fixed && P37LastPtr[i] && P37LastPtr[i] != p) {
+                P37PtrSwap++;
+                if (jumpIdx < 0) { jumpIdx = i; jumpFrom = -1; jumpTo = -1; jumpA0 = c->a; jumpA1 = c->a; }
             }
             P37LastPtr[i] = p;
             P25Episode(i, c->mx, c->my, c->a, c->hid, t);
+            P25EpisodeP(i, c->px, c->py, t);
             if (P37LastPy[i] > 0 && fabsf(c->py - P37LastPy[i]) > 0.5f) {
                 P37Jumps[i]++;
                 if (jumpIdx < 0) { jumpIdx = i; jumpFrom = P37LastPy[i]; jumpTo = c->py; jumpA0 = c->a; jumpA1 = c->a; }
@@ -2585,9 +2712,10 @@ static void GCStyleShellEnforce(void) {                    // 60fps 调用（只
 //   ⇒ 纯按类名 + 几何识别；不做任何 alpha / 白底 / 内容强制（0.9.29 就没有这些）。
 static __weak UIView *CachedMapType = nil;
 
-static void GCStyleAlignMapType(UIWindow *win) {           // 5Hz 调用
+static void GCStyleMapTypeDiscover(UIWindow *win) {        // 5Hz：只做树遍历发现
     if (!win) return;
-    if (!CachedMapType || !CachedMapType.window) {
+    if (CachedMapType && CachedMapType.window) return;
+    {
         CachedMapType = nil;
         CGFloat sw = win.bounds.size.width, sh = win.bounds.size.height;
         NSMutableArray<UIView *> *stack = [NSMutableArray arrayWithObject:win];
@@ -2606,6 +2734,11 @@ static void GCStyleAlignMapType(UIWindow *win) {           // 5Hz 调用
             break;
         }
     }
+}
+
+// trial51(A4)：纯几何对齐，无树遍历 ⇒ 可进 60fps。App 每帧都能挪，我们每帧拉回。
+static void GCStyleMapTypeAlign(UIWindow *win) {
+    if (!win) return;
     UIView *mt = CachedMapType;
     if (!mt || !mt.window) return;
     UIView *cap = (CachedLiteGroup && CachedLiteGroup.window) ? (UIView *)CachedLiteGroup : (UIView *)CachedRight;
@@ -2620,7 +2753,16 @@ static void GCStyleAlignMapType(UIWindow *win) {           // 5Hz 调用
     [CATransaction begin]; [CATransaction setDisableActions:YES];
     [mt.layer removeAllAnimations];
     mt.frame = f;
+#ifdef GAODECLEAN_PROBE
+    P25Append([NSString stringWithFormat:@"t=%.2f PIN 2D钮 y %.1f→%.1f\n",
+               P7Now(), CGRectGetMaxY(mr), targetBottom]);
+#endif
     [CATransaction commit];
+}
+
+static void GCStyleAlignMapType(UIWindow *win) {           // 5Hz 入口：发现 + 对齐
+    GCStyleMapTypeDiscover(win);
+    GCStyleMapTypeAlign(win);
 }
 
 static BOOL GCStylePinOneBusy = NO;
@@ -3120,6 +3262,8 @@ static void GCStylePinWidgets(UIWindow *win) {
     P33Watch(CachedCar, 0);
     P33Watch((UIView *)(CachedLiteGroup && CachedLiteGroup.window ? CachedLiteGroup : CachedRight), 1);
     P33Watch(Cached2D, 2);
+    if (++P26Tick >= 3) { P26Tick = 0; P26TreeDiff(win, (float)P7Now()); }
+    GCStyleMapTypeAlign(win);   // trial51(A4)：2D/3D 钮帧级对齐（App 每帧都能挪，5Hz 追不上）
     P37Sample();
     P39Sample();
     P43Snap();
