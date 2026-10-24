@@ -18,7 +18,7 @@
 // ---- jibamao 个人标识（编译进 dylib，可用 strings 核对）----
 static NSString *const kGCAuthor      = @"jibamao";
 static NSString *const kGCRepo        = @"https://gan-jibamao.github.io/";
-static NSString *const kGCVersion     = @"0.9.36+trial27";
+static NSString *const kGCVersion     = @"0.9.37+trial28";
 
 // 0.9.18（A1）：底边间隙**按控件分开**，对表原生（搜索栏白底顶边 = 702.6pt）
 //   车机钮（连接车机 · WINDeviceInterconnectWidget）：原生底 652 → 间隙 50.6 → 取 50
@@ -1438,6 +1438,23 @@ static BOOL GCStyleIs2DBtn(UIView *v, UIWindow *win) {
     CGFloat cy = CGRectGetMidY(wr);
     if (cy < capTop - 160 || cy > capTop + 80) return NO;   // 竖带：正常位(帽上~42pt)与叠帽态都覆盖
     if (v == CachedCar || v == CachedRight || v == CachedRoute || v == CachedLiteGroup) return NO;
+    // ★trial28：决定性特征 —— 子树内须有 text 为 2D/3D 的 UILabel。
+    //   trial27 回归铁证（dump：2D钮 UIView win={{339,608},{44,44}} hid=0 + 2D=198 写入）：
+    //   纯几何特征把「定位按钮」（独立兄弟视图、44×44、恒显、capTop+14）误认成 2D 钮钉走
+    //   ⇒ 定位失效。叠帽态两钮几何完全重合，唯有 label 可区分（定位钮纯图标无 label）。
+    BOOL has2DLabel = NO;
+    @try {
+        NSMutableArray<UIView *> *q = [NSMutableArray arrayWithArray:v.subviews];
+        while (q.count) {
+            UIView *s = q.firstObject; [q removeObjectAtIndex:0];
+            if ([s isKindOfClass:[UILabel class]]) {
+                NSString *t = ((UILabel *)s).text;
+                if ([t isEqualToString:@"2D"] || [t isEqualToString:@"3D"]) { has2DLabel = YES; break; }
+            }
+            [q addObjectsFromArray:s.subviews];
+        }
+    } @catch (NSException *e28) {}
+    if (!has2DLabel) return NO;
     return YES;
 }
 static void GCStyleDiscoverWidgets(UIWindow *win) {
