@@ -18,7 +18,7 @@
 // ---- jibamao 个人标识（编译进 dylib，可用 strings 核对）----
 static NSString *const kGCAuthor      = @"jibamao";
 static NSString *const kGCRepo        = @"https://gan-jibamao.github.io/";
-static NSString *const kGCVersion     = @"0.9.62+trial45";
+static NSString *const kGCVersion     = @"0.9.63+trial46";
 
 // 0.9.18（A1）：底边间隙**按控件分开**，对表原生（搜索栏白底顶边 = 702.6pt）
 //   车机钮（连接车机 · WINDeviceInterconnectWidget）：原生底 652 → 间隙 50.6 → 取 50
@@ -641,6 +641,11 @@ static void P43Snap(void) {
     [s appendString:P43One(@"底栏", CachedTabBar, w)];
     if (CachedTabBar)   // trial44：记录底栏 transform（a=缩放, ty=平移）—— 判定 App 是否用缩放挤按钮
         [s appendString:[NSString stringWithFormat:@" 栏T=%.2f,%.2f", CachedTabBar.transform.a, CachedTabBar.transform.ty]];
+    // trial46(B2)：一眼分辨「控件还在、只是被隐藏」还是「被挪走」
+    [s appendString:[NSString stringWithFormat:@" 车机h=%d 2Dh=%d 2D父h=%d",
+                      CachedCar ? CachedCar.hidden : -1,
+                      Cached2D ? Cached2D.hidden : -1,
+                      (Cached2D && Cached2D.superview) ? Cached2D.superview.hidden : -1]];
     if (CachedTabBar) {
         NSArray *subs = [CachedTabBar.subviews copy];
         int k = 0;
@@ -2231,6 +2236,22 @@ static void GCStyleDiscoverWidgets(UIWindow *win) {
 //   我们 11Hz tick 追写 60fps 的 App ⇒ before=608/after=673 每拍拉锯、dump 瞬间停在 App 位。
 //   此函数在 App 每次写位置后同事务内改回 pin 目标 ⇒ 零拉锯零闪烁。
 // trial45(A1)：GCStylePinTwinFaces 已删除（2D/3D 还原原生）。
+// ★trial46(B1)：父容器可见性救援（只救可见性，不碰几何/外观）。
+//   证据：trial45 停用 2D 分支后，车机钮与 2D/3D 钮同时消失（老大 22:41 截图）。
+//   两者同挂 WINAJXCombinedWidgetView，App 把它 hidden 后子钮 alpha=1 也画不出来；
+//   这段救援原本嵌在 is2D 分支里，撤掉 2D 分支就把两个钮的可见性一起弄丢了。
+static void GCStyleRescueParent(UIView *v) {
+    if (!v || !v.superview || !v.window || v.hidden) return;
+    UIView *p = v.superview;
+    if (!(p.hidden || p.alpha < 0.05f || p.layer.opacity < 0.05f)) return;
+    static double last;
+    double now = CACurrentMediaTime();
+    if (now - last <= 0.3) return;   // 0.3s 冷却：不做每帧对拉
+    last = now;
+    [CATransaction begin]; [CATransaction setDisableActions:YES];
+    p.hidden = NO; p.alpha = 1.0f; p.layer.opacity = 1.0f;
+    [CATransaction commit];
+}
 static BOOL GCStylePinOneBusy = NO;
 static void GCStylePinOne(UIView *v) {
     if (!v || GCStylePinOneBusy) return;                 // 防重入：钳位自身写 frame 会再触发钩子
@@ -2241,7 +2262,7 @@ static void GCStylePinOne(UIView *v) {
     BOOL isCap = (capNow && v == capNow);
     // ★trial45(A1)：2D/3D 钮**还原原生** —— 交还 App 自己管。
     //   不再钉位置、不再写 alpha/白底、不再钳内部内容与孪生外观（四层干预全撤）。
-    if (v == Cached2D) return;
+    if (v == Cached2D) { GCStyleRescueParent(v); return; }   // 只救可见性，几何/外观交还 App
     BOOL is2D = NO;                                       // 保留变量，下方分支恒不执行
     // trial37（probe13 铁证）：hidden 期间**照钉几何**，只跳过可见性写入 ——
     //   旧 return 让 App 藏钮期间把它漂到 167/69（P37 流水 WINAJXCombinedWidgetView:167→69→667），
@@ -2256,6 +2277,7 @@ static void GCStylePinOne(UIView *v) {
         CGRect wr = [v convertRect:v.bounds toView:win];
         CGRect g;
         if (isCar) {
+            GCStyleRescueParent(v);   // trial46(B1)：车机钮同样需要父容器救援
             g = CGRectMake(10, pinBottom - 20 - 18 - wr.size.height, wr.size.width, wr.size.height);
             // ★trial35（P33 哨兵铁证：车机钮每 ~20s 被 App 把 alpha 清 0，坐标恒在 (10,673)）：
             //   位置钉住 ≠ 看得见。可见性同钉，幂等（达标即不写）。
@@ -2297,22 +2319,7 @@ static void GCStylePinOne(UIView *v) {
 #endif
                 }
             }
-            // ★trial40：父容器被 App 隐藏时**边沿触发**拉回（0.3s 冷却），不再每帧对拉。
-            //   dump 铁证：WINAJXCombinedWidgetView h=1 时子钮 a=1.00 也画不出来 = 老大看到的「透明」。
-            {
-                static double sP40Last;
-                UIView *p40 = v.superview;
-                if (p40 && p40.window && !v.hidden
-                    && (p40.hidden || p40.alpha < 0.05f || p40.layer.opacity < 0.05f)) {
-                    double n40 = CACurrentMediaTime();
-                    if (n40 - sP40Last > 0.3) {
-                        sP40Last = n40;
-                        [CATransaction begin]; [CATransaction setDisableActions:YES];
-                        p40.hidden = NO; p40.alpha = 1.0f; p40.layer.opacity = 1.0f;
-                        [CATransaction commit];
-                    }
-                }
-            }
+            // trial46(B1)：统一走 GCStyleRescueParent（见函数内注释）
         } else g = CGRectMake(sw - 10 - wr.size.width, pinBottom - wr.size.height, wr.size.width, wr.size.height);
         CGRect local = [v.superview convertRect:g fromView:win];
         // ★trial33（老大：完全乱了，车机钮与 2D 钮不见）：trial32 的链式补偿被整体撤掉。
