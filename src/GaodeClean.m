@@ -18,7 +18,7 @@
 // ---- jibamao 个人标识（编译进 dylib，可用 strings 核对）----
 static NSString *const kGCAuthor      = @"jibamao";
 static NSString *const kGCRepo        = @"https://gan-jibamao.github.io/";
-static NSString *const kGCVersion     = @"0.9.51+trial37";
+static NSString *const kGCVersion     = @"0.9.52+probe14";
 
 // 0.9.18（A1）：底边间隙**按控件分开**，对表原生（搜索栏白底顶边 = 702.6pt）
 //   车机钮（连接车机 · WINDeviceInterconnectWidget）：原生底 652 → 间隙 50.6 → 取 50
@@ -439,6 +439,96 @@ static void P39Sample(void) {
             P39Store(P39Ink, s);
         }
     }
+}
+// ══ probe14：真身定位（纯只读）══
+//   矛盾铁证：2D 钮自身 {{339,609.7}} a=1.00 h=0，父容器 h=1 恒被 App 藏起；
+//   我们每帧拉回 1009+ 次仍 h=1 ⇒ 屏幕上那颗钮是**另一份绘制**（别的 window / 快照层）。
+//   A2：遍历全部 window 找所有 LOTAnimationView / WINAJXCombinedItemView，打印归属与祖先异常。
+//   A3：记录 App 对天气类实例的 setFrame:/setCenter: 写入（只记不改）。
+static void Replace(Class cls, SEL sel, IMP replacement, const char *types);   // probe14：定义在后
+typedef struct { float t; char cls[28]; char sel[12]; float x, y, w, h; int mine; } P41Wr;
+static P41Wr P41Wrs[20];
+static int P41WrI, P41WrN;
+static int P41InAlign;
+static void P41Rec(const char *cls, const char *sel, CGRect r, int mine) {
+    P41Wr *p = &P41Wrs[P41WrI];
+    p->t = (float)P7Now();
+    strncpy(p->cls, cls, 27); p->cls[27] = 0;
+    strncpy(p->sel, sel, 11); p->sel[11] = 0;
+    p->x = (float)r.origin.x; p->y = (float)r.origin.y;
+    p->w = (float)r.size.width; p->h = (float)r.size.height;
+    p->mine = mine;
+    P41WrI = (P41WrI + 1) % 20;
+    if (P41WrN < 20) P41WrN++;
+}
+static NSMutableSet<NSString *> *P41Hooked(void) {
+    static NSMutableSet *s;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ s = [NSMutableSet set]; });
+    return s;
+}
+static void P41HookWeatherWrites(void) {
+    NSArray *names = @[@"WINGroupMapWidget", @"WINWeatherLimitView", @"WINScaleLineLogoMapWidget"];
+    for (NSString *nm in names) {
+        Class rc = NSClassFromString(nm);
+        if (!rc || [P41Hooked() containsObject:nm]) continue;
+        [P41Hooked() addObject:nm];
+        Method mf = class_getInstanceMethod(rc, @selector(setFrame:));
+        if (mf) {
+            IMP o = method_getImplementation(mf);
+            const char *t = method_getTypeEncoding(mf);
+            Replace(rc, @selector(setFrame:), imp_implementationWithBlock(^(UIView *self, CGRect f) {
+                ((void (*)(id, SEL, CGRect))o)(self, @selector(setFrame:), f);
+                P41Rec([nm UTF8String], "setFrame:", self.frame, P41InAlign);
+            }), t);
+        }
+        Method mc = class_getInstanceMethod(rc, @selector(setCenter:));
+        if (mc) {
+            IMP o2 = method_getImplementation(mc);
+            const char *t2 = method_getTypeEncoding(mc);
+            Replace(rc, @selector(setCenter:), imp_implementationWithBlock(^(UIView *self, CGPoint c) {
+                ((void (*)(id, SEL, CGPoint))o2)(self, @selector(setCenter:), c);
+                P41Rec([nm UTF8String], "setCenter:", self.frame, P41InAlign);
+            }), t2);
+        }
+    }
+}
+// 全窗口找「2D/3D 钮真身」：任何含 LOTAnimationView / WINAJXCombinedItemView 的方形视图
+static NSString *P41LottieList(void) {
+    NSMutableString *s = [NSMutableString string];
+    Class cItem = NSClassFromString(@"WINAJXCombinedItemView");
+    Class cLot = NSClassFromString(@"LOTAnimationView");
+    int wi = 0, cnt = 0;
+    for (UIWindow *w in GCAllWindows()) {
+        wi++;
+        NSMutableArray *q = [NSMutableArray arrayWithObject:w];
+        for (NSUInteger i = 0; i < q.count && q.count < 3000; i++) {
+            UIView *v = q[i];
+            [q addObjectsFromArray:v.subviews];
+            if (!v.window) continue;
+            if (!((cItem && [v isKindOfClass:cItem]) || (cLot && [v isKindOfClass:cLot]))) continue;
+            cnt++;
+            CGRect r = [v convertRect:v.bounds toView:nil];
+            // 祖先链第一个异常层
+            NSString *bad = @"";
+            int n = 0;
+            for (UIView *p = v.superview; p && n < 12; p = p.superview, n++) {
+                if (p.hidden || p.alpha < 0.05f || p.layer.opacity < 0.05f) {
+                    bad = [NSString stringWithFormat:@" 祖先%@(h=%d,a=%.2f,op=%.2f)",
+                           NSStringFromClass(p.class), (int)p.hidden, p.alpha, p.layer.opacity];
+                    break;
+                }
+                if (p == p.window) break;
+            }
+            [s appendFormat:@"[w%d]%@ %@ a=%.2f h=%d%@%@ / ", wi,
+                NSStringFromClass(v.class), NSStringFromCGRect(r),
+                v.alpha, (int)v.hidden,
+                (v.window == Cached2D.window && Cached2D && CGRectEqualToRect(r, [Cached2D convertRect:Cached2D.bounds toView:nil])) ? @"★同位" : @"",
+                bad];
+        }
+    }
+    if (!cnt) [s appendString:@"(无)"];
+    return s;
 }
 // ══ probe13：替身/可见性取证（纯只读）══
 //   probe12 教训：墨量判据把「我们自己写的白底」当成墨 ⇒ 永远判不出透明；
@@ -1833,6 +1923,15 @@ static void GCProbeDump7(NSString *reason) {
         [o appendFormat:@"P39墨量快照(%lu份)\n", (unsigned long)(P39Ink ? P39Ink.count : 0)];
         for (NSString *s39 in P39Ink) [o appendFormat:@"  · %@\n", s39];
         [o appendFormat:@"P40修正: 父容器=%d 游离实例=%d\n", P37ParentFix, P37FreeFix];
+        [o appendFormat:@"P41 Lottie真身: %@\n", P41LottieList()];
+        [o appendString:@"P41 天气写入: "];
+        for (int i41 = 0; i41 < 20; i41++) {
+            P41Wr *p41 = &P41Wrs[(P41WrI - 20 + i41 + 40) % 20];
+            if (p41->t <= 0) continue;
+            [o appendFormat:@"(t=%.1f %s %s y=%.0f %@) ", p41->t, p41->cls, p41->sel,
+                p41->y, p41->mine ? @"我方" : @"App"];
+        }
+        [o appendString:@"\n"];
         [o appendFormat:@"P40天气实例: %@\n", P40WeatherList()];
         [o appendFormat:@"P40 2D钮: %@\n", P40BtnInfo()];
     }
@@ -2059,21 +2158,10 @@ static void GCStylePinOne(UIView *v) {
 #endif
                 }
             }
-            // ★trial37（probe13 铁证）：钮自身 a=1.00 却看不见 —— 真凶是**父容器**
-            //   WINAJXCombinedWidgetView 被 App 设 hidden=1 / alpha=0 / opacity=0（祖先链 dump 实录）。
-            //   老大选「要常显」⇒ 把父容器拉回可见；幂等（达标即不写）。
-            UIView *p37 = v.superview;
-            if (p37 && p37.window && !v.hidden
-                && (p37.hidden || p37.alpha < 0.05f || p37.layer.opacity < 0.05f)) {
-                [CATransaction begin]; [CATransaction setDisableActions:YES];
-                p37.hidden = NO;
-                p37.alpha = 1.0f;
-                p37.layer.opacity = 1.0f;
-                [CATransaction commit];
-#ifdef GAODECLEAN_PROBE
-                P37ParentFix++;
-#endif
-            }
+            // ★trial38（probe13/14 铁证）：trial37 的「父容器拉回可见」已撤。
+            //   实测我们每帧拉回 1009~1878 次，App 每帧又藏回去（dump 恒 h=1）——
+            //   说明我们钉的是**被 App 藏起来的替身**，这场争夺只会造成闪烁。
+            //   真身定位改由 probe14 的全窗口 Lottie 清单负责。
         } else g = CGRectMake(sw - 10 - wr.size.width, pinBottom - wr.size.height, wr.size.width, wr.size.height);
         CGRect local = [v.superview convertRect:g fromView:win];
         // ★trial33（老大：完全乱了，车机钮与 2D 钮不见）：trial32 的链式补偿被整体撤掉。
@@ -2387,6 +2475,7 @@ static void GCStylePinWidgets(UIWindow *win) {
     P33Watch(Cached2D, 2);
     P37Sample();
     P39Sample();
+    P41HookWeatherWrites();
 #endif
     GCStylePinBusy = NO;
 }
@@ -3017,6 +3106,9 @@ static void AlignWeatherRow(UIView *row) {
         return;
     }
     inAlign = YES;
+#ifdef GAODECLEAN_PROBE
+    P41InAlign = 1;
+#endif
     UIWindow *win = row.window;
     CGRect carRect = [car convertRect:car.bounds toView:win];
     // 0.9.18（A2）：对表原生 —— 车机钮在上、天气行在**正下方**且左对齐。
@@ -3073,6 +3165,9 @@ static void AlignWeatherRow(UIView *row) {
 #endif
     }
     GCWeatherReleaseHeld();   // 0.9.3：对齐完成 → 恢复扣留的天气行（出现在正确位置）
+#ifdef GAODECLEAN_PROBE
+    P41InAlign = 0;
+#endif
     inAlign = NO;
 }
 
