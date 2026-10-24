@@ -2952,6 +2952,40 @@ static void GCStylePinTabItems(UIWindow *win) {
         //   probe21 实测：App 的窄栏布局是 ±60（中心 136.5/256.5），我们强制 ±72，
         //   5Hz + 60fps 两个通道同时施压，对拉结果就是老大看到的"偶尔在动"
         //   （93 秒 11 次、每次 ±12pt、dy 恒 0）。位置交还 App。
+
+        // ★probe23(A1)：视觉收圆，不碰 item 的 frame（避免与 App 布局对拉）。
+        //   实测 App 原生 item = 84x54 corner=27 ⇒ 跑道形胶囊；用 54x54 圆形 mask 收成正圆。
+        [CATransaction begin]; [CATransaction setDisableActions:YES];
+        CAShapeLayer *mk = nil;
+        if ([it.layer.mask isKindOfClass:[CAShapeLayer class]]) {
+            mk = (CAShapeLayer *)it.layer.mask;
+        } else {
+            mk = [CAShapeLayer layer];
+            mk.fillColor = UIColor.blackColor.CGColor;
+            it.layer.mask = mk;
+        }
+        CGFloat iw = it.bounds.size.width, ih = it.bounds.size.height;
+        CGFloat dia = MIN(54.0, ih);                          // 直径 = 高度，上限 54
+        CGRect circle = CGRectMake((iw - dia) * 0.5, (ih - dia) * 0.5, dia, dia);
+        if (!CGRectEqualToRect(mk.frame, it.bounds)) mk.frame = it.bounds;
+        // 幂等：路径已达标就不重建（避免 60fps 反复分配 CGPath）
+        if (!mk.path || !CGRectEqualToRect(CGPathGetBoundingBox(mk.path), circle)) {
+            CGMutablePathRef p23 = CGPathCreateMutable();
+            CGPathAddEllipseInRect(p23, NULL, circle);
+            mk.path = p23;
+            CGPathRelease(p23);
+        }
+
+        // ★probe23(A2)：内容子项水平居中 —— 实测 SubItem 54 宽贴在 x=0，
+        //   图标中心 27 而 item 中心 42，右边空 30pt，视觉重心失衡。
+        for (UIView *sub in it.subviews) {
+            if (sub.isHidden) continue;
+            CGFloat wantX = (iw - sub.frame.size.width) * 0.5;
+            if (fabs(sub.frame.origin.x - wantX) > 0.5) {
+                CGRect f = sub.frame; f.origin.x = wantX; sub.frame = f;
+            }
+        }
+        [CATransaction commit];
     }
 }
 // ★trial25(A2)：重入守卫包装 —— pin 现有帧级驱动/容器钩子/子控件钩子/layoutSubviews 钩子
