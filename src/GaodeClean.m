@@ -468,7 +468,9 @@ static NSMutableSet<NSString *> *P41Hooked(void) {
     return s;
 }
 static void P41HookWeatherWrites(void) {
-    NSArray *names = @[@"WINGroupMapWidget", @"WINWeatherLimitView", @"WINScaleLineLogoMapWidget"];
+    // 类名必须走混淆表（门禁：明文命中即 FAIL）——113=WINGroupMapWidget
+    //   115=WINWeatherLimitView、114=WINScaleLineLogoMapWidget（索引=表行号-1）
+    NSArray *names = @[GCStrAt(113), GCStrAt(115), GCStrAt(114)];
     for (NSString *nm in names) {
         Class rc = NSClassFromString(nm);
         if (!rc || [P41Hooked() containsObject:nm]) continue;
