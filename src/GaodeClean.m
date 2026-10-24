@@ -310,8 +310,81 @@ static void P37RefreshTargets(void) {
     for (int i = 0; i < P37_MAX; i++) { P37LastPy[i] = 0; P37LastPx[i] = 0; P37LastPtr[i] = NULL; }
     P37N = n;
 }
+// ══════════════════════════════════════════════════════════════════════════
+// ★probe25：逐帧「运动段落」日志
+//   事实：采样本来就是 60fps（CADisplayLink → P37Sample）。抓不到不是采样慢，是记录门槛：
+//     ① 跳变阈值 6.0pt —— 小于 6pt 的抖动全丢；
+//     ② t≥8s 才记 —— 启动前 8 秒全丢；
+//     ③ 全量 dump 只有 5/15/30/45/60/90/120 七个点。
+//   本块把记录精度提到帧级：同一目标的一次连续运动合并成一行（起止时刻+帧数+起止坐标+透明度），
+//   静止 3 帧收笔；每行立即追加到 Documents/GaodeClean-changes.txt，不等定时 dump。
+#define P25_QUIET 3
+static BOOL  P25Act[P37_MAX], P25WasNil[P37_MAX];
+static float P25FromX[P37_MAX], P25FromY[P37_MAX], P25FromA[P37_MAX];
+static float P25LastX[P37_MAX], P25LastY[P37_MAX], P25LastA[P37_MAX];
+static float P25StartT[P37_MAX];
+static int   P25Frames[P37_MAX], P25Quiet[P37_MAX];
+static int   P25FromHid[P37_MAX], P25LastHid[P37_MAX];
+static NSMutableString *P25Buf;
+
+static void P25Flush(void) {
+    if (!P25Buf.length) return;
+    @try {
+        NSString *dir = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES).firstObject;
+        NSString *path = [dir stringByAppendingPathComponent:@"GaodeClean-changes.txt"];
+        NSData *d = [P25Buf dataUsingEncoding:NSUTF8StringEncoding];
+        NSFileHandle *fh = [NSFileHandle fileHandleForWritingAtPath:path];
+        if (fh) { [fh seekToEndOfFile]; [fh writeData:d]; [fh closeFile]; }
+        else { [d writeToFile:path atomically:YES]; }
+    } @catch (__unused NSException *e) {}
+    [P25Buf setString:@""];
+}
+
+static void P25Append(NSString *s) {
+    if (!P25Buf) P25Buf = [NSMutableString string];
+    [P25Buf appendString:s];
+    if (P25Buf.length > 8192) P25Flush();
+}
+
+static void P25Episode(int i, float x, float y, float a, int hid, float t) {
+    if (i < 0 || i >= P37_MAX) return;
+    if (P25WasNil[i]) {                    // 弱引用恢复：重置基线并记一行
+        P25WasNil[i] = NO; P25Act[i] = NO;
+        P25LastX[i] = x; P25LastY[i] = y; P25LastA[i] = a; P25LastHid[i] = hid;
+        P25Append([NSString stringWithFormat:@"t=%.2f FOUND %s (%.1f,%.1f) a=%.2f\n",
+                   t, P37Name[i], x, y, a]);
+        return;
+    }
+    BOOL moved = (fabsf(x - P25LastX[i]) > 0.5f || fabsf(y - P25LastY[i]) > 0.5f
+                  || fabsf(a - P25LastA[i]) > 0.02f || hid != P25LastHid[i]);
+    if (moved) {
+        if (!P25Act[i]) {                  // 开新段落
+            P25Act[i] = YES;
+            P25FromX[i] = P25LastX[i]; P25FromY[i] = P25LastY[i];
+            P25FromA[i] = P25LastA[i]; P25FromHid[i] = P25LastHid[i];
+            P25StartT[i] = t; P25Frames[i] = 0;
+        }
+        P25LastX[i] = x; P25LastY[i] = y; P25LastA[i] = a; P25LastHid[i] = hid;
+        P25Frames[i]++; P25Quiet[i] = 0;
+    } else if (P25Act[i] && ++P25Quiet[i] >= P25_QUIET) {   // 静止 3 帧 → 收笔
+        P25Act[i] = NO;
+        P25Append([NSString stringWithFormat:
+            @"t=%.2f→%.2f (%d帧) %s (%.1f,%.1f)→(%.1f,%.1f) d=(%+.1f,%+.1f) a=%.2f→%.2f hid=%d→%d\n",
+            P25StartT[i], t, P25Frames[i], P37Name[i],
+            P25FromX[i], P25FromY[i], P25LastX[i], P25LastY[i],
+            P25LastX[i] - P25FromX[i], P25LastY[i] - P25FromY[i],
+            P25FromA[i], P25LastA[i], P25FromHid[i], P25LastHid[i]]);
+    }
+}
+
+static void P25Lost(int i, float t) {
+    if (i < 0 || i >= P37_MAX || P25WasNil[i]) return;
+    P25WasNil[i] = YES; P25Act[i] = NO;
+    P25Append([NSString stringWithFormat:@"t=%.2f LOST %s\n", t, P37Name[i]]);
+}
+
 static void P37Sample(void) {
-    if (++P37ScanTick >= 15 || P37N == 0) { P37ScanTick = 0; P37RefreshTargets(); }
+    if (++P37ScanTick >= 6 || P37N == 0) { P37ScanTick = 0; P37RefreshTargets(); }
     float t = (float)P7Now();
     int jumpIdx = -1; float jumpFrom = 0, jumpTo = 0; float jumpA0 = 0, jumpA1 = 0;
     for (int i = 0; i < P37N; i++) {
@@ -319,7 +392,7 @@ static void P37Sample(void) {
         P37Cell *c = &P37Ring[P37RingI][i];
         memset(c, 0, sizeof(*c));
         c->idx = (short)i;
-        if (!v) continue;
+        if (!v) { P25Lost(i, t); continue; }
         c->hid = (short)v.hidden;
         c->a = (float)v.alpha;
         if (v.window && v.superview) {
@@ -331,17 +404,18 @@ static void P37Sample(void) {
                 CGRect pr = [svp convertRect:pl.frame toLayer:v.window.layer];
                 c->px = (float)pr.origin.x; c->py = (float)pr.origin.y;
             } else { c->px = c->mx; c->py = c->my; }
+            P25Episode(i, c->mx, c->my, c->a, c->hid, t);
             void *p = (__bridge void *)v;
             if (i < P37Fixed && P37LastPtr[i] && P37LastPtr[i] != p) {
                 P37PtrSwap++;
                 if (jumpIdx < 0) { jumpIdx = i; jumpFrom = -1; jumpTo = -1; jumpA0 = c->a; jumpA1 = c->a; }
             }
             P37LastPtr[i] = p;
-            if (P37LastPy[i] > 0 && fabsf(c->py - P37LastPy[i]) > 6.0f) {
+            if (P37LastPy[i] > 0 && fabsf(c->py - P37LastPy[i]) > 0.5f) {
                 P37Jumps[i]++;
                 if (jumpIdx < 0) { jumpIdx = i; jumpFrom = P37LastPy[i]; jumpTo = c->py; jumpA0 = c->a; jumpA1 = c->a; }
             }
-            if (P37LastPx[i] > 0 && fabsf(c->px - P37LastPx[i]) > 6.0f) {
+            if (P37LastPx[i] > 0 && fabsf(c->px - P37LastPx[i]) > 0.5f) {
                 P37Jumps[i]++;
                 if (jumpIdx < 0) { jumpIdx = i; jumpFrom = P37LastPy[i]; jumpTo = c->py; jumpA0 = c->a; jumpA1 = c->a; }
             }
@@ -352,7 +426,7 @@ static void P37Sample(void) {
     P37RingI = (P37RingI + 1) % P37_RING;
     if (P37RingN < P37_RING) P37RingN++;
     // ③ 跳变流水：t≥8s 后每一跳都记（永不因名额满丢失）
-    if (jumpIdx >= 0 && t >= 8.0f) {
+    if (jumpIdx >= 0 && t >= 0.0f) {
         P37JmpLog[P37JmpI].t = t;
         P37JmpLog[P37JmpI].tag = (short)jumpIdx;
         P37JmpLog[P37JmpI].from = (short)(jumpFrom < -32000 ? -32000 : (jumpFrom > 32000 ? 32000 : jumpFrom));
@@ -2120,7 +2194,7 @@ static void GCProbeDump7(NSString *reason) {
 __attribute__((unused)) static void GCProbeTick7(void) {
     static int stage = 0;
     double dt = P7Now();
-    int want = (dt > 120) ? 7 : (dt > 90) ? 6 : (dt > 60) ? 5 : (dt > 45) ? 4 : (dt > 30) ? 3 : (dt > 15) ? 2 : (dt > 5) ? 1 : 0;
+    int want = (dt > 120) ? 8 : (dt > 90) ? 7 : (dt > 60) ? 6 : (dt > 40) ? 5 : (dt > 25) ? 4 : (dt > 15) ? 3 : (dt > 8) ? 2 : (dt > 3) ? 1 : 0;
     if (want > stage) { stage = want; GCProbeDump7([NSString stringWithFormat:@"p7定时%d", want]); }
 }
 #endif
