@@ -18,7 +18,7 @@
 // ---- jibamao 个人标识（编译进 dylib，可用 strings 核对）----
 static NSString *const kGCAuthor      = @"jibamao";
 static NSString *const kGCRepo        = @"https://gan-jibamao.github.io/";
-static NSString *const kGCVersion     = @"0.9.54+trial39";
+static NSString *const kGCVersion     = @"0.9.55+probe15";
 
 // 0.9.18（A1）：底边间隙**按控件分开**，对表原生（搜索栏白底顶边 = 702.6pt）
 //   车机钮（连接车机 · WINDeviceInterconnectWidget）：原生底 652 → 间隙 50.6 → 取 50
@@ -582,6 +582,68 @@ static NSString *P40WeatherList(void) {
     }
     return s.length ? s : @"(无)";
 }
+#ifdef GAODECLEAN_PROBE
+// ══ probe15：每秒轨迹（8 控件 模型位置 vs 视觉位置，各 60 行）══
+//   目的：dump 已证明我们钉的坐标是准的，但画面仍在动 ⇒ 动的是别的东西。
+//   本段只记录、不写任何几何，用「模型 rect vs 视觉 rect」直接指出谁在动。
+static NSString *P43Lines[80];
+static int P43N, P43I;
+static double P43Last;
+
+static CGPoint P43PresOffset(UIView *v, UIWindow *win) {
+    CGPoint off = CGPointZero;
+    UIView *p = v.superview; int g = 0;
+    while (p && p != win && g++ < 24) {
+        CALayer *pl = p.layer;
+        CALayer *pr = pl.presentationLayer;
+        if (pr) {
+            off.x += (pr.position.x - pl.position.x);
+            off.y += (pr.position.y - pl.position.y);
+        }
+        off.x += (pl.bounds.origin.x - (pr ? pr.bounds.origin.x : pl.bounds.origin.x));
+        off.y += (pl.bounds.origin.y - (pr ? pr.bounds.origin.y : pl.bounds.origin.y));
+        p = p.superview;
+    }
+    return off;
+}
+
+static NSString *P43One(NSString *name, UIView *v, UIWindow *win) {
+    if (!v || !v.window) return [NSString stringWithFormat:@"%@=无 ", name];
+    CGRect m = [v convertRect:v.bounds toView:win];
+    CGPoint o = P43PresOffset(v, win);
+    return [NSString stringWithFormat:@"%@ m=(%.0f,%.0f) v=(%.0f,%.0f) ",
+            name, m.origin.x, m.origin.y, m.origin.x + o.x, m.origin.y + o.y];
+}
+
+static void P43Snap(void) {
+    double now = P7Now();
+    if (now - P43Last < 1.0) return;
+    P43Last = now;
+    UIWindow *w = nil;
+    for (UIWindow *x in GCAllWindows()) { if (x.isKeyWindow && x.windowLevel <= UIWindowLevelNormal + 1) { w = x; break; } }
+    if (!w) for (UIWindow *x in GCAllWindows()) { if (x.windowLevel <= UIWindowLevelNormal + 1) { w = x; break; } }
+    if (!w) return;
+    NSMutableString *s = [NSMutableString stringWithFormat:@"t=%.0f ", now];
+    [s appendString:P43One(@"车机", CachedCar, w)];
+    [s appendString:P43One(@"胶囊", CachedRight, w)];
+    [s appendString:P43One(@"2D钮", Cached2D, w)];
+    [s appendString:P43One(@"天气", (UIView *)P7RowMir, w)];
+    [s appendString:P43One(@"底栏", CachedTabBar, w)];
+    if (CachedTabBar) {
+        NSArray *subs = [CachedTabBar.subviews copy];
+        int k = 0;
+        for (UIView *sv in subs) {
+            if (![NSStringFromClass(sv.class) isEqualToString:GCStrAt(150)]) continue;  // WINTabBarItem
+            [s appendString:P43One([NSString stringWithFormat:@"钮%d", k++], sv, w)];
+            if (k >= 3) break;
+        }
+    }
+    P43Lines[P43I] = s;
+    P43I = (P43I + 1) % 80;
+    if (P43N < 80) P43N++;
+}
+#endif
+
 static NSString *P40BtnInfo(void) {
     NSMutableString *s = [NSMutableString string];
     UIView *b = Cached2D;
@@ -1955,6 +2017,14 @@ static void GCProbeDump7(NSString *reason) {
         [o appendFormat:@"P39墨量快照(%lu份)\n", (unsigned long)(P39Ink ? P39Ink.count : 0)];
         for (NSString *s39 in P39Ink) [o appendFormat:@"  · %@\n", s39];
         [o appendFormat:@"P40修正: 父容器=%d 游离实例=%d\n", P37ParentFix, P37FreeFix];
+        {   // probe15：每秒轨迹（模型 m vs 视觉 v）
+            [o appendString:@"---[P43 每秒轨迹 m=模型 v=视觉]---\n"];
+            int n = P43N, st = (P43I - P43N + 80) % 80;
+            for (int i = 0; i < n; i++) {
+                NSString *ln = P43Lines[(st + i) % 80];
+                if (ln) [o appendFormat:@"  %@\n", ln];
+            }
+        }
         [o appendFormat:@"P41 Lottie真身: %@\n", P41LottieList()];
         [o appendString:@"P41 天气写入: "];
         for (int i41 = 0; i41 < 20; i41++) {
@@ -2507,6 +2577,7 @@ static void GCStylePinWidgets(UIWindow *win) {
     P33Watch(Cached2D, 2);
     P37Sample();
     P39Sample();
+    P43Snap();
     P41HookWeatherWrites();
 #endif
     GCStylePinBusy = NO;
