@@ -18,7 +18,7 @@
 // ---- jibamao 个人标识（编译进 dylib，可用 strings 核对）----
 static NSString *const kGCAuthor      = @"jibamao";
 static NSString *const kGCRepo        = @"https://gan-jibamao.github.io/";
-static NSString *const kGCVersion     = @"0.9.44+trial34";
+static NSString *const kGCVersion     = @"0.9.45+trial35";
 
 // 0.9.18（A1）：底边间隙**按控件分开**，对表原生（搜索栏白底顶边 = 702.6pt）
 //   车机钮（连接车机 · WINDeviceInterconnectWidget）：原生底 652 → 间隙 50.6 → 取 50
@@ -1496,8 +1496,8 @@ static void GCProbeDump7(NSString *reason) {
         for (UIView *v = CachedCar; v && v != v.window; v = v.superview)
             if (!CGAffineTransformIsIdentity(v.transform))
                 [p8tf appendFormat:@"%@=%@ ", NSStringFromClass(v.class), NSStringFromCGAffineTransform(v.transform)];
-        [o appendFormat:@"P8车机: ptr=%p win=%@ model=%@ pres=%@ animKeys=%@ transform=%@ 祖先变换=%@ sup=%@\n",
-            (__bridge void *)CachedCar, NSStringFromCGRect(P7WR(CachedCar)),
+        [o appendFormat:@"P8车机: ptr=%p win=%@ a=%.2f model=%@ pres=%@ animKeys=%@ transform=%@ 祖先变换=%@ sup=%@\n",
+            (__bridge void *)CachedCar, NSStringFromCGRect(P7WR(CachedCar)), CachedCar.alpha,
             NSStringFromCGRect(CachedCar.layer.frame),
             p8pl ? NSStringFromCGRect(p8pl.frame) : @"(无分歧)",
             CachedCar.layer.animationKeys ?: @[],
@@ -1666,7 +1666,19 @@ static void GCStylePinOne(UIView *v) {
         const CGFloat pinBottom = sh - 81 - 16;          // 与 GCStylePinWidgets 同源
         CGRect wr = [v convertRect:v.bounds toView:win];
         CGRect g;
-        if (isCar) g = CGRectMake(10, pinBottom - 20 - 18 - wr.size.height, wr.size.width, wr.size.height);
+        if (isCar) {
+            g = CGRectMake(10, pinBottom - 20 - 18 - wr.size.height, wr.size.width, wr.size.height);
+            // ★trial35（P33 哨兵铁证：车机钮每 ~20s 被 App 把 alpha 清 0，坐标恒在 (10,673)）：
+            //   位置钉住 ≠ 看得见。可见性同钉，幂等（达标即不写）。
+            if (!v.hidden && v.alpha < 0.999f) {
+                [CATransaction begin]; [CATransaction setDisableActions:YES];
+                v.alpha = 1.0f;
+                [CATransaction commit];
+#ifdef GAODECLEAN_PROBE
+                P7Solid++;
+#endif
+            }
+        }
         else if (is2D) {                                  // trial29：帽顶上方 57.3pt = App 原生相对位
             //   probe9 铁证：原生 win y=609.7 = capTop(667)-57.3；trial27 用 capTop-15-44=608
             //   与原生差 1.7pt > 幂等容差 0.6 ⇒ 每帧拉锯（2D=198）。改用原生间距 ⇒ 收敛零拉锯，
