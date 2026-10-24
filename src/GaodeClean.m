@@ -436,6 +436,43 @@ static void P29Tab(int i, UIView *v, CGFloat dia, CAShapeLayer *mk) {
         P7Now(), i, b.size.width, b.size.height, a, pw, ph, pa, dia, hid, m, anim]);
 }
 
+// probe31：可见性全量快照。视频证明整块白圆消失，而 alpha/bounds/mask 全正常 => 真凶在盲区。
+//   盲区清单：layer.hidden / layer.opacity / bounds.origin / frame / 祖先链 / mask 层自身 / 遮挡。
+static void P30Snap(int i, UIView *v, CAShapeLayer *mk) {
+    if (i < 0 || i > 1 || !v) return;
+    CALayer *L = v.layer, *pl = L.presentationLayer ?: L;
+    CGRect f = v.frame, b = v.bounds;
+    float pa = (float)pl.opacity;
+    NSMutableString *ch = [NSMutableString string];
+    UIView *p = v.superview;
+    for (int k = 0; k < 5 && p; k++, p = p.superview)
+        [ch appendFormat:@"%@[h%d o%.2f lh%d lm%d] ", NSStringFromClass(p.class),
+            p.hidden ? 1 : 0, (double)p.alpha, L.hidden ? 1 : 0, p.layer.mask ? 1 : 0];
+    UIView *hit = nil;
+    @try {
+        CGPoint c = [v convertPoint:CGPointMake(b.size.width * 0.5f, b.size.height * 0.5f) toView:v.window];
+        hit = [v.window hitTest:c withEvent:nil];
+    } @catch (__unused NSException *e) {}
+    CGRect bb = mk.path ? CGPathGetBoundingBox(mk.path) : CGRectZero;
+    P25Append([NSString stringWithFormat:
+        @"t=%.2f SNAP[%d] f=(%.1f,%.1f,%.1fx%.1f) b=(%.1f,%.1f) a=%.2f lo=%.2f lh=%d tr=%d "
+        @"pres=%.2f mk[f=(%.1f,%.1f,%.1fx%.1f) bb=%.1fx%.1f h=%d o=%.2f] hit=%@ | %@\n",
+        P7Now(), i, f.origin.x, f.origin.y, f.size.width, f.size.height,
+        b.origin.x, b.origin.y, (double)v.alpha, (double)L.opacity, L.hidden ? 1 : 0,
+        CATransform3DIsIdentity(L.transform) ? 0 : 1, (double)pa,
+        mk.frame.origin.x, mk.frame.origin.y, mk.frame.size.width, mk.frame.size.height,
+        bb.size.width, bb.size.height, mk.hidden ? 1 : 0, (double)mk.opacity,
+        hit ? NSStringFromClass(hit.class) : @"nil", ch]);
+}
+
+// probe31(A2)：心跳 —— 让「代码没跑」与「没有变化」在日志里可区分
+static void P30Heartbeat(int ia, int ib, int bar) {
+    static int hb;
+    if (++hb % 15) return;
+    P25Append([NSString stringWithFormat:@"t=%.2f HB items=%d/%d bar=%d\n",
+               P7Now(), ia, ib, bar]);
+}
+
 // probe30(A2)：父链 —— App 可能淡出整个 WINTabBar，item 自身 alpha 永远 1.0
 static float P29BarA = -1, P29BarPA = -1; static int P29BarHid = -1, P29BarHas;
 static void P29Bar(UIView *bar) {
@@ -3253,7 +3290,15 @@ static void GCStylePinWidgetsInner(UIWindow *win) {   // trial25(A2)：原体改
 //   （5Hz tick + layoutSubviews）⇒ App 一搬动，最慢 200ms 才纠回 = 肉眼看到的「左右移动」。
 static __weak UIView *CachedTabItemA, *CachedTabItemB;
 static void GCStylePinTabItems(UIWindow *win) {
-    if (!win || !CachedTabBar || !CachedTabBar.window) return;
+    if (!win || !CachedTabBar || !CachedTabBar.window) {
+#ifdef GAODECLEAN_PROBE
+        static double lastR; double nn = P7Now();
+        if (nn - lastR > 0.5) { lastR = nn;
+            P25Append([NSString stringWithFormat:@"t=%.2f SKIP bar=%d win=%d\n",
+                       nn, CachedTabBar ? 1 : 0, (CachedTabBar && CachedTabBar.window) ? 1 : 0]); }
+#endif
+        return;
+    }
     if (!CachedTabItemA || !CachedTabItemB
         || !CachedTabItemA.window || !CachedTabItemB.window) {   // probe30(A3)：脱离窗口也算失效
 #ifdef GAODECLEAN_PROBE
@@ -3274,6 +3319,7 @@ static void GCStylePinTabItems(UIWindow *win) {
     }
 #ifdef GAODECLEAN_PROBE
     P29Bar(CachedTabBar);
+    P30Heartbeat(CachedTabItemA ? 1 : 0, CachedTabItemB ? 1 : 0, CachedTabBar ? 1 : 0);
 #endif
     UIView *arr[2] = { CachedTabItemA, CachedTabItemB };
     for (int i = 0; i < 2; i++) {
@@ -3331,6 +3377,15 @@ static void GCStylePinTabItems(UIWindow *win) {
         }
 #ifdef GAODECLEAN_PROBE
         P29Tab(i, it, dia, mk);
+        { static float lf[2][4]; static int has[2];
+          if (!has[i] || fabsf((float)it.frame.origin.y - lf[i][1]) > 0.5f
+              || fabsf((float)it.frame.origin.x - lf[i][0]) > 0.5f
+              || fabsf((float)it.layer.opacity - lf[i][2]) > 0.02f
+              || fabsf((float)it.bounds.origin.y - lf[i][3]) > 0.5f) {
+              has[i] = 1; lf[i][0] = (float)it.frame.origin.x; lf[i][1] = (float)it.frame.origin.y;
+              lf[i][2] = (float)it.layer.opacity; lf[i][3] = (float)it.bounds.origin.y;
+              P30Snap(i, it, mk);
+          } }
 #endif
 
         // ★probe23(A2)：内容子项水平居中 —— 实测 SubItem 54 宽贴在 x=0，
