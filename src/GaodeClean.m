@@ -18,7 +18,7 @@
 // ---- jibamao 个人标识（编译进 dylib，可用 strings 核对）----
 static NSString *const kGCAuthor      = @"jibamao";
 static NSString *const kGCRepo        = @"https://gan-jibamao.github.io/";
-static NSString *const kGCVersion     = @"0.9.61+trial44";
+static NSString *const kGCVersion     = @"0.9.62+trial45";
 
 // 0.9.18（A1）：底边间隙**按控件分开**，对表原生（搜索栏白底顶边 = 702.6pt）
 //   车机钮（连接车机 · WINDeviceInterconnectWidget）：原生底 652 → 间隙 50.6 → 取 50
@@ -1697,7 +1697,17 @@ static void GCStyleSearch(UIView *anchor) {
         CGRect bd = CGRectMake(0, 0, d, d);
         if (!CGRectEqualToRect(bd, cap.bounds)) cap.bounds = bd;
         cap.layer.cornerRadius = d * 0.5;
-        GCStyleCenterIcon(cap, d, 24.0, 0);   // 放大镜居中
+        // ★trial45(A2)：搜索钮背景与「首页/我的」统一。
+        //   两钮底色 = GCStyleTab 里的 colorWithWhite:0.96 alpha:0.92（实心白）；
+        //   搜索胶囊是 UIVisualEffectView（毛玻璃），必须先把 effect 关掉，
+        //   否则 blur 会盖在底色上、看起来仍不一样。
+        if ([cap isKindOfClass:UIVisualEffectView.class]) {
+            UIVisualEffectView *ev = (UIVisualEffectView *)cap;
+            if (ev.effect != nil) ev.effect = nil;
+        }
+        cap.backgroundColor = [UIColor colorWithWhite:0.96 alpha:0.92];
+        cap.layer.masksToBounds = YES;
+        GCStyleCenterIcon(cap, d, 24.0, 0);   // 放大镜居中（保持不变）
     }
     for (CALayer *la in [anchor.layer.sublayers copy]) {   // 独立白底/渐变层同夹成圆
         if (la.hidden || la.opacity < 0.02f) continue;
@@ -2220,34 +2230,7 @@ static void GCStyleDiscoverWidgets(UIWindow *win) {
 //   probe7 铁证：App 布局系统直接写 frame、不走控件自身 layoutSubviews（trial10 钩子因此空转），
 //   我们 11Hz tick 追写 60fps 的 App ⇒ before=608/after=673 每拍拉锯、dump 瞬间停在 App 位。
 //   此函数在 App 每次写位置后同事务内改回 pin 目标 ⇒ 零拉锯零闪烁。
-// ★trial43(D2)：孪生容器外观钳位。
-//   铁证（probe16 dump t=60.1s）：609.7 处有两个同尺寸控件叠着 ——
-//     WINPermanentCompassView {339,609.7} 44x44 sub=2
-//        ├ UIView own={0,+69.7}  → 窗口 679.4  cr=22 sub=0   ← 白底「3D」外观，被摆到父容器下方 69.7pt
-//        └ UIVisualEffectView own={0,−76.36}
-//     UIView {339,609.7} cr=100 sub=1  ← 我们钉的 2D 钮（只剩一圈环）
-//   ⇒ 我们只钉了后者，前者（真正的白圆外观）从没管过 = 白圆与空环分离。
-static void GCStylePinTwinFaces(UIView *w) {
-    if (!w || !w.superview) return;
-    UIView *sv = w.superview;
-    CGRect wr = [w convertRect:w.bounds toView:nil];
-    for (UIView *sib in [sv.subviews copy]) {
-        if (sib == w) continue;
-        CGRect sr = [sib convertRect:sib.bounds toView:nil];
-        if (fabs(sr.origin.x - wr.origin.x) > 3.0 || fabs(sr.origin.y - wr.origin.y) > 3.0) continue;
-        if (fabs(sr.size.width - wr.size.width) > 3.0 || fabs(sr.size.height - wr.size.height) > 3.0) continue;
-        CGRect bb = sib.bounds;
-        for (UIView *face in [sib.subviews copy]) {
-            if (![face isMemberOfClass:[UIView class]]) continue;   // 只认纯 UIView（白底圆），不碰模糊层
-            if (face.subviews.count != 0) continue;
-            if (CGRectEqualToRect(face.frame, bb)) continue;
-            [CATransaction begin]; [CATransaction setDisableActions:YES];
-            [face.layer removeAllAnimations];
-            face.frame = bb;
-            [CATransaction commit];
-        }
-    }
-}
+// trial45(A1)：GCStylePinTwinFaces 已删除（2D/3D 还原原生）。
 static BOOL GCStylePinOneBusy = NO;
 static void GCStylePinOne(UIView *v) {
     if (!v || GCStylePinOneBusy) return;                 // 防重入：钳位自身写 frame 会再触发钩子
@@ -2256,7 +2239,10 @@ static void GCStylePinOne(UIView *v) {
     UIView *capNow = (CachedLiteGroup && CachedLiteGroup.window) ? CachedLiteGroup : CachedRight;
     BOOL isCar = (v == CachedCar);
     BOOL isCap = (capNow && v == capNow);
-    BOOL is2D = (v == Cached2D);                          // trial27
+    // ★trial45(A1)：2D/3D 钮**还原原生** —— 交还 App 自己管。
+    //   不再钉位置、不再写 alpha/白底、不再钳内部内容与孪生外观（四层干预全撤）。
+    if (v == Cached2D) return;
+    BOOL is2D = NO;                                       // 保留变量，下方分支恒不执行
     // trial37（probe13 铁证）：hidden 期间**照钉几何**，只跳过可见性写入 ——
     //   旧 return 让 App 藏钮期间把它漂到 167/69（P37 流水 WINAJXCombinedWidgetView:167→69→667），
     //   复现时从错位跳回 = 老大说的「乱跑」。
@@ -2376,7 +2362,7 @@ static void GCStylePinOne(UIView *v) {
                     [CATransaction commit];
                 }
             }
-            GCStylePinTwinFaces(v);   // trial43(D2)：把孪生容器的白底外观钉回 bounds（修白圆/空环分离）
+            // trial45(A1)：GCStylePinTwinFaces 调用已撤（2D/3D 还原原生）
         }
     } @catch (__unused NSException *e) {}
     GCStylePinOneBusy = NO;
@@ -2444,49 +2430,7 @@ static void GCStyleHookSetPos(Class rc) {
         }), t2);
     }
 }
-// ★trial42(A2)：2D/3D 钮内容钳位 —— 在 App 写入的同一调用栈内纠回（谁最后写谁赢）。
-//   证据：截图实测「3D」白圆在 y=519.7pt、空环在 610pt（= capTop-57.3，环钉对了），内容漂 -90.3pt。
-//   trial41 的「每帧写直接子视图 frame」输在时序（我们写在前、App 布局在后）与深度（Lottie 更深）。
-static BOOL GCStyleInnerFillBusy = NO;
-static void GCStyleInnerFill(UIView *v) {
-    if (GCStyleInnerFillBusy || !v || !v.superview) return;
-    if (!Cached2D) return;
-    UIView *owner = v.superview;
-    if (owner != Cached2D && owner.superview != Cached2D) return;   // 只认 2D 钮子树（深度 ≤2）
-    CGRect bb = owner.bounds;
-    if (CGRectEqualToRect(v.frame, bb)) return;
-    GCStyleInnerFillBusy = YES;
-    [CATransaction begin]; [CATransaction setDisableActions:YES];
-    [v.layer removeAllAnimations];
-    v.transform = CGAffineTransformIdentity;
-    v.frame = bb;
-    [CATransaction commit];
-    GCStyleInnerFillBusy = NO;
-}
-static void GCStyleHookInnerFill(Class rc) {
-    if (!rc) return;
-    NSString *nm = NSStringFromClass(rc);
-    if (!nm || [GCStylePosHookedClasses() containsObject:nm]) return;   // 与 setPos 共用登记表防双挂
-    [GCStylePosHookedClasses() addObject:nm];
-    Method mf = class_getInstanceMethod(rc, @selector(setFrame:));
-    if (mf) {
-        IMP o = method_getImplementation(mf);
-        const char *t = method_getTypeEncoding(mf);
-        Replace(rc, @selector(setFrame:), imp_implementationWithBlock(^(UIView *self, CGRect f) {
-            ((void (*)(id, SEL, CGRect))o)(self, @selector(setFrame:), f);
-            GCStyleInnerFill(self);
-        }), t);
-    }
-    Method mc = class_getInstanceMethod(rc, @selector(setCenter:));
-    if (mc) {
-        IMP o2 = method_getImplementation(mc);
-        const char *t2 = method_getTypeEncoding(mc);
-        Replace(rc, @selector(setCenter:), imp_implementationWithBlock(^(UIView *self, CGPoint c) {
-            ((void (*)(id, SEL, CGPoint))o2)(self, @selector(setCenter:), c);
-            GCStyleInnerFill(self);
-        }), t2);
-    }
-}
+// trial45(A1)：GCStyleInnerFill / GCStyleHookInnerFill 已删除（2D/3D 还原原生）。
 // ★trial26(A1)：layer 几何同栈纠偏 —— probe8 铁证：车机类 view 钩子已挂但 WRITE
 //   拉锯 66/s 不停、model 帧帧停 App 位 ⇒ App 走 AutoLayout 内部通道/layer 直写，
 //   绕过 view setFrame/setCenter 选择器；一切几何写入最终汇到 CALayer setter，
@@ -2677,8 +2621,7 @@ static void GCStylePinWidgetsInner(UIWindow *win) {   // trial25(A2)：原体改
             GCStyleHookSetPos(v26.class);   // 内部 GCStylePosHookedClasses 去重
             GCStyleHookLayerGeo(v26);       // trial26(A1)：layer setter 钩（按 layer 类去重）
             // trial42(A2)：2D/3D 钮内部内容类 —— App 写它们的 frame/center 时同事务钉回 bounds
-            GCStyleHookInnerFill(NSClassFromString(@"WINAJXCombinedItemView"));
-            GCStyleHookInnerFill(NSClassFromString(@"LOTAnimationView"));
+            // trial45(A1)：GCStyleHookInnerFill 注册已撤（2D/3D 还原原生）
         }
     }
     GCStylePinTabItems(win);                  // trial42(A3)：首页/我的 每帧钉 x
