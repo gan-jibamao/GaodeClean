@@ -18,7 +18,7 @@
 // ---- jibamao 个人标识（编译进 dylib，可用 strings 核对）----
 static NSString *const kGCAuthor      = @"jibamao";
 static NSString *const kGCRepo        = @"https://gan-jibamao.github.io/";
-static NSString *const kGCVersion     = @"0.9.63+trial46";
+static NSString *const kGCVersion     = @"0.9.66+probe18";
 
 // 0.9.18（A1）：底边间隙**按控件分开**，对表原生（搜索栏白底顶边 = 702.6pt）
 //   车机钮（连接车机 · WINDeviceInterconnectWidget）：原生底 652 → 间隙 50.6 → 取 50
@@ -590,6 +590,7 @@ static NSString *P40WeatherList(void) {
 //   目的：dump 已证明我们钉的坐标是准的，但画面仍在动 ⇒ 动的是别的东西。
 //   本段只记录、不写任何几何，用「模型 rect vs 视觉 rect」直接指出谁在动。
 static NSString *P43Lines[80];
+static int GCStyleSwallowCount;   // trial47(A2)：定义在下方 GCStyleRescueParent 处（此处前置声明）
 static int P43N, P43I;
 static double P43Last;
 
@@ -642,10 +643,11 @@ static void P43Snap(void) {
     if (CachedTabBar)   // trial44：记录底栏 transform（a=缩放, ty=平移）—— 判定 App 是否用缩放挤按钮
         [s appendString:[NSString stringWithFormat:@" 栏T=%.2f,%.2f", CachedTabBar.transform.a, CachedTabBar.transform.ty]];
     // trial46(B2)：一眼分辨「控件还在、只是被隐藏」还是「被挪走」
-    [s appendString:[NSString stringWithFormat:@" 车机h=%d 2Dh=%d 2D父h=%d",
+    [s appendString:[NSString stringWithFormat:@" 车机h=%d 2Dh=%d 2D父h=%d 吞隐=%d",
                       CachedCar ? CachedCar.hidden : -1,
                       Cached2D ? Cached2D.hidden : -1,
-                      (Cached2D && Cached2D.superview) ? Cached2D.superview.hidden : -1]];
+                      (Cached2D && Cached2D.superview) ? Cached2D.superview.hidden : -1,
+                      GCStyleSwallowCount]];
     if (CachedTabBar) {
         NSArray *subs = [CachedTabBar.subviews copy];
         int k = 0;
@@ -2236,18 +2238,48 @@ static void GCStyleDiscoverWidgets(UIWindow *win) {
 //   我们 11Hz tick 追写 60fps 的 App ⇒ before=608/after=673 每拍拉锯、dump 瞬间停在 App 位。
 //   此函数在 App 每次写位置后同事务内改回 pin 目标 ⇒ 零拉锯零闪烁。
 // trial45(A1)：GCStylePinTwinFaces 已删除（2D/3D 还原原生）。
-// ★trial46(B1)：父容器可见性救援（只救可见性，不碰几何/外观）。
-//   证据：trial45 停用 2D 分支后，车机钮与 2D/3D 钮同时消失（老大 22:41 截图）。
-//   两者同挂 WINAJXCombinedWidgetView，App 把它 hidden 后子钮 alpha=1 也画不出来；
-//   这段救援原本嵌在 is2D 分支里，撤掉 2D 分支就把两个钮的可见性一起弄丢了。
+// ★trial47(A1)：确定性可见性 —— 给父容器打「保持可见」标记，并吞掉 App 的隐藏。
+//   证据（probe17）：2D钮 m=(339,610) 位置正确、2Dh=0 自身可见，
+//   但 2D父h=1 在 261/263 个采样点成立 ⇒ 父容器整场被隐藏，子钮画不出来。
+//   旧法每帧对拉（0.3s 冷却 = 3次/秒）打不赢 App 的 60次/秒 ⇒ 改成钩 setHidden: 直接吞掉。
+static const void *kGCKeepVisibleKey = &kGCKeepVisibleKey;
+#ifdef GAODECLEAN_PROBE
+static int GCStyleSwallowCount = 0;   // 吞掉隐藏的次数（探针判定：钩子是否真被走到）
+#endif
+static void GCStyleMarkKeepVisible(UIView *p) {
+    objc_setAssociatedObject(p, kGCKeepVisibleKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+}
+static BOOL GCStyleWantsVisible(UIView *v) {
+    return [objc_getAssociatedObject(v, kGCKeepVisibleKey) boolValue];
+}
+static void GCStyleHookHidden(Class rc) {
+    if (!rc) return;
+    static NSMutableSet *done;
+    if (!done) done = [NSMutableSet set];
+    NSString *nm = NSStringFromClass(rc);
+    if (!nm || [done containsObject:nm]) return;
+    [done addObject:nm];
+    Method m = class_getInstanceMethod(rc, @selector(setHidden:));
+    if (!m) return;
+    IMP o = method_getImplementation(m);
+    const char *t = method_getTypeEncoding(m);
+    Replace(rc, @selector(setHidden:), imp_implementationWithBlock(^(UIView *self, BOOL h) {
+        if (h && GCStyleWantsVisible(self)) {   // 吞掉：只对我们标记过的实例生效
+#ifdef GAODECLEAN_PROBE
+            GCStyleSwallowCount++;
+#endif
+            return;
+        }
+        ((void (*)(id, SEL, BOOL))o)(self, @selector(setHidden:), h);
+    }), t);
+}
 static void GCStyleRescueParent(UIView *v) {
     if (!v || !v.superview || !v.window || v.hidden) return;
     UIView *p = v.superview;
+    if (GCStyleWantsVisible(p)) return;              // 已接管，无需每帧再写
     if (!(p.hidden || p.alpha < 0.05f || p.layer.opacity < 0.05f)) return;
-    static double last;
-    double now = CACurrentMediaTime();
-    if (now - last <= 0.3) return;   // 0.3s 冷却：不做每帧对拉
-    last = now;
+    GCStyleHookHidden([p class]);                    // 先挂钩（按类去重）
+    GCStyleMarkKeepVisible(p);                       // 再打标记
     [CATransaction begin]; [CATransaction setDisableActions:YES];
     p.hidden = NO; p.alpha = 1.0f; p.layer.opacity = 1.0f;
     [CATransaction commit];
