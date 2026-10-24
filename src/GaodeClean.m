@@ -18,7 +18,7 @@
 // ---- jibamao 个人标识（编译进 dylib，可用 strings 核对）----
 static NSString *const kGCAuthor      = @"jibamao";
 static NSString *const kGCRepo        = @"https://gan-jibamao.github.io/";
-static NSString *const kGCVersion     = @"0.9.55+probe15";
+static NSString *const kGCVersion     = @"0.9.56+trial40";
 
 // 0.9.18（A1）：底边间隙**按控件分开**，对表原生（搜索栏白底顶边 = 702.6pt）
 //   车机钮（连接车机 · WINDeviceInterconnectWidget）：原生底 652 → 间隙 50.6 → 取 50
@@ -1749,7 +1749,15 @@ static void GCStyleTab(UIView *anchor) {
         it.layer.cornerRadius = d * 0.5;
         it.layer.masksToBounds = YES;
         it.layer.shadowOpacity = 0; it.layer.shadowPath = nil;   // trial14：杀 App 遗留阴影（首页左侧灰影真凶）
-        if (!it.backgroundColor) it.backgroundColor = [UIColor colorWithWhite:0.96 alpha:0.92];
+        // ★trial40（录屏逐帧铁证 11.1s 有白圆 → 20.0s 三个全没了）：
+        //   旧写法 if (!it.backgroundColor) 只在 nil 时补 —— App 一旦把底色设成**透明**（非 nil）
+        //   就永久跳过 ⇒ 白圆消失、图标悬在地图上 = 老大看到的「按钮在乱跑」。
+        //   改为每帧无条件强制写回（幂等，值相同不触发重绘）。
+        it.backgroundColor = [UIColor colorWithWhite:0.96 alpha:0.92];
+        if (it.alpha < 0.999f) it.alpha = 1.0f;
+        if (it.hidden) it.hidden = NO;
+        it.layer.cornerRadius = d * 0.5;
+        it.layer.masksToBounds = YES;
         for (UIView *si in it.subviews) {   // subitem 同步 54；图标居中；标签隐藏
             CGRect sf = CGRectMake(0, 0, d, d);
             if (!CGRectEqualToRect(sf, si.frame)) si.frame = sf;
@@ -2260,10 +2268,22 @@ static void GCStylePinOne(UIView *v) {
 #endif
                 }
             }
-            // ★trial38（probe13/14 铁证）：trial37 的「父容器拉回可见」已撤。
-            //   实测我们每帧拉回 1009~1878 次，App 每帧又藏回去（dump 恒 h=1）——
-            //   说明我们钉的是**被 App 藏起来的替身**，这场争夺只会造成闪烁。
-            //   真身定位改由 probe14 的全窗口 Lottie 清单负责。
+            // ★trial40：父容器被 App 隐藏时**边沿触发**拉回（0.3s 冷却），不再每帧对拉。
+            //   dump 铁证：WINAJXCombinedWidgetView h=1 时子钮 a=1.00 也画不出来 = 老大看到的「透明」。
+            {
+                static double sP40Last;
+                UIView *p40 = v.superview;
+                if (p40 && p40.window && !v.hidden
+                    && (p40.hidden || p40.alpha < 0.05f || p40.layer.opacity < 0.05f)) {
+                    double n40 = CACurrentMediaTime();
+                    if (n40 - sP40Last > 0.3) {
+                        sP40Last = n40;
+                        [CATransaction begin]; [CATransaction setDisableActions:YES];
+                        p40.hidden = NO; p40.alpha = 1.0f; p40.layer.opacity = 1.0f;
+                        [CATransaction commit];
+                    }
+                }
+            }
         } else g = CGRectMake(sw - 10 - wr.size.width, pinBottom - wr.size.height, wr.size.width, wr.size.height);
         CGRect local = [v.superview convertRect:g fromView:win];
         // ★trial33（老大：完全乱了，车机钮与 2D 钮不见）：trial32 的链式补偿被整体撤掉。
