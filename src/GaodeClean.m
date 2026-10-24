@@ -438,6 +438,16 @@ static void P29Tab(int i, UIView *v, CGFloat dia, CAShapeLayer *mk) {
 
 // probe31：可见性全量快照。视频证明整块白圆消失，而 alpha/bounds/mask 全正常 => 真凶在盲区。
 //   盲区清单：layer.hidden / layer.opacity / bounds.origin / frame / 祖先链 / mask 层自身 / 遮挡。
+// probe31b(A1)：逐字段判单位矩阵，避免引入 CATransform3DIsIdentity 外部符号。
+// 崩溃报 bad bind opcode 0x00，probe31 相对 probe30 唯一新增导入就是它，先摘掉。
+static int P30IsIdentity(CATransform3D t) {
+    return (t.m11 == 1.0 && t.m22 == 1.0 && t.m33 == 1.0 && t.m44 == 1.0
+            && t.m12 == 0.0 && t.m13 == 0.0 && t.m14 == 0.0
+            && t.m21 == 0.0 && t.m23 == 0.0 && t.m24 == 0.0
+            && t.m31 == 0.0 && t.m32 == 0.0 && t.m34 == 0.0
+            && t.m41 == 0.0 && t.m42 == 0.0 && t.m43 == 0.0) ? 0 : 1;
+}
+
 static void P30Snap(int i, UIView *v, CAShapeLayer *mk) {
     if (i < 0 || i > 1 || !v) return;
     CALayer *L = v.layer, *pl = L.presentationLayer ?: L;
@@ -459,7 +469,7 @@ static void P30Snap(int i, UIView *v, CAShapeLayer *mk) {
         @"pres=%.2f mk[f=(%.1f,%.1f,%.1fx%.1f) bb=%.1fx%.1f h=%d o=%.2f] hit=%@ | %@\n",
         P7Now(), i, f.origin.x, f.origin.y, f.size.width, f.size.height,
         b.origin.x, b.origin.y, (double)v.alpha, (double)L.opacity, L.hidden ? 1 : 0,
-        CATransform3DIsIdentity(L.transform) ? 0 : 1, (double)pa,
+        P30IsIdentity(L.transform), (double)pa,
         mk.frame.origin.x, mk.frame.origin.y, mk.frame.size.width, mk.frame.size.height,
         bb.size.width, bb.size.height, mk.hidden ? 1 : 0, (double)mk.opacity,
         hit ? NSStringFromClass(hit.class) : @"nil", ch]);
