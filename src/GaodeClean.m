@@ -2741,7 +2741,13 @@ static void GCStyleLayerFix(CALayer *la) {
         CGRect wr = [v convertRect:v.bounds toView:win];
         CGRect g;
         if (v == CachedCar) {
-            g = CGRectMake(10, pinBottom - 20 - 18 - wr.size.height, wr.size.width, wr.size.height);
+            // ★trial51(A1)：回退 0.9.29 公式 —— bottom = 搜索栏顶 - GCGapCar(50)
+            //   probe23 日志铁证：改前车机恒在 673（旧公式 pinBottom-20-18-h），
+            //   而 0.9.29 的 AlignOneWidget(bar, CachedCar, barTop, 50) 给出 608.6。
+            //   ★这是真正生效的路径（全局 layer 钩子），GCStylePinOne 的 isCar 分支是死代码。
+            CGFloat barTopCar = SearchBarView ? [SearchBarView convertPoint:CGPointZero toView:win].y
+                                              : (pinBottom - 52.4);
+            g = CGRectMake(10, barTopCar - 50.0 - wr.size.height, wr.size.width, wr.size.height);
         } else {
             g = CGRectMake(sw - 10 - wr.size.width, pinBottom - wr.size.height, wr.size.width, wr.size.height);
         }
@@ -2861,7 +2867,13 @@ static void GCStylePinWidgetsInner(UIWindow *win) {   // trial25(A2)：原体改
     UIView *car = CachedCar;
     if (car && car.window && car.superview) {
         CGRect wr = [car convertRect:car.bounds toView:win];
-        CGFloat carY = pinBottom - 20 - 18 - wr.size.height;   // 天气行高20 + 原生间隙18
+        CGFloat carY;
+        {
+            // ★trial51(A2)：与 A1 同步 —— 0.9.29 公式 bottom = 搜索栏顶 - 50
+            CGFloat barTopCar = SearchBarView ? [SearchBarView convertPoint:CGPointZero toView:win].y
+                                              : (pinBottom - 52.4);
+            carY = barTopCar - 50.0 - wr.size.height;
+        }
         CGRect g = CGRectMake(10, carY, wr.size.width, wr.size.height);
         CGRect local = [car.superview convertRect:g fromView:win];
         if (!CGRectEqualToRect(local, car.frame)) {
