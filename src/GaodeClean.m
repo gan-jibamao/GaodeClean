@@ -18,7 +18,7 @@
 // ---- jibamao 个人标识（编译进 dylib，可用 strings 核对）----
 static NSString *const kGCAuthor      = @"jibamao";
 static NSString *const kGCRepo        = @"https://gan-jibamao.github.io/";
-static NSString *const kGCVersion     = @"0.9.39+trial29";
+static NSString *const kGCVersion     = @"0.9.40+trial30";
 
 // 0.9.18（A1）：底边间隙**按控件分开**，对表原生（搜索栏白底顶边 = 702.6pt）
 //   车机钮（连接车机 · WINDeviceInterconnectWidget）：原生底 652 → 间隙 50.6 → 取 50
@@ -137,6 +137,7 @@ static void GCProbeTick7(void);                      // probe7：pin 链路取�
 static double P7T0;
 static int P7NTicks, P7DiscCalls, P7DiscSkips, P7PinCalls, P7WTicks;
 static int P7Writes[6];      // 0=车机 1=右胶囊 2=路线 3=2D 4=天气行 5=保留
+static int P7Solid;          // trial30：2D 钮「实心钉」触发次数（alpha/白底写入）
 static int P7WGates[3];      // 0=通过 1=bar非视图 2=评估
 static double P7FirstSeen[6], P7FirstPin[6], P7FirstKey;
 static __weak UIView *P7LastPW;
@@ -1419,9 +1420,12 @@ static void GCProbeDump7(NSString *reason) {
             }
         }
     }
-    if (Cached2D)   // trial27：2D 钮自证行（类名/窗口系 rect/hidden）
-        [o appendFormat:@"2D钮 %@ win=%@ hid=%d\n", NSStringFromClass(Cached2D.class),
-            NSStringFromCGRect([Cached2D convertRect:Cached2D.bounds toView:nil]), Cached2D.hidden];
+    if (Cached2D)   // trial27：2D 钮自证行（类名/窗口系 rect/hidden）；trial30 补 alpha/白底α/实心钉计数
+        [o appendFormat:@"2D钮 %@ win=%@ hid=%d a=%.2f bgA=%.2f 实心=%d\n", NSStringFromClass(Cached2D.class),
+            NSStringFromCGRect([Cached2D convertRect:Cached2D.bounds toView:nil]), Cached2D.hidden,
+            Cached2D.alpha,
+            Cached2D.backgroundColor ? CGColorGetAlpha(Cached2D.backgroundColor.CGColor) : 0,
+            P7Solid];
     if (CachedCar) {
         CALayer *p8pl = CachedCar.layer.presentationLayer;
         NSMutableString *p8tf = [NSMutableString string];
@@ -1606,6 +1610,28 @@ static void GCStylePinOne(UIView *v) {
             CGRect capw = [capNow convertRect:capNow.bounds toView:win];
             g = CGRectMake(CGRectGetMidX(capw) - wr.size.width / 2,
                            capw.origin.y - 57.3, wr.size.width, wr.size.height);
+            // ★trial30（老大 12:59 截图铁证：44pt 位置精准、内部全透明只剩 1px 环）：
+            //   钮的可见内容 = 自身 backgroundColor + Lottie 动画，App 在加载/切换态会淡掉或清底，
+            //   trial29 只钉几何 ⇒ 透明态无人纠正。这里补「实心钉」，幂等（达标即不写）。
+            if (!v.hidden) {
+                if (v.alpha < 0.999f) {
+                    [CATransaction begin]; [CATransaction setDisableActions:YES];
+                    v.alpha = 1.0f;
+                    [CATransaction commit];
+#ifdef GAODECLEAN_PROBE
+                    P7Solid++;
+#endif
+                }
+                CGFloat ba30 = v.backgroundColor ? CGColorGetAlpha(v.backgroundColor.CGColor) : 0;
+                if (ba30 < 0.9f) {
+                    [CATransaction begin]; [CATransaction setDisableActions:YES];
+                    v.backgroundColor = [UIColor whiteColor];
+                    [CATransaction commit];
+#ifdef GAODECLEAN_PROBE
+                    P7Solid++;
+#endif
+                }
+            }
         } else g = CGRectMake(sw - 10 - wr.size.width, pinBottom - wr.size.height, wr.size.width, wr.size.height);
         CGRect local = [v.superview convertRect:g fromView:win];
         if (!CGRectEqualToRect(local, v.frame)) {
