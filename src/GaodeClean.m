@@ -18,7 +18,7 @@
 // ---- jibamao 个人标识（编译进 dylib，可用 strings 核对）----
 static NSString *const kGCAuthor      = @"jibamao";
 static NSString *const kGCRepo        = @"https://gan-jibamao.github.io/";
-static NSString *const kGCVersion     = @"0.9.34+probe8";
+static NSString *const kGCVersion     = @"0.9.35+trial26";
 
 // 0.9.18（A1）：底边间隙**按控件分开**，对表原生（搜索栏白底顶边 = 702.6pt）
 //   车机钮（连接车机 · WINDeviceInterconnectWidget）：原生底 652 → 间隙 50.6 → 取 50
@@ -109,6 +109,7 @@ static void LayoutMinimalHome(id handler);
 static void AlignCornerWidgets(UIView *bar);
 static void GCStyleDiscoverWidgets(UIWindow *win);   // trial11：实例发现独立成函数（pin 自给自足）
 static void GCStylePinWidgets(UIWindow *win);        // trial25(A2)：重入守卫包装前置声明（容器钩子/驱动器用）
+static NSMutableSet<NSString *> *GCStyleLayerHookedClasses(void);   // trial26：定义在后，P8 dump 段先用
 static BOOL IsRightBottomWidget(UIView *v);            // trial11：前置声明（discover 用）
 static BOOL GCCIsLiteGroupCapsule(UIView *v);          // trial11：前置声明（discover 用）
 static BOOL FixingHintText;
@@ -166,6 +167,7 @@ static void P7Write(int idx, CGRect before, CGRect after, CGRect contWin) {
 }
 // ══ probe8：2D/3D 切换车机位漂移定罪（帧级 presentation 分歧 + 驱动率 + 容器钩子）══
 static long P8Fires, P8Busy, P8NoWin, P8ContHooks, P8Diverge;
+static long P8LayerFires, P8LayerFixes;   // trial26：layer setter 钩子命中/纠偏计数
 static double P8CarMinY = 1e9, P8CarMaxY = -1e9, P8LastDvLog = -100;
 static NSMutableSet<NSString *> *GCStylePosHookedClasses(void);   // dump 打印前置声明（定义在后）
 __attribute__((unused)) static void P8Trace(void) {
@@ -1359,6 +1361,8 @@ static void GCProbeDump7(NSString *reason) {
         P8Fires, P8Fires / (P7Now() > 0.5 ? P7Now() : 0.5), P8Busy, P8NoWin, P8ContHooks, P8Diverge,
         P8CarMinY > 1e8 ? -1.0 : P8CarMinY, P8CarMaxY < -1e8 ? -1.0 : P8CarMaxY,
         (P8CarMinY > 1e8 || P8CarMaxY < -1e8) ? -1.0 : P8CarMaxY - P8CarMinY];
+    [o appendFormat:@"P8 layerフック: fires=%ld fixes=%ld フック済みレイヤークラス=%@\n",
+        P8LayerFires, P8LayerFixes, [GCStyleLayerHookedClasses() allObjects]];
     if (CachedCar) {
         CALayer *p8pl = CachedCar.layer.presentationLayer;
         NSMutableString *p8tf = [NSMutableString string];
@@ -1567,6 +1571,100 @@ static void GCStyleHookSetPos(Class rc) {
         }), t2);
     }
 }
+// ★trial26(A1)：layer 几何同栈纠偏 —— probe8 铁证：车机类 view 钩子已挂但 WRITE
+//   拉锯 66/s 不停、model 帧帧停 App 位 ⇒ App 走 AutoLayout 内部通道/layer 直写，
+//   绕过 view setFrame/setCenter 选择器；一切几何写入最终汇到 CALayer setter，
+//   在写入的同一调用栈内纠回 = 最后写的人永远是我们，拉锯物理终结。
+static BOOL GCStyleLayerFixBusy = NO;
+static void GCStyleLayerFix(CALayer *la) {
+    if (GCStyleLayerFixBusy || !la) return;
+    UIView *capNow = (CachedLiteGroup && CachedLiteGroup.window) ? CachedLiteGroup : CachedRight;
+    UIView *v = nil;
+    if (CachedCar && la == CachedCar.layer) v = CachedCar;
+    else if (capNow && la == capNow.layer) v = capNow;
+    if (!v || !v.window || !v.superview) return;
+    GCStyleLayerFixBusy = YES;
+    @try {
+        UIWindow *win = v.window;
+        CGFloat sw = win.bounds.size.width, sh = win.bounds.size.height;
+        const CGFloat pinBottom = sh - 81 - 16;
+        CGRect wr = [v convertRect:v.bounds toView:win];
+        CGRect g;
+        if (v == CachedCar) {
+            g = CGRectMake(10, pinBottom - 20 - 18 - wr.size.height, wr.size.width, wr.size.height);
+        } else {
+            g = CGRectMake(sw - 10 - wr.size.width, pinBottom - wr.size.height, wr.size.width, wr.size.height);
+        }
+        CGRect local = [v.superview convertRect:g fromView:win];
+        if (!CGRectEqualToRect(local, la.frame)) {
+            [CATransaction begin];
+            [CATransaction setDisableActions:YES];
+            [la removeAllAnimations];
+            la.frame = local;
+            [CATransaction commit];
+#ifdef GAODECLEAN_PROBE
+            P8LayerFixes++;
+#endif
+        }
+    } @catch (__unused NSException *e) {}
+    GCStyleLayerFixBusy = NO;
+}
+static NSMutableSet<NSString *> *GCStyleLsHooked26(void) {   // trial26(A2)：layoutSubviews 已挂类
+    static NSMutableSet *s26b = nil;
+    static dispatch_once_t once26b;
+    dispatch_once(&once26b, ^{ s26b = [NSMutableSet set]; });
+    return s26b;
+}
+static NSMutableSet<NSString *> *GCStyleLayerHookedClasses(void) {
+    static NSMutableSet *s26 = nil;
+    static dispatch_once_t once26;
+    dispatch_once(&once26, ^{ s26 = [NSMutableSet set]; });
+    return s26;
+}
+static void GCStyleHookLayerGeo(UIView *v) {
+    if (!v || !v.layer) return;
+    Class lc = v.layer.class;
+    NSString *nm = NSStringFromClass(lc);
+    if (!nm || !lc || [GCStyleLayerHookedClasses() containsObject:nm]) return;
+    [GCStyleLayerHookedClasses() addObject:nm];
+    Method mf = class_getInstanceMethod(lc, @selector(setFrame:));
+    if (mf) {
+        IMP o = method_getImplementation(mf);
+        const char *t = method_getTypeEncoding(mf);
+        Replace(lc, @selector(setFrame:), imp_implementationWithBlock(^(CALayer *self, CGRect f) {
+            ((void (*)(id, SEL, CGRect))o)(self, @selector(setFrame:), f);
+#ifdef GAODECLEAN_PROBE
+            P8LayerFires++;
+#endif
+            GCStyleLayerFix(self);
+        }), t);
+    }
+    Method mp = class_getInstanceMethod(lc, @selector(setPosition:));
+    if (mp) {
+        IMP o2 = method_getImplementation(mp);
+        const char *t2 = method_getTypeEncoding(mp);
+        Replace(lc, @selector(setPosition:), imp_implementationWithBlock(^(CALayer *self, CGPoint p) {
+            ((void (*)(id, SEL, CGPoint))o2)(self, @selector(setPosition:), p);
+#ifdef GAODECLEAN_PROBE
+            P8LayerFires++;
+#endif
+            GCStyleLayerFix(self);
+        }), t2);
+    }
+    Method mb = class_getInstanceMethod(lc, @selector(setBounds:));
+    if (mb) {
+        IMP o3 = method_getImplementation(mb);
+        const char *t3 = method_getTypeEncoding(mb);
+        Replace(lc, @selector(setBounds:), imp_implementationWithBlock(^(CALayer *self, CGRect b) {
+            ((void (*)(id, SEL, CGRect))o3)(self, @selector(setBounds:), b);
+#ifdef GAODECLEAN_PROBE
+            P8LayerFires++;
+#endif
+            GCStyleLayerFix(self);
+        }), t3);
+    }
+}
+
 
 // ★trial9：角控件绝对钉死（不再对表搜索栏）—— 右胶囊右10/底755；车机钮左10、
 //   天气行原生关系（钮下18、左对齐）⇒ 行底=755 ⇒ 钮底=755-20-18。每 tick/布局钩子覆写 ⇒ 不漂。
@@ -1638,16 +1736,22 @@ static void GCStylePinWidgetsInner(UIWindow *win) {   // trial25(A2)：原体改
 #endif
     // trial10：车机钮/胶囊容器类的 layoutSubviews 钩子 —— App 重排（点定位切3D等）落地的
     //   同一布局事务内回钉 ⇒ 零可见跳变。
-    static BOOL carHooked = NO, capHooked = NO;
-    if (!carHooked && car) {
-        carHooked = YES;
-        HookVoid(NSStringFromClass(car.class), @"layoutSubviews", ^(UIView *v) { GCStylePinWidgets(v.window); });
-        GCStyleHookSetPos(car.class);   // trial24：setFrame:/setCenter: 实时钳位（拦 App 直写）
-    }
-    if (!capHooked && cap) {
-        capHooked = YES;
-        HookVoid(NSStringFromClass(cap.class), @"layoutSubviews", ^(UIView *v) { GCStylePinWidgets(v.window); });
-        GCStyleHookSetPos(cap.class);   // trial24
+    // ★trial26(A2)：carHooked/capHooked 一次性标志废除 —— probe8 dump 铁证：Lite 1.6s 死亡后
+    //   cap 回退 WINAJXCombinedWidgetView，但一次性标志已置位 ⇒ 胶囊真身类从未挂上钩。
+    //   改为按当前实例类名动态登记；三类钩子（layoutSubviews/setPos/layerGeo）均类级去重。
+    {
+        UIView *w26[2] = { car, cap };
+        for (int i26 = 0; i26 < 2; i26++) {
+            UIView *v26 = w26[i26];
+            if (!v26) continue;
+            NSString *cn26 = NSStringFromClass(v26.class);
+            if (cn26 && ![GCStyleLsHooked26() containsObject:cn26]) {
+                [GCStyleLsHooked26() addObject:cn26];
+                HookVoid(cn26, @"layoutSubviews", ^(UIView *v) { GCStylePinWidgets(v.window); });
+            }
+            GCStyleHookSetPos(v26.class);   // 内部 GCStylePosHookedClasses 去重
+            GCStyleHookLayerGeo(v26);       // trial26(A1)：layer setter 钩（按 layer 类去重）
+        }
     }
 }
 // ★trial25(A2)：重入守卫包装 —— pin 现有帧级驱动/容器钩子/子控件钩子/layoutSubviews 钩子
@@ -4258,6 +4362,7 @@ __attribute__((constructor)) static void Initialize(void) {
             GCStyleHookContainerPos(NSClassFromString(@"MapWidgetContainerView"));
             GCStyleHookContainerPos(NSClassFromString(@"WINMapSideBarWidgetContainerView"));
             GCStyleHookContainerPos(NSClassFromString(@"GDTransparentView"));
+            GCStyleHookContainerPos(NSClassFromString(@"NMMoveContentView"));   // trial26：车机链祖先（probe8 dump 链），CONTMOVE 监测盲区
             // ★trial25(A1)：帧级钉位循环（详见 GCStylePinDriver 注释）。RunLoop 持有 link，
             //   static 强引用持有 target；CommonModes 保证滚动/手势 tracking 期间照跑。
             if (!GCStylePinDrv) {
