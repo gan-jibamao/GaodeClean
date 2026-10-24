@@ -476,11 +476,93 @@ static void P30Snap(int i, UIView *v, CAShapeLayer *mk) {
 }
 
 // probe31(A2)：心跳 —— 让「代码没跑」与「没有变化」在日志里可区分
-static void P30Heartbeat(int ia, int ib, int bar) {
+static void P31Shot(int i, CGRect wr, UIWindow *win);
+
+static void P30Heartbeat(int ia, int ib, int bar, UIView *barV) {
     static int hb;
     if (++hb % 15) return;
-    P25Append([NSString stringWithFormat:@"t=%.2f HB items=%d/%d bar=%d\n",
-               P7Now(), ia, ib, bar]);
+    if (!barV) { P25Append([NSString stringWithFormat:@"t=%.2f HB items=%d/%d bar=0\n", P7Now(), ia, ib]); return; }
+    CGRect f = barV.frame;
+    P25Append([NSString stringWithFormat:
+        @"t=%.2f HB items=%d/%d bar=1 f=(%.0f,%.0f,%.0fx%.0f) a=%.2f lo=%.2f lh=%d msk=%d\n",
+        P7Now(), ia, ib, f.origin.x, f.origin.y, f.size.width, f.size.height,
+        (double)barV.alpha, (double)barV.layer.opacity, barV.layer.hidden ? 1 : 0,
+        barV.layer.mask ? 1 : 0]);
+}
+
+// probe32(A2)：不可见瞬间抓一张窗口实况，直接看屏幕上到底是什么。
+//   上限 6 张，避免写盘风暴；只在 bits 翻转时触发。
+static void P31Shot(int i, CGRect wr, UIWindow *win) {
+    static int shots;
+    if (shots >= 6 || !win) return;
+    shots++;
+    @try {
+        CGRect r = CGRectInset(wr, -40, -40);
+        if (!CGRectIntersectsRect(r, win.bounds) || r.size.width < 8.0f || r.size.height < 8.0f) return;
+        UIGraphicsImageRenderer *ren = [[UIGraphicsImageRenderer alloc] initWithSize:r.size];
+        UIImage *img = [ren imageWithActions:^(UIGraphicsImageRendererContext *ctx) {
+            [win drawViewHierarchyInRect:CGRectMake(-r.origin.x, -r.origin.y,
+                                                    win.bounds.size.width, win.bounds.size.height)
+                       afterScreenUpdates:NO];
+        }];
+        NSString *dir = [NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES) firstObject];
+        NSString *path = [dir stringByAppendingPathComponent:
+                          [NSString stringWithFormat:@"GaodeClean-vis%d-%d.png", i, shots]];
+        [UIImagePNGRepresentation(img) writeToFile:path atomically:YES];
+        P25Append([NSString stringWithFormat:@"t=%.2f SHOT[%d] %@\n", P7Now(), i, path.lastPathComponent]);
+    } @catch (__unused NSException *e) {}
+}
+
+// probe32(A1)：每帧算一次「到底看不看得见」，翻转即记。
+//   probe31b 铁证：心跳零断档 + 属性全恒定 + 屏幕上整块没有
+//   => 成因只可能在「兄弟遮挡」或「自身绘制内容被清」，两者 SNAP 都没覆盖。
+static void P31Vis(int i, UIView *v, CAShapeLayer *mk, UIWindow *win) {
+    if (i < 0 || i > 1 || !v || !win) return;
+    unsigned bits = 0;
+    NSString *culprit = @"-";
+    UIView *p = v.superview;
+    for (int k = 0; k < 8 && p; k++, p = p.superview) {
+        if (p.hidden) { bits |= 1u << 4; if (culprit.length < 2) culprit = [NSString stringWithFormat:@"%@.hidden", NSStringFromClass(p.class)]; }
+        if (p.alpha < 0.05f) { bits |= 1u << 4; if (culprit.length < 2) culprit = [NSString stringWithFormat:@"%@.alpha=%.2f", NSStringFromClass(p.class), (double)p.alpha]; }
+        if (p.layer.hidden) { bits |= 1u << 4; if (culprit.length < 2) culprit = [NSString stringWithFormat:@"%@.lh", NSStringFromClass(p.class)]; }
+        if (p.layer.opacity < 0.05f) { bits |= 1u << 4; if (culprit.length < 2) culprit = [NSString stringWithFormat:@"%@.lo=%.2f", NSStringFromClass(p.class), (double)p.layer.opacity]; }
+    }
+    if (v.hidden) bits |= 1u << 0;
+    if (v.alpha < 0.05f) bits |= 1u << 1;
+    if (v.layer.hidden) bits |= 1u << 2;
+    if (v.layer.opacity < 0.05f) bits |= 1u << 3;
+    if (!mk || !mk.path || CGPathGetBoundingBox(mk.path).size.width < 8.0) bits |= 1u << 5;
+    CGFloat bgA = 0.0;
+    @try {
+        if (v.layer.backgroundColor) {
+            UIColor *bg = [UIColor colorWithCGColor:v.layer.backgroundColor];
+            if (bg) [bg getRed:NULL green:NULL blue:NULL alpha:&bgA];
+        }
+    } @catch (__unused NSException *e) {}
+    if (bgA < 0.05) bits |= 1u << 6;
+    int subs = 0, vis = 0;
+    for (UIView *sv in v.subviews) { subs++; if (!sv.hidden && sv.alpha > 0.05f) vis++; }
+    if (subs > 0 && vis == 0) bits |= 1u << 7;
+    CGRect wr = [v convertRect:v.bounds toView:win];
+    if (wr.size.width < 4.0f || wr.size.height < 4.0f || !CGRectIntersectsRect(wr, win.bounds)) bits |= 1u << 8;
+    static unsigned lastBits[2]; static int hasV[2];
+    if (hasV[i] && bits == lastBits[i]) return;
+    hasV[i] = 1; lastBits[i] = bits;
+    NSMutableString *sib = [NSMutableString string];
+    if (v.superview) {
+        NSArray *ss = v.superview.subviews;
+        NSUInteger idx = [ss indexOfObject:v];
+        for (NSUInteger k = idx + 1; k < ss.count && sib.length < 120; k++) {
+            UIView *sv = ss[k];
+            if (sv.hidden || sv.alpha < 0.05f) continue;
+            [sib appendFormat:@"%@(z%lu) ", NSStringFromClass(sv.class), (unsigned long)k];
+        }
+    }
+    P25Append([NSString stringWithFormat:
+        @"t=%.2f VIS[%d] bits=0x%03X culprit=%@ bgA=%.2f subs=%d/%d wr=(%.0f,%.0f,%.0fx%.0f) above=[%@]\n",
+        P7Now(), i, bits, culprit, (double)bgA, vis, subs,
+        wr.origin.x, wr.origin.y, wr.size.width, wr.size.height, sib]);
+    if (bits) P31Shot(i, wr, win);
 }
 
 // probe30(A2)：父链 —— App 可能淡出整个 WINTabBar，item 自身 alpha 永远 1.0
@@ -3329,7 +3411,7 @@ static void GCStylePinTabItems(UIWindow *win) {
     }
 #ifdef GAODECLEAN_PROBE
     P29Bar(CachedTabBar);
-    P30Heartbeat(CachedTabItemA ? 1 : 0, CachedTabItemB ? 1 : 0, CachedTabBar ? 1 : 0);
+    P30Heartbeat(CachedTabItemA ? 1 : 0, CachedTabItemB ? 1 : 0, CachedTabBar ? 1 : 0, CachedTabBar);
 #endif
     UIView *arr[2] = { CachedTabItemA, CachedTabItemB };
     for (int i = 0; i < 2; i++) {
@@ -3396,6 +3478,7 @@ static void GCStylePinTabItems(UIWindow *win) {
               lf[i][2] = (float)it.layer.opacity; lf[i][3] = (float)it.bounds.origin.y;
               P30Snap(i, it, mk);
           } }
+        P31Vis(i, it, mk, win);
 #endif
 
         // ★probe23(A2)：内容子项水平居中 —— 实测 SubItem 54 宽贴在 x=0，
