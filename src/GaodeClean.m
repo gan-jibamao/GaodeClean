@@ -18,7 +18,7 @@
 // ---- jibamao 个人标识（编译进 dylib，可用 strings 核对）----
 static NSString *const kGCAuthor      = @"jibamao";
 static NSString *const kGCRepo        = @"https://gan-jibamao.github.io/";
-static NSString *const kGCVersion     = @"0.9.46+trial36";
+static NSString *const kGCVersion     = @"0.9.47+probe10";
 
 // 0.9.18（A1）：底边间隙**按控件分开**，对表原生（搜索栏白底顶边 = 702.6pt）
 //   车机钮（连接车机 · WINDeviceInterconnectWidget）：原生底 652 → 间隙 50.6 → 取 50
@@ -205,6 +205,112 @@ static void P33Watch(UIView *v, int tag) {
         P33Evs[P33EvI].w = (float)r.size.width; P33Evs[P33EvI].h = (float)r.size.height;
         P33EvI = (P33EvI + 1) % 12;
         P33EvTotal++;
+    }
+}
+// ══ probe10：全局逐帧轨迹取证（纯只读，不写任何几何/透明度/动画）══
+//   老大：「全局抓，不要只抓2D3D」。
+//   目标 = 车机钮 / 胶囊 / 路线 / 2D钮 + 地图控件容器子树里的其它控件（最多 12 个）。
+//   每帧记录：mx,my=模型窗口系、px,py=presentation 窗口系、a=alpha、hid、实例指针。
+//   任一目标相邻帧位移 >6pt 或实例指针变化 ⇒ 判「跳」，自动保存最近 40 帧全目标快照（最多 3 起）。
+#define P37_MAX 12
+#define P37_RING 90
+#define P37_EVN 3
+#define P37_EVF 40
+typedef struct { float mx, my, px, py, a; short hid; short idx; } P37Cell;
+static P37Cell P37Ring[P37_RING][P37_MAX];
+static float P37RT[P37_RING];
+static int P37RingI, P37RingN;
+static P37Cell P37Ev[P37_EVN][P37_EVF][P37_MAX];
+static float P37EvT[P37_EVN][P37_EVF];
+static int P37EvN[P37_EVN], P37EvCnt, P37EvTarget[P37_EVN];
+static char P37Name[P37_MAX][72];
+static __weak UIView *P37V[P37_MAX];
+static int P37N, P37ScanTick, P37PtrSwap;
+static void *P37LastPtr[P37_MAX];
+static float P37LastPy[P37_MAX], P37LastPx[P37_MAX], P37Jumps[P37_MAX];
+
+static void P37RefreshTargets(void) {
+    int n = 0;
+    UIView *cap = (CachedLiteGroup && CachedLiteGroup.window) ? (UIView *)CachedLiteGroup : (UIView *)CachedRight;
+    UIView *fixed[4] = { CachedCar, cap, CachedRoute, Cached2D };
+    const char *fn[4] = { "车机", "胶囊", "路线", "2D钮" };
+    for (int i = 0; i < 4 && n < P37_MAX; i++) {
+        if (!fixed[i]) continue;
+        P37V[n] = fixed[i];
+        snprintf(P37Name[n], sizeof(P37Name[n]), "%s", fn[i]);
+        n++;
+    }
+    // 容器子树补抓（MapWidgetContainerView 及同层），深度 ≤3、尺寸合理、去重
+    UIView *seed = CachedCar ? CachedCar.superview : nil;
+    if (!seed) seed = cap ? cap.superview : nil;
+    if (seed) {
+        NSMutableArray *q = [NSMutableArray arrayWithObject:seed];
+        int depthGuard = 0;
+        while (q.count && n < P37_MAX && depthGuard++ < 400) {
+            UIView *v = q.firstObject; [q removeObjectAtIndex:0];
+            CGRect r = [v convertRect:v.bounds toView:v.window];
+            BOOL dup = NO;
+            for (int i = 0; i < n; i++) if (P37V[i] == v) { dup = YES; break; }
+            if (!dup && v.window && r.size.width >= 16 && r.size.width <= 420 &&
+                r.size.height >= 14 && r.size.height <= 160 && n < P37_MAX) {
+                P37V[n] = v;
+                snprintf(P37Name[n], sizeof(P37Name[n]), "c%d:%s", n, NSStringFromClass(v.class).UTF8String ?: "?");
+                n++;
+            }
+            if (q.count + v.subviews.count < 120) [q addObjectsFromArray:v.subviews];
+        }
+    }
+    for (int i = n; i < P37_MAX; i++) { P37V[i] = nil; P37Name[i][0] = 0; }
+    P37N = n;
+}
+static void P37Sample(void) {
+    if (++P37ScanTick >= 15 || P37N == 0) { P37ScanTick = 0; P37RefreshTargets(); }
+    float t = (float)P7Now();
+    int jumpIdx = -1; float jumpFrom __attribute__((unused)) = 0, jumpTo __attribute__((unused)) = 0;
+    for (int i = 0; i < P37N; i++) {
+        UIView *v = P37V[i];
+        P37Cell *c = &P37Ring[P37RingI][i];
+        memset(c, 0, sizeof(*c));
+        c->idx = (short)i;
+        if (!v) continue;
+        c->hid = (short)v.hidden;
+        c->a = (float)v.alpha;
+        if (v.window && v.superview) {
+            CGRect mr = [v convertRect:v.bounds toView:v.window];
+            c->mx = (float)mr.origin.x; c->my = (float)mr.origin.y;
+            CALayer *pl = v.layer.presentationLayer;
+            CALayer *svp = v.superview.layer.presentationLayer;
+            if (pl && svp && v.window.layer) {
+                CGRect pr = [svp convertRect:pl.frame toLayer:v.window.layer];
+                c->px = (float)pr.origin.x; c->py = (float)pr.origin.y;
+            } else { c->px = c->mx; c->py = c->my; }
+            void *p = (__bridge void *)v;
+            if (P37LastPtr[i] && P37LastPtr[i] != p) { P37PtrSwap++; if (jumpIdx < 0) { jumpIdx = i; jumpFrom = -1; jumpTo = -1; } }
+            P37LastPtr[i] = p;
+            if (P37LastPy[i] > 0 && fabsf(c->py - P37LastPy[i]) > 6.0f) {
+                P37Jumps[i]++;
+                if (jumpIdx < 0) { jumpIdx = i; jumpFrom = P37LastPy[i]; jumpTo = c->py; }
+            }
+            if (P37LastPx[i] > 0 && fabsf(c->px - P37LastPx[i]) > 6.0f) {
+                P37Jumps[i]++;
+                if (jumpIdx < 0) { jumpIdx = i; jumpFrom = P37LastPy[i]; jumpTo = c->py; }
+            }
+            P37LastPy[i] = c->py; P37LastPx[i] = c->px;
+        }
+    }
+    P37RT[P37RingI] = t;
+    P37RingI = (P37RingI + 1) % P37_RING;
+    if (P37RingN < P37_RING) P37RingN++;
+    if (jumpIdx >= 0 && P37EvCnt < P37_EVN && P37RingN >= 10) {
+        int n = P37RingN < P37_EVF ? P37RingN : P37_EVF;
+        for (int f = 0; f < n; f++) {
+            int idx = (P37RingI - n + f + P37_RING * 2) % P37_RING;
+            P37EvT[P37EvCnt][f] = P37RT[idx];
+            for (int i = 0; i < P37_MAX; i++) P37Ev[P37EvCnt][f][i] = P37Ring[idx][i];
+        }
+        P37EvN[P37EvCnt] = n;
+        P37EvTarget[P37EvCnt] = jumpIdx;
+        P37EvCnt++;
     }
 }
 #endif
@@ -1489,6 +1595,33 @@ static void GCProbeDump7(NSString *reason) {
         }
         [o appendFormat:@"P33事件: 总数=%d 最近=%@\n", P33EvTotal, e34.length ? e34 : @"(无)"];
     }
+    {   // probe10：全局逐帧轨迹（目标清单 + 每目标跳变次数 + 跳变事件的全目标快照）
+        NSMutableString *tl = [NSMutableString string];
+        for (int i = 0; i < P37N; i++)
+            [tl appendFormat:@"[%d]%s(跳%.0f) ", i, P37Name[i], P37Jumps[i]];
+        [o appendFormat:@"P37目标(%d): %@ 换实例=%d 帧数=%d\n", P37N, tl, P37PtrSwap, P37RingN];
+        for (int e = 0; e < P37EvCnt; e++) {
+            int tg = P37EvTarget[e];
+            int n = P37EvN[e];
+            [o appendFormat:@"  [跳变%d 目标=%d:%s 帧=%d] ", e + 1, tg,
+                (tg >= 0 && tg < P37_MAX) ? P37Name[tg] : "?", n];
+            for (int f = 0; f < n; f++)
+                [o appendFormat:@"(t=%.2f mx=%.0f my=%.0f px=%.0f py=%.0f a=%.2f h=%d) ",
+                    P37EvT[e][f], P37Ev[e][f][tg].mx, P37Ev[e][f][tg].my,
+                    P37Ev[e][f][tg].px, P37Ev[e][f][tg].py,
+                    P37Ev[e][f][tg].a, P37Ev[e][f][tg].hid];
+            [o appendString:@"\n"];
+            // 同帧其它目标的首末变化（谁跟它一起动）
+            NSMutableString *others = [NSMutableString string];
+            for (int i = 0; i < P37_MAX; i++) {
+                if (i == tg || P37Name[i][0] == 0) continue;
+                float d0 = P37Ev[e][0][i].py, d1 = P37Ev[e][n - 1][i].py;
+                if (fabsf(d1 - d0) > 3.0f)
+                    [others appendFormat:@"%s:%.0f→%.0f ", P37Name[i], d0, d1];
+            }
+            if (others.length) [o appendFormat:@"    同步位移: %@\n", others];
+        }
+    }
 #endif
     if (CachedCar) {
         CALayer *p8pl = CachedCar.layer.presentationLayer;
@@ -2020,6 +2153,7 @@ static void GCStylePinWidgets(UIWindow *win) {
     P33Watch(CachedCar, 0);
     P33Watch((UIView *)(CachedLiteGroup && CachedLiteGroup.window ? CachedLiteGroup : CachedRight), 1);
     P33Watch(Cached2D, 2);
+    P37Sample();
 #endif
     GCStylePinBusy = NO;
 }
