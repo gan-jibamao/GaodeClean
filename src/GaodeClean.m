@@ -18,7 +18,7 @@
 // ---- jibamao 个人标识（编译进 dylib，可用 strings 核对）----
 static NSString *const kGCAuthor      = @"jibamao";
 static NSString *const kGCRepo        = @"https://gan-jibamao.github.io/";
-static NSString *const kGCVersion     = @"0.9.38+probe9";
+static NSString *const kGCVersion     = @"0.9.39+trial29";
 
 // 0.9.18（A1）：底边间隙**按控件分开**，对表原生（搜索栏白底顶边 = 702.6pt）
 //   车机钮（连接车机 · WINDeviceInterconnectWidget）：原生底 652 → 间隙 50.6 → 取 50
@@ -1493,19 +1493,20 @@ static BOOL GCStyleIs2DBtn(UIView *v, UIWindow *win) {
     CGFloat cy = CGRectGetMidY(wr);
     if (cy < capTop - 160 || cy > capTop + 80) return NO;   // 竖带：正常位(帽上~42pt)与叠帽态都覆盖
     if (v == CachedCar || v == CachedRight || v == CachedRoute || v == CachedLiteGroup) return NO;
-    // ★trial28：决定性特征 —— 子树内须有 text 为 2D/3D 的 UILabel。
-    //   trial27 回归铁证（dump：2D钮 UIView win={{339,608},{44,44}} hid=0 + 2D=198 写入）：
-    //   纯几何特征把「定位按钮」（独立兄弟视图、44×44、恒显、capTop+14）误认成 2D 钮钉走
-    //   ⇒ 定位失效。叠帽态两钮几何完全重合，唯有 label 可区分（定位钮纯图标无 label）。
+    // ★trial29（probe9 定罪）：决定性特征 = 子树含 WINAJXCombinedItemView（兜底 LOTAnimationView）。
+    //   probe9 dump 铁证：2D/3D 钮真身 = UIView(cr=100) > WINAJXCombinedItemView >
+    //   GDDesignTokenImageView(3D 模式 hid=1) + LOTAnimationView ——「2D」文字是 Lottie 动画，
+    //   不是 UILabel（trial28 label 判据永远打不中 ⇒ 2D=0 从未发现）。
+    //   定位钮(WINLocationView>UIImageView+NMBaseButton)、路线(WINRouteLineWidgetView)、
+    //   罗盘(WINPermanentCompassView>UIVisualEffectView) 子树均无这两类 ⇒ 永不误认。
     BOOL has2DLabel = NO;
     @try {
+        Class cItem = NSClassFromString(@"WINAJXCombinedItemView");
+        Class cLottie = NSClassFromString(@"LOTAnimationView");
         NSMutableArray<UIView *> *q = [NSMutableArray arrayWithArray:v.subviews];
         while (q.count) {
             UIView *s = q.firstObject; [q removeObjectAtIndex:0];
-            if ([s isKindOfClass:[UILabel class]]) {
-                NSString *t = ((UILabel *)s).text;
-                if ([t isEqualToString:@"2D"] || [t isEqualToString:@"3D"]) { has2DLabel = YES; break; }
-            }
+            if ((cItem && [s isKindOfClass:cItem]) || (cLottie && [s isKindOfClass:cLottie])) { has2DLabel = YES; break; }
             [q addObjectsFromArray:s.subviews];
         }
     } @catch (NSException *e28) {}
@@ -1598,10 +1599,13 @@ static void GCStylePinOne(UIView *v) {
         CGRect wr = [v convertRect:v.bounds toView:win];
         CGRect g;
         if (isCar) g = CGRectMake(10, pinBottom - 20 - 18 - wr.size.height, wr.size.width, wr.size.height);
-        else if (is2D) {                                  // trial27：2D 钮 = 胶囊水平居中、帽顶上方 15pt
+        else if (is2D) {                                  // trial29：帽顶上方 57.3pt = App 原生相对位
+            //   probe9 铁证：原生 win y=609.7 = capTop(667)-57.3；trial27 用 capTop-15-44=608
+            //   与原生差 1.7pt > 幂等容差 0.6 ⇒ 每帧拉锯（2D=198）。改用原生间距 ⇒ 收敛零拉锯，
+            //   缩放撂回叠帽态（top=capTop+33）时照样纠回。
             CGRect capw = [capNow convertRect:capNow.bounds toView:win];
             g = CGRectMake(CGRectGetMidX(capw) - wr.size.width / 2,
-                           capw.origin.y - 15 - wr.size.height, wr.size.width, wr.size.height);
+                           capw.origin.y - 57.3, wr.size.width, wr.size.height);
         } else g = CGRectMake(sw - 10 - wr.size.width, pinBottom - wr.size.height, wr.size.width, wr.size.height);
         CGRect local = [v.superview convertRect:g fromView:win];
         if (!CGRectEqualToRect(local, v.frame)) {
@@ -1851,10 +1855,19 @@ static void GCStylePinWidgetsInner(UIWindow *win) {   // trial25(A2)：原体改
     //   改为按当前实例类名动态登记；三类钩子（layoutSubviews/setPos/layerGeo）均类级去重。
     {
         UIView *w26[3] = { car, cap, Cached2D };   // trial27：2D 钮入三件套挂钩（类级去重天然防重挂）
+        // ★trial29：通用基类黑名单 —— probe9 铁证：2D 钮类 = 裸 UIView，trial27 把
+        //   layoutSubviews/setFrame:/setCenter: 挂到了全 App 的 UIView 基类上 ⇒ 每个视图
+        //   每次布局都进块 ⇒ 定位按钮触摸布局被干扰失效（点定位无法定位）。
+        //   基类实例只走帧级主动钉（下方 Cached2D 行）+ 容器钩兜底，绝不挂基类钩。
+        //   （CALayer 基类的 layer 钩 trial26 起已挂且录屏验证无副作用，指针过滤放行非目标。）
+        static NSSet *bl29; static dispatch_once_t t29;
+        dispatch_once(&t29, ^{ bl29 = [NSSet setWithObjects:@"UIView", @"UILabel", @"UIImageView",
+            @"UIControl", @"UIButton", @"UIVisualEffectView", @"UIScrollView", @"UIStackView", nil]; });
         for (int i26 = 0; i26 < 3; i26++) {
             UIView *v26 = w26[i26];
             if (!v26) continue;
             NSString *cn26 = NSStringFromClass(v26.class);
+            if (cn26 && [bl29 containsObject:cn26]) continue;
             if (cn26 && ![GCStyleLsHooked26() containsObject:cn26]) {
                 [GCStyleLsHooked26() addObject:cn26];
                 HookVoid(cn26, @"layoutSubviews", ^(UIView *v) { GCStylePinWidgets(v.window); });
