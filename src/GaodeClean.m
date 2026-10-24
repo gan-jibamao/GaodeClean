@@ -410,10 +410,14 @@ static void P25EnvOnce(void) {
 }
 
 // ── probe29(A2)：底栏 item 的渲染层状态（此前探针完全看不见 layer.mask）────
-static struct { CGRect b; float dia, a; int hid, mk, anim; int has; } P29T[2];
+// probe30(A1)：模型层读不出闪烁（alpha=1/bounds 84x54 全程不变），必须读表现层。
+static struct { CGRect b; float dia, a, pa; float pw, ph; int hid, mk, anim; int has; } P29T[2];
 static void P29Tab(int i, UIView *v, CGFloat dia, CAShapeLayer *mk) {
     if (i < 0 || i > 1 || !v) return;
     CGRect b = v.bounds; float a = (float)v.alpha;
+    CALayer *pl = v.layer.presentationLayer ?: v.layer;
+    float pa = (float)pl.opacity;                       // 屏幕上真实不透明度
+    float pw = (float)pl.bounds.size.width, ph = (float)pl.bounds.size.height;
     int hid = v.hidden ? 1 : 0, m = (mk && mk.path) ? 1 : 0;
     int anim = (int)v.layer.animationKeys.count;
     if (P29T[i].has
@@ -421,12 +425,29 @@ static void P29Tab(int i, UIView *v, CGFloat dia, CAShapeLayer *mk) {
         && fabs(b.size.height - P29T[i].b.size.height) < 0.5
         && fabs(dia - (CGFloat)P29T[i].dia) < 0.5
         && fabsf(a - P29T[i].a) < 0.02f
+        && fabsf(pa - P29T[i].pa) < 0.02f
+        && fabsf(pw - P29T[i].pw) < 0.5f && fabsf(ph - P29T[i].ph) < 0.5f
         && hid == P29T[i].hid && m == P29T[i].mk && anim == P29T[i].anim) return;
-    P29T[i].b = b; P29T[i].dia = (float)dia; P29T[i].a = a;
+    P29T[i].b = b; P29T[i].dia = (float)dia; P29T[i].a = a; P29T[i].pa = pa;
+    P29T[i].pw = pw; P29T[i].ph = ph;
     P29T[i].hid = hid; P29T[i].mk = m; P29T[i].anim = anim; P29T[i].has = 1;
     P25Append([NSString stringWithFormat:
-        @"t=%.2f TAB[%d] bounds=%.1fx%.1f dia=%.1f a=%.2f hid=%d mask=%d anim=%d\n",
-        P7Now(), i, b.size.width, b.size.height, dia, a, hid, m, anim]);
+        @"t=%.2f TAB[%d] model=%.1fx%.1f/%.2f pres=%.1fx%.1f/%.2f dia=%.1f hid=%d mask=%d anim=%d\n",
+        P7Now(), i, b.size.width, b.size.height, a, pw, ph, pa, dia, hid, m, anim]);
+}
+
+// probe30(A2)：父链 —— App 可能淡出整个 WINTabBar，item 自身 alpha 永远 1.0
+static float P29BarA = -1, P29BarPA = -1; static int P29BarHid = -1, P29BarHas;
+static void P29Bar(UIView *bar) {
+    if (!bar) return;
+    CALayer *pl = bar.layer.presentationLayer ?: bar.layer;
+    float a = (float)bar.alpha, pa = (float)pl.opacity;
+    int hid = bar.hidden ? 1 : 0;
+    if (P29BarHas && fabsf(a - P29BarA) < 0.02f && fabsf(pa - P29BarPA) < 0.02f
+        && hid == P29BarHid) return;
+    P29BarA = a; P29BarPA = pa; P29BarHid = hid; P29BarHas = 1;
+    P25Append([NSString stringWithFormat:
+        @"t=%.2f BAR model=%.2f pres=%.2f hid=%d\n", P7Now(), a, pa, hid]);
 }
 static void P25FpsTick(void) {
     P25EnvOnce();
@@ -3233,7 +3254,12 @@ static void GCStylePinWidgetsInner(UIWindow *win) {   // trial25(A2)：原体改
 static __weak UIView *CachedTabItemA, *CachedTabItemB;
 static void GCStylePinTabItems(UIWindow *win) {
     if (!win || !CachedTabBar || !CachedTabBar.window) return;
-    if (!CachedTabItemA || !CachedTabItemB) {
+    if (!CachedTabItemA || !CachedTabItemB
+        || !CachedTabItemA.window || !CachedTabItemB.window) {   // probe30(A3)：脱离窗口也算失效
+#ifdef GAODECLEAN_PROBE
+        BOOL rebuild = (CachedTabItemA != nil || CachedTabItemB != nil);
+#endif
+        CachedTabItemA = nil; CachedTabItemB = nil;
         NSMutableArray<UIView *> *items = [NSMutableArray array];
         for (UIView *v in CachedTabBar.subviews)
             if ([NSStringFromClass(v.class) isEqualToString:GCStrAt(149)]) [items addObject:v];  // WINTabBarItem（trial44：索引原写 150=“Tip”，导致本函数空转）
@@ -3242,7 +3268,13 @@ static void GCStylePinTabItems(UIWindow *win) {
             return a.frame.origin.x < b.frame.origin.x ? NSOrderedAscending : NSOrderedDescending;
         }];
         CachedTabItemA = items[0]; CachedTabItemB = items[1];
+#ifdef GAODECLEAN_PROBE
+        if (rebuild) P25Append([NSString stringWithFormat:@"t=%.2f TAB-REBUILD (实例已换，重新收圆)\n", P7Now()]);
+#endif
     }
+#ifdef GAODECLEAN_PROBE
+    P29Bar(CachedTabBar);
+#endif
     UIView *arr[2] = { CachedTabItemA, CachedTabItemB };
     for (int i = 0; i < 2; i++) {
         UIView *it = arr[i];
@@ -3280,6 +3312,16 @@ static void GCStylePinTabItems(UIWindow *win) {
         CGFloat dia = MIN(54.0, ih);                          // 直径 = 高度，上限 54
         CGRect circle = CGRectMake((iw - dia) * 0.5, (ih - dia) * 0.5, dia, dia);
         if (!CGRectEqualToRect(mk.frame, it.bounds)) mk.frame = it.bounds;
+#ifdef GAODECLEAN_PROBE
+        {
+            static float lastDia[2] = { -1, -1 };
+            if (fabsf((float)dia - lastDia[i]) > 0.5f) {
+                lastDia[i] = (float)dia;
+                P25Append([NSString stringWithFormat:@"t=%.2f MASK[%d] dia=%.1f bounds=%.1fx%.1f\n",
+                           P7Now(), i, dia, iw, ih]);
+            }
+        }
+#endif
         // 幂等：路径已达标就不重建（避免 60fps 反复分配 CGPath）
         if (!mk.path || !CGRectEqualToRect(CGPathGetBoundingBox(mk.path), circle)) {
             CGMutablePathRef p23 = CGPathCreateMutable();
