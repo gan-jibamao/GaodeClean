@@ -18,7 +18,7 @@
 // ---- jibamao 个人标识（编译进 dylib，可用 strings 核对）----
 static NSString *const kGCAuthor      = @"jibamao";
 static NSString *const kGCRepo        = @"https://gan-jibamao.github.io/";
-static NSString *const kGCVersion     = @"0.9.57+trial41";
+static NSString *const kGCVersion     = @"0.9.58+trial42";
 
 // 0.9.18（A1）：底边间隙**按控件分开**，对表原生（搜索栏白底顶边 = 702.6pt）
 //   车机钮（连接车机 · WINDeviceInterconnectWidget）：原生底 652 → 间隙 50.6 → 取 50
@@ -110,6 +110,7 @@ static void LayoutMinimalHome(id handler);
 static void AlignCornerWidgets(UIView *bar);
 static void GCStyleDiscoverWidgets(UIWindow *win);   // trial11：实例发现独立成函数（pin 自给自足）
 static void GCStylePinWidgets(UIWindow *win);        // trial25(A2)：重入守卫包装前置声明（容器钩子/驱动器用）
+static void GCStylePinTabItems(UIWindow *win);       // trial42(A3)：首页/我的 帧级钉位前置声明
 static NSMutableSet<NSString *> *GCStyleLayerHookedClasses(void);   // trial26：定义在后，P8 dump 段先用
 static BOOL IsRightBottomWidget(UIView *v);            // trial11：前置声明（discover 用）
 static BOOL GCCIsLiteGroupCapsule(UIView *v);          // trial11：前置声明（discover 用）
@@ -627,6 +628,13 @@ static void P43Snap(void) {
     [s appendString:P43One(@"车机", CachedCar, w)];
     [s appendString:P43One(@"胶囊", CachedRight, w)];
     [s appendString:P43One(@"2D钮", Cached2D, w)];
+    if (Cached2D) {   // trial42(A4)：环(2D钮) 与 内容 必须同行对比 —— 截图铁证两者差 90.3pt
+        for (UIView *c2 in Cached2D.subviews)
+            if ([NSStringFromClass(c2.class) isEqualToString:@"WINAJXCombinedItemView"]) {
+                [s appendString:P43One(@"2D内容", c2, w)];
+                break;
+            }
+    }
     [s appendString:P43One(@"天气", (UIView *)P7RowMir, w)];
     [s appendString:P43One(@"底栏", CachedTabBar, w)];
     if (CachedTabBar) {
@@ -638,7 +646,7 @@ static void P43Snap(void) {
             if (k >= 3) break;
         }
     }
-    P43Lines[P43I] = s;
+    P43Lines[P43I] = [s copy];   // trial42(A4)：必须强引用快照 —— 原写法存 autorelease 指针 = 悬垂
     P43I = (P43I + 1) % 80;
     if (P43N < 80) P43N++;
 }
@@ -1753,7 +1761,9 @@ static void GCStyleTab(UIView *anchor) {
         //   旧写法 if (!it.backgroundColor) 只在 nil 时补 —— App 一旦把底色设成**透明**（非 nil）
         //   就永久跳过 ⇒ 白圆消失、图标悬在地图上 = 老大看到的「按钮在乱跑」。
         //   改为每帧无条件强制写回（幂等，值相同不触发重绘）。
-        it.translatesAutoresizingMaskIntoConstraints = YES;   // trial41：关自动约束，frame 权威
+        // ★trial42(A1)：撤掉 trial41 的「关自动约束」。该标志语义是「用 autoresizingMask 生成约束」，
+        //   置 YES 不会移除 App 既有 NSLayoutConstraint，而是额外造一套去撞它们（引擎每 pass 随机破
+        //   一条）⇒ 同一控件在两个位置间跳。正解是不碰约束标志，靠 A2 的同事务钳位取胜。
         it.backgroundColor = [UIColor colorWithWhite:0.96 alpha:0.92];
         if (it.alpha < 0.999f) it.alpha = 1.0f;
         if (it.hidden) it.hidden = NO;
@@ -2313,8 +2323,7 @@ static void GCStylePinOne(UIView *v) {
         // ★trial41（截图铁证：3D 内容跑到 561pt、610pt 处只剩空圆环；缩放时首页/我的也跳）：
         //   根因 = 这些控件仍受 App 的 AutoLayout 约束管理 ⇒ 我们写 frame 被布局引擎覆盖，
         //   每帧互相覆盖 = 跳动。改为：**关掉自动约束**（frame 权威），并同步把内部内容钉回自身 bounds。
-        if (v.translatesAutoresizingMaskIntoConstraints) { }
-        else v.translatesAutoresizingMaskIntoConstraints = YES;
+        // ★trial42(A1)：同上，控件侧也不碰约束标志（见 GCStyleTab 内的说明）。
         if (!CGRectEqualToRect(local, v.frame)) {
             [CATransaction begin]; [CATransaction setDisableActions:YES];
             [v.layer removeAllAnimations]; v.frame = local;
@@ -2399,6 +2408,49 @@ static void GCStyleHookSetPos(Class rc) {
         Replace(rc, @selector(setCenter:), imp_implementationWithBlock(^(UIView *self, CGPoint c) {
             ((void (*)(id, SEL, CGPoint))o2)(self, @selector(setCenter:), c);
             GCStylePinOne(self);
+        }), t2);
+    }
+}
+// ★trial42(A2)：2D/3D 钮内容钳位 —— 在 App 写入的同一调用栈内纠回（谁最后写谁赢）。
+//   证据：截图实测「3D」白圆在 y=519.7pt、空环在 610pt（= capTop-57.3，环钉对了），内容漂 -90.3pt。
+//   trial41 的「每帧写直接子视图 frame」输在时序（我们写在前、App 布局在后）与深度（Lottie 更深）。
+static BOOL GCStyleInnerFillBusy = NO;
+static void GCStyleInnerFill(UIView *v) {
+    if (GCStyleInnerFillBusy || !v || !v.superview) return;
+    if (!Cached2D) return;
+    UIView *owner = v.superview;
+    if (owner != Cached2D && owner.superview != Cached2D) return;   // 只认 2D 钮子树（深度 ≤2）
+    CGRect bb = owner.bounds;
+    if (CGRectEqualToRect(v.frame, bb)) return;
+    GCStyleInnerFillBusy = YES;
+    [CATransaction begin]; [CATransaction setDisableActions:YES];
+    [v.layer removeAllAnimations];
+    v.transform = CGAffineTransformIdentity;
+    v.frame = bb;
+    [CATransaction commit];
+    GCStyleInnerFillBusy = NO;
+}
+static void GCStyleHookInnerFill(Class rc) {
+    if (!rc) return;
+    NSString *nm = NSStringFromClass(rc);
+    if (!nm || [GCStylePosHookedClasses() containsObject:nm]) return;   // 与 setPos 共用登记表防双挂
+    [GCStylePosHookedClasses() addObject:nm];
+    Method mf = class_getInstanceMethod(rc, @selector(setFrame:));
+    if (mf) {
+        IMP o = method_getImplementation(mf);
+        const char *t = method_getTypeEncoding(mf);
+        Replace(rc, @selector(setFrame:), imp_implementationWithBlock(^(UIView *self, CGRect f) {
+            ((void (*)(id, SEL, CGRect))o)(self, @selector(setFrame:), f);
+            GCStyleInnerFill(self);
+        }), t);
+    }
+    Method mc = class_getInstanceMethod(rc, @selector(setCenter:));
+    if (mc) {
+        IMP o2 = method_getImplementation(mc);
+        const char *t2 = method_getTypeEncoding(mc);
+        Replace(rc, @selector(setCenter:), imp_implementationWithBlock(^(UIView *self, CGPoint c) {
+            ((void (*)(id, SEL, CGPoint))o2)(self, @selector(setCenter:), c);
+            GCStyleInnerFill(self);
         }), t2);
     }
 }
@@ -2591,9 +2643,44 @@ static void GCStylePinWidgetsInner(UIWindow *win) {   // trial25(A2)：原体改
             }
             GCStyleHookSetPos(v26.class);   // 内部 GCStylePosHookedClasses 去重
             GCStyleHookLayerGeo(v26);       // trial26(A1)：layer setter 钩（按 layer 类去重）
+            // trial42(A2)：2D/3D 钮内部内容类 —— App 写它们的 frame/center 时同事务钉回 bounds
+            GCStyleHookInnerFill(NSClassFromString(@"WINAJXCombinedItemView"));
+            GCStyleHookInnerFill(NSClassFromString(@"LOTAnimationView"));
         }
     }
+    GCStylePinTabItems(win);                  // trial42(A3)：首页/我的 每帧钉 x
     if (Cached2D) GCStylePinOne(Cached2D);   // trial27：帧级主动钉（钩子通道只拦 App 写入，发现即纠）
+}
+// ★trial42(A3)：首页/我的 帧级钉位（60fps）。
+//   证据：这两个 WINTabBarItem 只有 GCStyleTab 在写，而 GCStyleTab 来自 GCNarrowApply
+//   （5Hz tick + layoutSubviews）⇒ App 一搬动，最慢 200ms 才纠回 = 肉眼看到的「左右移动」。
+static __weak UIView *CachedTabItemA, *CachedTabItemB;
+static void GCStylePinTabItems(UIWindow *win) {
+    if (!win || !CachedTabBar || !CachedTabBar.window) return;
+    if (!CachedTabItemA || !CachedTabItemB) {
+        NSMutableArray<UIView *> *items = [NSMutableArray array];
+        for (UIView *v in CachedTabBar.subviews)
+            if ([NSStringFromClass(v.class) isEqualToString:GCStrAt(150)]) [items addObject:v];  // WINTabBarItem
+        if (items.count < 2) return;
+        [items sortUsingComparator:^NSComparisonResult(UIView *a, UIView *b) {
+            return a.frame.origin.x < b.frame.origin.x ? NSOrderedAscending : NSOrderedDescending;
+        }];
+        CachedTabItemA = items[0]; CachedTabItemB = items[1];
+    }
+    const CGFloat d = 54.0, c = win.bounds.size.width * 0.5, off = 72.0;
+    UIView *arr[2] = { CachedTabItemA, CachedTabItemB };
+    for (int i = 0; i < 2; i++) {
+        UIView *it = arr[i];
+        if (!it || !it.superview || !it.window) continue;
+        CGFloat wantX = c + (i == 0 ? -off : off) - d * 0.5;          // 目标左沿（窗口系）
+        CGFloat localX = [it.superview convertPoint:CGPointMake(wantX, 0) fromView:win].x;
+        if (fabs(it.frame.origin.x - localX) > 0.5) {
+            [CATransaction begin]; [CATransaction setDisableActions:YES];
+            [it.layer removeAllAnimations];
+            CGRect f = it.frame; f.origin.x = localX; it.frame = f;
+            [CATransaction commit];
+        }
+    }
 }
 // ★trial25(A2)：重入守卫包装 —— pin 现有帧级驱动/容器钩子/子控件钩子/layoutSubviews 钩子
 //   四路并发，写 frame 会级联触发钩子，无守卫有自激风暴风险。
