@@ -166,7 +166,7 @@ static void GCProbeTick6(void);                      // probe6：定时取证（
 static void GCProbeTick7(void);                      // probe7：pin 链路取证（前置声明）
 #endif
 #ifdef GAODECLEAN_PROBE
-static void P19Tick(void);                            // probe19：三钮偶发位移（前置声明）
+static void P19Tick(void);                            // probe20：三钮偶发位移（前置声明）
 #endif
 #ifdef GAODECLEAN_PROBE
 // ══ probe7 全局状态（tick/pin/discover 均可见；正式包整块不编译）══
@@ -2134,24 +2134,22 @@ __attribute__((unused)) static void GCProbeTick7(void) {
 //   说明位移发生在两次采样之间（亚秒级）。定时 dump 天生抓不到。
 // 做法：每帧比对锁定基线，偏离 > 0.5pt 才开事件，记录前后各 1.5s 的逐帧轨迹。
 // 同时给三钮的 setFrame:/setCenter:/setTransform: 挂钩，抓"谁写的"，
-//   并用 P19Ours 标记我们自己的写入（GCStylePinTabItems），避免误判主因。
+//   probe20 起改为零 swizzle，写入者信息由 GCStylePinTabItems 的纠正量间接给出。
 // 性质：纯只读，不修改任何视图属性。
 // ══════════════════════════════════════════════════════════════════════════
-#define P19_N 6
+#define P19_N 8
 static __weak UIView *P19View[P19_N];
 static CGRect P19Base[P19_N];
 static BOOL   P19Has[P19_N];
 static int    P19EventFrames = 0;
 static NSMutableString *P19Log;
 static int    P19EventNo = 0, P19Dumps = 0;
-static BOOL   P19Ours = NO;
-static NSMutableSet *P19Hooked;
 
 static void P19Flush(NSString *reason) {
     if (P19Dumps >= 40 || !P19Log.length) return;
     P19Dumps++;
     NSMutableString *o = [NSMutableString stringWithFormat:
-        @"\n########## probe19 %@ #%d build=%@ ##########\n", reason, P19Dumps, kGCVersion];
+        @"\n########## probe20 %@ #%d build=%@ ##########\n", reason, P19Dumps, kGCVersion];
     [o appendString:@"三钮基线: "];
     for (int i = 0; i < P19_N; i++)
         [o appendFormat:@"[%d]%@ base=%@  ", i,
@@ -2165,86 +2163,56 @@ static void P19Flush(NSString *reason) {
         [o writeToFile:[dir stringByAppendingPathComponent:@"GaodeClean-probe19.txt"]
             atomically:YES encoding:NSUTF8StringEncoding error:nil];
     } @catch (__unused NSException *e19b) {}
-    NSLog(@"[probe19] %@ #%d 已落盘 (%lu 字符)", reason, P19Dumps, (unsigned long)o.length);
+    NSLog(@"[probe20] %@ #%d 已落盘 (%lu 字符)", reason, P19Dumps, (unsigned long)o.length);
     [P19Log setString:@""];
 }
 
-static void P19NoteWrite(UIView *self, NSString *sel) {
-    if (!P19Log) return;
-    if (P19Ours) {   // 我们自己的写入：只计数，不展开
-        [P19Log appendFormat:@"  WRITE[ours] %@.%@\n", NSStringFromClass(self.class), sel];
-        return;
-    }
-    if (P19EventFrames <= 0) return;   // 无事件时不记，避免刷爆
-    NSArray<NSString *> *st = [NSThread callStackSymbols];
-    NSArray<NSString *> *pick = (st.count > 5) ? [st subarrayWithRange:NSMakeRange(2, 3)] : st;
-    [P19Log appendFormat:@"  WRITE %@.%@ <- %@\n", NSStringFromClass(self.class), sel,
-        [pick componentsJoinedByString:@" | "]];
-}
-
-static void P19HookClass(Class rc) {
-    if (!rc) return;
-    NSString *nm = NSStringFromClass(rc);
-    if (!nm) return;
-    if (!P19Hooked) P19Hooked = [NSMutableSet set];
-    if ([P19Hooked containsObject:nm]) return;
-    [P19Hooked addObject:nm];
-
-    Method mf = class_getInstanceMethod(rc, @selector(setFrame:));
-    if (mf) {
-        IMP o = method_getImplementation(mf);
-        const char *t = method_getTypeEncoding(mf);
-        Replace(rc, @selector(setFrame:), imp_implementationWithBlock(^(UIView *self, CGRect f) {
-            ((void (*)(id, SEL, CGRect))o)(self, @selector(setFrame:), f);
-            P19NoteWrite(self, @"setFrame:");
-        }), t);
-    }
-    Method mc = class_getInstanceMethod(rc, @selector(setCenter:));
-    if (mc) {
-        IMP o2 = method_getImplementation(mc);
-        const char *t2 = method_getTypeEncoding(mc);
-        Replace(rc, @selector(setCenter:), imp_implementationWithBlock(^(UIView *self, CGPoint c) {
-            ((void (*)(id, SEL, CGPoint))o2)(self, @selector(setCenter:), c);
-            P19NoteWrite(self, @"setCenter:");
-        }), t2);
-    }
-    Method mt = class_getInstanceMethod(rc, @selector(setTransform:));
-    if (mt) {
-        IMP o3 = method_getImplementation(mt);
-        const char *t3 = method_getTypeEncoding(mt);
-        Replace(rc, @selector(setTransform:), imp_implementationWithBlock(^(UIView *self, CGAffineTransform tf) {
-            ((void (*)(id, SEL, CGAffineTransform))o3)(self, @selector(setTransform:), tf);
-            P19NoteWrite(self, @"setTransform:");
-        }), t3);
-    }
+// ★probe20(A1)：setter 钩子已全部删除 —— probe19 的 setFrame:/setCenter:/setTransform:
+//   在 WINTabBarSubItem 与 WINTabBarItem（父子类）上重复挂钩，导致"原实现"指向自身，
+//   真机崩溃报告 510 帧同一返回地址 0x114d0 = 纯自递归栈溢出（EXC_BAD_ACCESS / 栈区地址）。
+//   现在改为零 swizzle：只用"我们自己 pin 的纠正量"间接证明 App 动过。
+static void P19NoteCorr(NSString *cls, CGFloat dx) {
+    if (!P19Log) P19Log = [NSMutableString string];
+    [P19Log appendFormat:@"  CORR %@ 原偏移=%.1fpt t=%.2f\n", cls, dx, CACurrentMediaTime()];
+    if (P19EventFrames <= 0) P19EventFrames = 90;   // 纠正即视为事件，抓前后轨迹
 }
 
 static void P19Discover(void) {
-    if (!CachedTabBar || !CachedTabBar.window) return;
+    UIWindow *win = CachedTabBar.window;
+    if (!win) return;
+    CGFloat sh = win.bounds.size.height;
     NSMutableArray<UIView *> *cand = [NSMutableArray array];
-    NSMutableArray<UIView *> *q = [NSMutableArray arrayWithArray:CachedTabBar.subviews];
-    NSUInteger budget = 300;
+    NSMutableArray<UIView *> *q = [NSMutableArray arrayWithObject:win];
+    NSUInteger budget = 1200;
     while (q.count && budget--) {
         UIView *v = [q lastObject]; [q removeLastObject];
         [q addObjectsFromArray:v.subviews];
-        CGRect r = [v convertRect:v.bounds toView:nil];
+        if (v.hidden || v.alpha < 0.05f) continue;
+        CGRect r = [v convertRect:v.bounds toView:win];
         if (r.size.width < 40 || r.size.width > 70) continue;
         if (fabs(r.size.width - r.size.height) > 8) continue;
-        if (r.origin.y < 700) continue;                 // 只在底栏带
+        if (r.origin.y < sh * 0.85) continue;            // ★probe20(A4)：底栏条带全树找
         [cand addObject:v];
     }
-    [cand sortUsingComparator:^NSComparisonResult(UIView *a, UIView *b) {
-        return [a convertRect:a.bounds toView:nil].origin.x < [b convertRect:b.bounds toView:nil].origin.x
+    // 去掉"父视图也在候选里"的内层重复（SubItem 与 Item 同矩形，只留外层）
+    NSMutableArray<UIView *> *top = [NSMutableArray array];
+    for (UIView *v in cand) {
+        BOOL nested = NO;
+        for (UIView *a = v.superview; a; a = a.superview)
+            if ([cand containsObject:a]) { nested = YES; break; }
+        if (!nested) [top addObject:v];
+    }
+    [top sortUsingComparator:^NSComparisonResult(UIView *a, UIView *b) {
+        return [a convertRect:a.bounds toView:win].origin.x < [b convertRect:b.bounds toView:win].origin.x
                ? NSOrderedAscending : NSOrderedDescending;
     }];
     for (int i = 0; i < P19_N; i++) {
-        UIView *v = (i < (int)cand.count) ? cand[i] : nil;
-        if (v == P19View[i] && v != nil) continue;
+        UIView *v = (i < (int)top.count) ? top[i] : nil;
+        if (v == P19View[i]) continue;
         P19View[i] = v; P19Has[i] = NO;
         if (v) {
-            P19Base[i] = [v convertRect:v.bounds toView:nil];
+            P19Base[i] = [v convertRect:v.bounds toView:win];
             P19Has[i] = YES;
-            P19HookClass(v.class);                      // 抓写入者
         }
     }
 }
@@ -2883,10 +2851,10 @@ static void GCStylePinWidgetsInner(UIWindow *win) {   // trial25(A2)：原体改
         }
     }
     GCStyleShellEnforce();                    // trial49(A1)：空壳容器（60fps，只碰缓存实例）
-    GCStylePinTabItems(win);                  // trial42(A3)：首页/我的 每帧钉 x
 #ifdef GAODECLEAN_PROBE
-    P19Tick();                                // probe19：三钮偏差触发取证（60fps）
+    P19Tick();                                // ★probe20(A2)：必须在 pin 之前采样，否则自己的纠正会擦掉证据
 #endif
+    GCStylePinTabItems(win);                  // trial42(A3)：首页/我的 每帧钉 x
     if (Cached2D) GCStylePinOne(Cached2D);   // trial27：帧级主动钉（钩子通道只拦 App 写入，发现即纠）
 }
 // ★trial42(A3)：首页/我的 帧级钉位（60fps）。
@@ -2914,12 +2882,9 @@ static void GCStylePinTabItems(UIWindow *win) {
             [CATransaction begin]; [CATransaction setDisableActions:YES];
             [it.layer removeAllAnimations];
 #ifdef GAODECLEAN_PROBE
-            P19Ours = YES;                                   // probe19：标记为我们的写入
+            P19NoteCorr(NSStringFromClass(it.class), 0.0);   // probe20：缩放挤位（transform 非单位阵）
 #endif
             it.transform = CGAffineTransformIdentity;
-#ifdef GAODECLEAN_PROBE
-            P19Ours = NO;
-#endif
             [CATransaction commit];
         }
         CGFloat wantX = c + (i == 0 ? -off : off) - d * 0.5;          // 目标左沿（窗口系）
@@ -2929,12 +2894,9 @@ static void GCStylePinTabItems(UIWindow *win) {
             [it.layer removeAllAnimations];
             CGRect f = it.frame; f.origin.x = localX;
 #ifdef GAODECLEAN_PROBE
-            P19Ours = YES;                                   // probe19：标记为我们的写入
+            P19NoteCorr(NSStringFromClass(it.class), it.frame.origin.x - localX);  // probe20：App 原始偏移
 #endif
             it.frame = f;
-#ifdef GAODECLEAN_PROBE
-            P19Ours = NO;
-#endif
             [CATransaction commit];
         }
     }
