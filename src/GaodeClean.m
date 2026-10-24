@@ -1745,7 +1745,7 @@ static void GCStyleKillShadows(CALayer *la, int depth) {
 static void GCStyleTab(UIView *anchor) {
     CGFloat sw = anchor.bounds.size.width;
     if (sw < 100) return;
-    const CGFloat d = 54.0, c = sw * 0.5, off = 72.0;   // trial6：三圆钮同行 @ c-72 / c / c+72（间隙18）
+    const CGFloat d = 54.0;   // probe22(A1)：c/off 已随 x 钉位一并移除（不再强推按钮位置）
     GCStyleKillShadows(anchor.layer, 0);   // trial4：子树阴影一次扫净
     for (UIView *v in [anchor.subviews copy]) {
         if ([v isKindOfClass:UIVisualEffectView.class] || [v isKindOfClass:UIImageView.class]) { v.hidden = YES; continue; }
@@ -1768,9 +1768,8 @@ static void GCStyleTab(UIView *anchor) {
     }];
     for (NSUInteger i = 0; i < items.count && i < 2; i++) {
         UIView *it = items[i];
-        CGFloat cx = c + (i == 0 ? -off : off);
-        CGRect g = CGRectMake(cx - d * 0.5, it.frame.origin.y, d, d);
-        if (!CGRectEqualToRect(g, it.frame)) it.frame = g;
+        // ★probe22(A1)：不再强写 x —— probe21 实测 App 的窄栏布局是 ±60（中心 136.5/256.5），
+        //   我们强制 ±72，两边对拉就是"偶尔在动"。位置交还 App，只保留圆角/裁切。
         it.layer.cornerRadius = d * 0.5;
         it.layer.masksToBounds = YES;
         it.layer.shadowOpacity = 0; it.layer.shadowPath = nil;   // trial14：杀 App 遗留阴影（首页左侧灰影真凶）
@@ -2141,6 +2140,8 @@ __attribute__((unused)) static void GCProbeTick7(void) {
 static __weak UIView *P19View[P19_N];
 static CGRect P19Base[P19_N];
 static BOOL   P19Has[P19_N];
+static int    P19Persist[P19_N];   // probe22：连续偏离帧数（超 300 采纳新基线）
+static long   P19Noise = 0;        // probe22：非三钮（面板等）偏离计数，只统计不刷日志
 static int    P19EventFrames = 0;
 static NSMutableString *P19Log;
 static int    P19EventNo = 0, P19Dumps = 0;
@@ -2155,7 +2156,7 @@ static void P19Flush(NSString *reason) {
         [o appendFormat:@"[%d]%@ base=%@  ", i,
             P19View[i] ? NSStringFromClass(P19View[i].class) : @"nil",
             P19Has[i] ? NSStringFromCGRect(P19Base[i]) : @"-"];
-    [o appendString:@"\n"];
+    [o appendFormat:@"面板噪声偏离计数(非三钮,已忽略)=%ld\n", P19Noise];
     [o appendString:P19Log];
     @try {
         NSString *dir = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES).firstObject;
@@ -2277,7 +2278,23 @@ static void P19Tick(void) {
         } @catch (__unused NSException *e19c) {}
         CGFloat dx = CGRectGetMidX(r) - CGRectGetMidX(P19Base[i]);
         CGFloat dy = CGRectGetMidY(r) - CGRectGetMidY(P19Base[i]);
+        // ★probe22(A3)：只有 WINTabBarItem（首页/我的）才算事件。
+        //   probe21 里 AJXContainerView 的面板收起（dy=160）占了 232/288 帧，把日志撑满。
+        NSString *cn = NSStringFromClass(v.class);
+        if (![cn containsString:@"WINTabBarItem"]) { P19Noise++; continue; }
         BOOL dev = (fabs(dx) > 0.5 || fabs(dy) > 0.5);
+        // ★probe22：撤掉钉位后 App 可能自主把按钮停在 ±60。若长期稳定偏离，
+        //   说明那是 App 的新常态 —— 采纳为新基线，否则事件永不结束、日志无限增长。
+        if (dev) {
+            if (++P19Persist[i] > 300) {   // 5 秒
+                [P19Log appendFormat:@"采纳新基线 i=%d %@ win=%@ (原基线 %@)\n",
+                    i, cn, NSStringFromCGRect(r), NSStringFromCGRect(P19Base[i])];
+                P19Base[i] = r; P19Persist[i] = 0;
+                continue;
+            }
+        } else {
+            P19Persist[i] = 0;
+        }
         if (dev && P19EventFrames <= 0) {
             P19EventFrames = 90;
             [P19Log appendFormat:@"\n===== 事件%d 起 t=%.2f =====\n", ++P19EventNo, CACurrentMediaTime()];
@@ -2918,7 +2935,6 @@ static void GCStylePinTabItems(UIWindow *win) {
         }];
         CachedTabItemA = items[0]; CachedTabItemB = items[1];
     }
-    const CGFloat d = 54.0, c = win.bounds.size.width * 0.5, off = 72.0;
     UIView *arr[2] = { CachedTabItemA, CachedTabItemB };
     for (int i = 0; i < 2; i++) {
         UIView *it = arr[i];
@@ -2932,18 +2948,10 @@ static void GCStylePinTabItems(UIWindow *win) {
             it.transform = CGAffineTransformIdentity;
             [CATransaction commit];
         }
-        CGFloat wantX = c + (i == 0 ? -off : off) - d * 0.5;          // 目标左沿（窗口系）
-        CGFloat localX = [it.superview convertPoint:CGPointMake(wantX, 0) fromView:win].x;
-        if (fabs(it.frame.origin.x - localX) > 0.5) {
-            [CATransaction begin]; [CATransaction setDisableActions:YES];
-            [it.layer removeAllAnimations];
-            CGRect f = it.frame; f.origin.x = localX;
-#ifdef GAODECLEAN_PROBE
-            P19NoteCorr(NSStringFromClass(it.class), it.frame.origin.x - localX);  // probe20：App 原始偏移
-#endif
-            it.frame = f;
-            [CATransaction commit];
-        }
+        // ★probe22(A2)：不再写 x。
+        //   probe21 实测：App 的窄栏布局是 ±60（中心 136.5/256.5），我们强制 ±72，
+        //   5Hz + 60fps 两个通道同时施压，对拉结果就是老大看到的"偶尔在动"
+        //   （93 秒 11 次、每次 ±12pt、dy 恒 0）。位置交还 App。
     }
 }
 // ★trial25(A2)：重入守卫包装 —— pin 现有帧级驱动/容器钩子/子控件钩子/layoutSubviews 钩子
