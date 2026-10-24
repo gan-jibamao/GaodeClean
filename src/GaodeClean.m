@@ -18,7 +18,7 @@
 // ---- jibamao 个人标识（编译进 dylib，可用 strings 核对）----
 static NSString *const kGCAuthor      = @"jibamao";
 static NSString *const kGCRepo        = @"https://gan-jibamao.github.io/";
-static NSString *const kGCVersion     = @"0.9.48+probe11";
+static NSString *const kGCVersion     = @"0.9.49+probe12";
 
 // 0.9.18（A1）：底边间隙**按控件分开**，对表原生（搜索栏白底顶边 = 702.6pt）
 //   车机钮（连接车机 · WINDeviceInterconnectWidget）：原生底 652 → 间隙 50.6 → 取 50
@@ -147,6 +147,8 @@ static double P7FirstSeen[6], P7FirstPin[6], P7FirstKey;
 static __weak UIView *P7LastPW;
 static CGRect P7LastCont;
 static __weak UIView *P7RowMir;
+static BOOL IsWeatherRowClass(NSString *cn);   // probe12：天气行类判定（定义在后）
+static NSArray<UIWindow *> *GCAllWindows(void);  // probe12：全窗口枚举（定义在后）
 static NSMutableString *P7Log;
 static int P7LogN;
 static double P7Now(void) { if (!P7T0) P7T0 = CACurrentMediaTime(); return CACurrentMediaTime() - P7T0; }
@@ -334,6 +336,106 @@ static void P37Sample(void) {
             P37EvN[P37EvCnt] = n;
             P37EvTarget[P37EvCnt] = jumpIdx;
             P37EvCnt++;
+        }
+    }
+}
+// ══ probe12：状态触发取证（纯只读，不写任何几何/透明度）══
+//   probe11 教训：故障态只出现在特定时刻，固定时间采样永远错过（5 段采样全是 735/实心）。
+//   A1 天气行偏移看门狗：|行顶-735|>8 持续 0.2s ⇒ 当场把「祖先链 model/pres + 对齐计数 +
+//      全部天气类实例坐标」拼成快照字符串存下（最多 3 份）。
+//   A2 2D 钮「无墨」看门狗：每帧算墨量（自身 bgA + 子树每层 alpha/opacity/contents/hidden），
+//      状态翻转 ⇒ 当场把完整子树拼成快照（最多 3 份）。
+static NSMutableArray<NSString *> *P39Wx, *P39Ink;
+static int P39WxBadFrames, P39LastInkBad = -1;
+static double P39WxSince;
+static int P39AlignCalls, P39AlignWrites, P39AlignSkipCar, P39AlignSkipReenter;
+
+static NSString *P39Chain(UIView *v) {
+    NSMutableString *s = [NSMutableString string];
+    int n = 0;
+    for (UIView *p = v; p && p != p.window && n < 12; p = p.superview, n++) {
+        CALayer *pl = p.layer.presentationLayer;
+        [s appendFormat:@"%@ model=%@ pres=%@ a=%.2f h=%d | ",
+            NSStringFromClass(p.class), NSStringFromCGRect(p.layer.frame),
+            pl ? NSStringFromCGRect(pl.frame) : @"(nil)", p.alpha, (int)p.hidden];
+    }
+    return s;
+}
+static NSString *P39Subtree(UIView *v) {
+    NSMutableString *s = [NSMutableString string];
+    NSMutableArray *q = [NSMutableArray array];
+    if (v) [q addObject:v];
+    int n = 0;
+    while (q.count && n < 40) {
+        UIView *x = q.firstObject; [q removeObjectAtIndex:0]; n++;
+        [s appendFormat:@"%@ f=%@ a=%.2f op=%.2f h=%d cts=%d bgA=%.2f | ",
+            NSStringFromClass(x.class), NSStringFromCGRect(x.frame), x.alpha,
+            x.layer.opacity, (int)x.hidden, x.layer.contents ? 1 : 0,
+            x.backgroundColor ? CGColorGetAlpha(x.backgroundColor.CGColor) : 0];
+        [q addObjectsFromArray:x.subviews];
+    }
+    return s;
+}
+static void P39Store(NSMutableArray *arr, NSString *s) {
+    if (!arr) return;
+    [arr addObject:s];
+    while (arr.count > 3) [arr removeObjectAtIndex:0];
+}
+static void P39Sample(void) {
+    double t = P7Now();
+    if (!P39Wx) P39Wx = [NSMutableArray array];
+    if (!P39Ink) P39Ink = [NSMutableArray array];
+    // ── A1 天气行偏移看门狗
+    UIView *row = P7RowMir;
+    CGFloat y = -1;
+    if (row && row.window) y = [row convertRect:row.bounds toView:row.window].origin.y;
+    BOOL wxBad = (y > 0 && fabs(y - 735.0) > 8.0);
+    if (wxBad) {
+        if (P39WxBadFrames == 0) P39WxSince = t;
+        P39WxBadFrames++;
+        if (t - P39WxSince > 0.2 && (P39WxBadFrames % 30) == 0) {
+            NSMutableString *s = [NSMutableString stringWithFormat:
+                @"t=%.1f 行顶=%.0f(目标735) row=%@ chain: ", t, y, NSStringFromClass(row.class)];
+            [s appendString:P39Chain(row)];
+            [s appendFormat:@"| align 调=%d 写=%d 无车机=%d 重入=%d | 天气类实例: ",
+                P39AlignCalls, P39AlignWrites, P39AlignSkipCar, P39AlignSkipReenter];
+            for (UIWindow *w in GCAllWindows()) {
+                NSMutableArray *q = [NSMutableArray arrayWithObject:w];
+                for (NSUInteger i = 0; i < q.count && q.count < 1500; i++) {
+                    UIView *v = q[i];
+                    [q addObjectsFromArray:v.subviews];
+                    if (v.window && IsWeatherRowClass(NSStringFromClass(v.class)))
+                        [s appendFormat:@"%@ %@ a=%.2f h=%d / ",
+                            NSStringFromClass(v.class),
+                            NSStringFromCGRect([v convertRect:v.bounds toView:nil]),
+                            v.alpha, (int)v.hidden];
+                }
+            }
+            P39Store(P39Wx, s);
+        }
+    } else {
+        P39WxBadFrames = 0;
+    }
+    // ── A2 2D 钮「无墨」看门狗
+    UIView *b = Cached2D;
+    if (b && b.window) {
+        CGFloat bgA = b.backgroundColor ? CGColorGetAlpha(b.backgroundColor.CGColor) : 0;
+        BOOL anyContent = NO;
+        NSMutableArray *q = [NSMutableArray arrayWithObject:b];
+        for (NSUInteger i = 0; i < q.count && i < 40; i++) {
+            UIView *x = q[i];
+            [q addObjectsFromArray:x.subviews];
+            if (x.layer.contents && x.alpha > 0.05 && !x.hidden && x.layer.opacity > 0.05) anyContent = YES;
+        }
+        int inkBad = (!anyContent && bgA < 0.1) ? 1 : 0;
+        if (inkBad != P39LastInkBad) {
+            P39LastInkBad = inkBad;
+            NSMutableString *s = [NSMutableString stringWithFormat:
+                @"t=%.1f 状态=%@ 按钮=%@ win=%@ a=%.2f bgA=%.2f 子树: ",
+                t, inkBad ? @"无墨透明" : @"有墨可见", NSStringFromClass(b.class),
+                NSStringFromCGRect([b convertRect:b.bounds toView:nil]), b.alpha, bgA];
+            [s appendString:P39Subtree(b)];
+            P39Store(P39Ink, s);
         }
     }
 }
@@ -1658,6 +1760,14 @@ static void GCProbeDump7(NSString *reason) {
         }
         [o appendString:@"\n"];
     }
+    {   // probe12：状态触发快照（故障态当场记录，不依赖采样时刻）
+        [o appendFormat:@"P39天气行快照(%lu份) 对齐: 调=%d 写=%d 无车机=%d 重入=%d\n",
+            (unsigned long)(P39Wx ? P39Wx.count : 0), P39AlignCalls, P39AlignWrites,
+            P39AlignSkipCar, P39AlignSkipReenter];
+        for (NSString *s39 in P39Wx) [o appendFormat:@"  · %@\n", s39];
+        [o appendFormat:@"P39墨量快照(%lu份)\n", (unsigned long)(P39Ink ? P39Ink.count : 0)];
+        for (NSString *s39 in P39Ink) [o appendFormat:@"  · %@\n", s39];
+    }
 #endif
     if (CachedCar) {
         CALayer *p8pl = CachedCar.layer.presentationLayer;
@@ -2190,6 +2300,7 @@ static void GCStylePinWidgets(UIWindow *win) {
     P33Watch((UIView *)(CachedLiteGroup && CachedLiteGroup.window ? CachedLiteGroup : CachedRight), 1);
     P33Watch(Cached2D, 2);
     P37Sample();
+    P39Sample();
 #endif
     GCStylePinBusy = NO;
 }
@@ -2801,10 +2912,23 @@ static void AlignWeatherRow(UIView *row) {
     // 0.5.33：把「天气+LOGO」行对齐到车机钮右边。用坐标转换 + center 写入
     // （transform 安全、幂等，不累积误差）。
     static BOOL inAlign = NO;
-    if (inAlign) return;
+#ifdef GAODECLEAN_PROBE
+    P39AlignCalls++;
+#endif
+    if (inAlign) {
+#ifdef GAODECLEAN_PROBE
+        P39AlignSkipReenter++;
+#endif
+        return;
+    }
     if (!row || !row.window || !row.superview) return;
     UIView *car = CachedCar;
-    if (!car || !car.window) return;
+    if (!car || !car.window) {
+#ifdef GAODECLEAN_PROBE
+        P39AlignSkipCar++;
+#endif
+        return;
+    }
     inAlign = YES;
     UIWindow *win = row.window;
     CGRect carRect = [car convertRect:car.bounds toView:win];
@@ -2832,6 +2956,9 @@ static void AlignWeatherRow(UIView *row) {
         [CATransaction setDisableActions:YES];
         if (big) [row.layer removeAllAnimations];
         row.center = wantCenter;
+#ifdef GAODECLEAN_PROBE
+        P39AlignWrites++;
+#endif
         [CATransaction commit];
     }
     GCWeatherReleaseHeld();   // 0.9.3：对齐完成 → 恢复扣留的天气行（出现在正确位置）
