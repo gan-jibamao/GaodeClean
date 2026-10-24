@@ -18,7 +18,7 @@
 // ---- jibamao 个人标识（编译进 dylib，可用 strings 核对）----
 static NSString *const kGCAuthor      = @"jibamao";
 static NSString *const kGCRepo        = @"https://gan-jibamao.github.io/";
-static NSString *const kGCVersion     = @"0.9.47+probe10";
+static NSString *const kGCVersion     = @"0.9.48+probe11";
 
 // 0.9.18（A1）：底边间隙**按控件分开**，对表原生（搜索栏白底顶边 = 702.6pt）
 //   车机钮（连接车机 · WINDeviceInterconnectWidget）：原生底 652 → 间隙 50.6 → 取 50
@@ -207,39 +207,46 @@ static void P33Watch(UIView *v, int tag) {
         P33EvTotal++;
     }
 }
-// ══ probe10：全局逐帧轨迹取证（纯只读，不写任何几何/透明度/动画）══
-//   老大：「全局抓，不要只抓2D3D」。
-//   目标 = 车机钮 / 胶囊 / 路线 / 2D钮 + 地图控件容器子树里的其它控件（最多 12 个）。
-//   每帧记录：mx,my=模型窗口系、px,py=presentation 窗口系、a=alpha、hid、实例指针。
-//   任一目标相邻帧位移 >6pt 或实例指针变化 ⇒ 判「跳」，自动保存最近 40 帧全目标快照（最多 3 起）。
+// ══ probe11：全局逐帧轨迹取证（纯只读，不写任何几何/透明度/动画）══
+//   probe10 教训：3 个事件名额全被冷启动抖动（t<2s）占满，用户点击时刻没记到；
+//   「换实例」计数被自身重扫污染。probe11 修正：
+//   ① 冷启动豁免 t<8s 不记事件  ② 名额 6、环 120 帧
+//   ③ 新增「跳变流水」40 条（每起都记，永不丢）  ④ 天气行升为固定目标
+//   ⑤ 实例更换只对固定目标统计，重扫时重置基线
 #define P37_MAX 12
-#define P37_RING 90
-#define P37_EVN 3
+#define P37_RING 120
+#define P37_EVN 6
 #define P37_EVF 40
+#define P37_LOG 40
 typedef struct { float mx, my, px, py, a; short hid; short idx; } P37Cell;
+typedef struct { float t; short tag, from, to, a0, a1; } P37Jmp;   // from/to 为 pt（×1）
 static P37Cell P37Ring[P37_RING][P37_MAX];
 static float P37RT[P37_RING];
 static int P37RingI, P37RingN;
 static P37Cell P37Ev[P37_EVN][P37_EVF][P37_MAX];
 static float P37EvT[P37_EVN][P37_EVF];
 static int P37EvN[P37_EVN], P37EvCnt, P37EvTarget[P37_EVN];
+static P37Jmp P37JmpLog[P37_LOG];
+static int P37JmpI, P37JmpTotal;
 static char P37Name[P37_MAX][72];
 static __weak UIView *P37V[P37_MAX];
 static int P37N, P37ScanTick, P37PtrSwap;
 static void *P37LastPtr[P37_MAX];
 static float P37LastPy[P37_MAX], P37LastPx[P37_MAX], P37Jumps[P37_MAX];
+static int P37Fixed = 5;   // 前 5 个为固定目标（车机/胶囊/路线/2D钮/天气行）
 
 static void P37RefreshTargets(void) {
     int n = 0;
     UIView *cap = (CachedLiteGroup && CachedLiteGroup.window) ? (UIView *)CachedLiteGroup : (UIView *)CachedRight;
-    UIView *fixed[4] = { CachedCar, cap, CachedRoute, Cached2D };
-    const char *fn[4] = { "车机", "胶囊", "路线", "2D钮" };
-    for (int i = 0; i < 4 && n < P37_MAX; i++) {
+    UIView *fixed[5] = { CachedCar, cap, CachedRoute, Cached2D, P7RowMir };
+    const char *fn[5] = { "车机", "胶囊", "路线", "2D钮", "天气行" };
+    for (int i = 0; i < 5 && n < P37_MAX; i++) {
         if (!fixed[i]) continue;
         P37V[n] = fixed[i];
         snprintf(P37Name[n], sizeof(P37Name[n]), "%s", fn[i]);
         n++;
     }
+    P37Fixed = n;
     // 容器子树补抓（MapWidgetContainerView 及同层），深度 ≤3、尺寸合理、去重
     UIView *seed = CachedCar ? CachedCar.superview : nil;
     if (!seed) seed = cap ? cap.superview : nil;
@@ -261,12 +268,14 @@ static void P37RefreshTargets(void) {
         }
     }
     for (int i = n; i < P37_MAX; i++) { P37V[i] = nil; P37Name[i][0] = 0; }
+    // ⑤ 重扫后目标换了 ⇒ 重置位置/指针基线，避免把「我自己换目标」记成「App 换实例」
+    for (int i = 0; i < P37_MAX; i++) { P37LastPy[i] = 0; P37LastPx[i] = 0; P37LastPtr[i] = NULL; }
     P37N = n;
 }
 static void P37Sample(void) {
     if (++P37ScanTick >= 15 || P37N == 0) { P37ScanTick = 0; P37RefreshTargets(); }
     float t = (float)P7Now();
-    int jumpIdx = -1; float jumpFrom __attribute__((unused)) = 0, jumpTo __attribute__((unused)) = 0;
+    int jumpIdx = -1; float jumpFrom = 0, jumpTo = 0; float jumpA0 = 0, jumpA1 = 0;
     for (int i = 0; i < P37N; i++) {
         UIView *v = P37V[i];
         P37Cell *c = &P37Ring[P37RingI][i];
@@ -285,15 +294,18 @@ static void P37Sample(void) {
                 c->px = (float)pr.origin.x; c->py = (float)pr.origin.y;
             } else { c->px = c->mx; c->py = c->my; }
             void *p = (__bridge void *)v;
-            if (P37LastPtr[i] && P37LastPtr[i] != p) { P37PtrSwap++; if (jumpIdx < 0) { jumpIdx = i; jumpFrom = -1; jumpTo = -1; } }
+            if (i < P37Fixed && P37LastPtr[i] && P37LastPtr[i] != p) {
+                P37PtrSwap++;
+                if (jumpIdx < 0) { jumpIdx = i; jumpFrom = -1; jumpTo = -1; jumpA0 = c->a; jumpA1 = c->a; }
+            }
             P37LastPtr[i] = p;
             if (P37LastPy[i] > 0 && fabsf(c->py - P37LastPy[i]) > 6.0f) {
                 P37Jumps[i]++;
-                if (jumpIdx < 0) { jumpIdx = i; jumpFrom = P37LastPy[i]; jumpTo = c->py; }
+                if (jumpIdx < 0) { jumpIdx = i; jumpFrom = P37LastPy[i]; jumpTo = c->py; jumpA0 = c->a; jumpA1 = c->a; }
             }
             if (P37LastPx[i] > 0 && fabsf(c->px - P37LastPx[i]) > 6.0f) {
                 P37Jumps[i]++;
-                if (jumpIdx < 0) { jumpIdx = i; jumpFrom = P37LastPy[i]; jumpTo = c->py; }
+                if (jumpIdx < 0) { jumpIdx = i; jumpFrom = P37LastPy[i]; jumpTo = c->py; jumpA0 = c->a; jumpA1 = c->a; }
             }
             P37LastPy[i] = c->py; P37LastPx[i] = c->px;
         }
@@ -301,20 +313,34 @@ static void P37Sample(void) {
     P37RT[P37RingI] = t;
     P37RingI = (P37RingI + 1) % P37_RING;
     if (P37RingN < P37_RING) P37RingN++;
-    if (jumpIdx >= 0 && P37EvCnt < P37_EVN && P37RingN >= 10) {
-        int n = P37RingN < P37_EVF ? P37RingN : P37_EVF;
-        for (int f = 0; f < n; f++) {
-            int idx = (P37RingI - n + f + P37_RING * 2) % P37_RING;
-            P37EvT[P37EvCnt][f] = P37RT[idx];
-            for (int i = 0; i < P37_MAX; i++) P37Ev[P37EvCnt][f][i] = P37Ring[idx][i];
+    // ③ 跳变流水：t≥8s 后每一跳都记（永不因名额满丢失）
+    if (jumpIdx >= 0 && t >= 8.0f) {
+        P37JmpLog[P37JmpI].t = t;
+        P37JmpLog[P37JmpI].tag = (short)jumpIdx;
+        P37JmpLog[P37JmpI].from = (short)(jumpFrom < -32000 ? -32000 : (jumpFrom > 32000 ? 32000 : jumpFrom));
+        P37JmpLog[P37JmpI].to = (short)(jumpTo < -32000 ? -32000 : (jumpTo > 32000 ? 32000 : jumpTo));
+        P37JmpLog[P37JmpI].a0 = (short)(jumpA0 * 100);
+        P37JmpLog[P37JmpI].a1 = (short)(jumpA1 * 100);
+        P37JmpI = (P37JmpI + 1) % P37_LOG;
+        P37JmpTotal++;
+        // ① 事件快照同样 8s 后、名额 6
+        if (P37EvCnt < P37_EVN && P37RingN >= 10) {
+            int n = P37RingN < P37_EVF ? P37RingN : P37_EVF;
+            for (int f = 0; f < n; f++) {
+                int idx = (P37RingI - n + f + P37_RING * 2) % P37_RING;
+                P37EvT[P37EvCnt][f] = P37RT[idx];
+                for (int i = 0; i < P37_MAX; i++) P37Ev[P37EvCnt][f][i] = P37Ring[idx][i];
+            }
+            P37EvN[P37EvCnt] = n;
+            P37EvTarget[P37EvCnt] = jumpIdx;
+            P37EvCnt++;
         }
-        P37EvN[P37EvCnt] = n;
-        P37EvTarget[P37EvCnt] = jumpIdx;
-        P37EvCnt++;
     }
 }
 #endif
+#endif
 
+#ifdef GAODECLEAN_PROBE
 // ══ probe8：2D/3D 切换车机位漂移定罪（帧级 presentation 分歧 + 驱动率 + 容器钩子）══
 static long P8Fires, P8Busy, P8NoWin, P8ContHooks, P8Diverge;
 static long P8LayerFires, P8LayerFixes;   // trial26：layer setter 钩子命中/纠偏计数
@@ -1621,6 +1647,16 @@ static void GCProbeDump7(NSString *reason) {
             }
             if (others.length) [o appendFormat:@"    同步位移: %@\n", others];
         }
+        // probe11：跳变流水（t≥8s 起每一起都记，40 条环，永不因名额满丢失）
+        [o appendFormat:@"P37流水: 总数=%d\n", P37JmpTotal];
+        for (int i = 0; i < P37_LOG; i++) {
+            P37Jmp *j = &P37JmpLog[i];
+            if (j->t <= 0) continue;
+            [o appendFormat:@"  (t=%.2f 目标=%d:%s py %d→%d a %.2f→%.2f) ", j->t, j->tag,
+                (j->tag >= 0 && j->tag < P37_MAX) ? P37Name[j->tag] : "?",
+                (int)j->from, (int)j->to, j->a0 / 100.0, j->a1 / 100.0];
+        }
+        [o appendString:@"\n"];
     }
 #endif
     if (CachedCar) {
