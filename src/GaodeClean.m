@@ -18,7 +18,7 @@
 // ---- jibamao 个人标识（编译进 dylib，可用 strings 核对）----
 static NSString *const kGCAuthor      = @"jibamao";
 static NSString *const kGCRepo        = @"https://gan-jibamao.github.io/";
-static NSString *const kGCVersion     = @"0.9.59+probe16";
+static NSString *const kGCVersion     = @"0.9.60+trial43";
 
 // 0.9.18（A1）：底边间隙**按控件分开**，对表原生（搜索栏白底顶边 = 702.6pt）
 //   车机钮（连接车机 · WINDeviceInterconnectWidget）：原生底 652 → 间隙 50.6 → 取 50
@@ -117,22 +117,14 @@ static BOOL GCCIsLiteGroupCapsule(UIView *v);          // trial11：前置声明
 static BOOL FixingHintText;
 static __weak UIView *CachedTabBar;
 
-// ★trial38（probe14 日志铁证）：锚点必须**跟随底栏**，不能用窗口绝对坐标。
-//   日志：祖先容器 c11:UIView 的 presentation 在 610→570→551→466→439…790→763→702→674 之间被
-//   App 连续搬动；同时截图实测底栏三圆钮也从 768 上移到 610 —— 整块 UI（含底栏）一起位移。
-//   我们却按 sh-97 的绝对位置往回拉 ⇒ 每帧对拉 = 老大看到的「乱跑/抖动」。
-//   原生关系：胶囊底 = 底栏顶 − 13（正常态 768 − 13 = 755，与原式一致）。
-// trial39：**取表现层坐标** —— probe14 流水铁证：App 用 CAAnimation 连续搬动控件
-//   （py 609→582→558→525→485→451→417→388→360→336→316…），动画跑在 presentation 上；
-//   我们钉的是模型层 ⇒ 视觉上永远追不上，只能靠"对拉"硬碰，于是看到抖动/乱跑。
-static CGRect GCPresWinRect(UIView *v, UIWindow *win) {
+// ★trial43(D1)：原 GCPresWinRect（trial39 的表现层取矩形）已删除。
+//   它让目标位跟着 App 的 CAAnimation 跑 —— P8驱动 车机Y 跨度=84 就是这么来的。
+//   按钮要固定，改用下方 GCModelWinRect（模型层）。
+// ★trial43(D1)：模型层取矩形 —— 目标位不再跟随 App 的动画。
+//   铁证：P8驱动 车机Y[min=673 max=757 跨度=84]、P37流水 t=38.13 py 673→756→742→723→695→681。
+//   trial39 改用表现层本意是「跟随动画不滞后」，但按钮是要**固定**的，跟随 = 一起跑。
+static CGRect GCModelWinRect(UIView *v, UIWindow *win) {
     if (!v || !win) return CGRectZero;
-    CALayer *pl = v.layer.presentationLayer;
-    CALayer *sv = v.superview.layer.presentationLayer;
-    if (pl && sv && win.layer) {
-        CGRect r = [sv convertRect:pl.frame toLayer:win.layer];
-        if (r.size.width > 0.5 && r.size.height > 0.5) return r;
-    }
     return [v convertRect:v.bounds toView:win];
 }
 static CGFloat GCPinBottom(UIWindow *win) {
@@ -140,7 +132,7 @@ static CGFloat GCPinBottom(UIWindow *win) {
     CGFloat fb = sh - 81 - 16;
     UIView *tb = CachedTabBar;
     if (win && tb && tb.window == win) {
-        CGRect r = GCPresWinRect(tb, win);
+        CGRect r = GCModelWinRect(tb, win);   // trial43(D1)：底栏也用模型层，避免动画期整组按钮跟着漂
         if (r.size.height > 20 && r.size.height < 140 && r.origin.y > sh * 0.30)
             return r.origin.y - 13.0;
     }
@@ -2216,6 +2208,34 @@ static void GCStyleDiscoverWidgets(UIWindow *win) {
 //   probe7 铁证：App 布局系统直接写 frame、不走控件自身 layoutSubviews（trial10 钩子因此空转），
 //   我们 11Hz tick 追写 60fps 的 App ⇒ before=608/after=673 每拍拉锯、dump 瞬间停在 App 位。
 //   此函数在 App 每次写位置后同事务内改回 pin 目标 ⇒ 零拉锯零闪烁。
+// ★trial43(D2)：孪生容器外观钳位。
+//   铁证（probe16 dump t=60.1s）：609.7 处有两个同尺寸控件叠着 ——
+//     WINPermanentCompassView {339,609.7} 44x44 sub=2
+//        ├ UIView own={0,+69.7}  → 窗口 679.4  cr=22 sub=0   ← 白底「3D」外观，被摆到父容器下方 69.7pt
+//        └ UIVisualEffectView own={0,−76.36}
+//     UIView {339,609.7} cr=100 sub=1  ← 我们钉的 2D 钮（只剩一圈环）
+//   ⇒ 我们只钉了后者，前者（真正的白圆外观）从没管过 = 白圆与空环分离。
+static void GCStylePinTwinFaces(UIView *w) {
+    if (!w || !w.superview) return;
+    UIView *sv = w.superview;
+    CGRect wr = [w convertRect:w.bounds toView:nil];
+    for (UIView *sib in [sv.subviews copy]) {
+        if (sib == w) continue;
+        CGRect sr = [sib convertRect:sib.bounds toView:nil];
+        if (fabs(sr.origin.x - wr.origin.x) > 3.0 || fabs(sr.origin.y - wr.origin.y) > 3.0) continue;
+        if (fabs(sr.size.width - wr.size.width) > 3.0 || fabs(sr.size.height - wr.size.height) > 3.0) continue;
+        CGRect bb = sib.bounds;
+        for (UIView *face in [sib.subviews copy]) {
+            if (![face isMemberOfClass:[UIView class]]) continue;   // 只认纯 UIView（白底圆），不碰模糊层
+            if (face.subviews.count != 0) continue;
+            if (CGRectEqualToRect(face.frame, bb)) continue;
+            [CATransaction begin]; [CATransaction setDisableActions:YES];
+            [face.layer removeAllAnimations];
+            face.frame = bb;
+            [CATransaction commit];
+        }
+    }
+}
 static BOOL GCStylePinOneBusy = NO;
 static void GCStylePinOne(UIView *v) {
     if (!v || GCStylePinOneBusy) return;                 // 防重入：钳位自身写 frame 会再触发钩子
@@ -2254,7 +2274,7 @@ static void GCStylePinOne(UIView *v) {
             //   probe9 铁证：原生 win y=609.7 = capTop(667)-57.3；trial27 用 capTop-15-44=608
             //   与原生差 1.7pt > 幂等容差 0.6 ⇒ 每帧拉锯（2D=198）。改用原生间距 ⇒ 收敛零拉锯，
             //   缩放撂回叠帽态（top=capTop+33）时照样纠回。
-            CGRect capw = GCPresWinRect(capNow, win);   // trial39：用胶囊表现层，跟随 App 动画
+            CGRect capw = GCModelWinRect(capNow, win);  // trial43(D1)：模型层 —— 不再跟着 App 动画跑
             g = CGRectMake(CGRectGetMidX(capw) - wr.size.width / 2,
                            capw.origin.y - 57.3, wr.size.width, wr.size.height);
             // ★trial30（老大 12:59 截图铁证：44pt 位置精准、内部全透明只剩 1px 环）：
@@ -2344,6 +2364,7 @@ static void GCStylePinOne(UIView *v) {
                     [CATransaction commit];
                 }
             }
+            GCStylePinTwinFaces(v);   // trial43(D2)：把孪生容器的白底外观钉回 bounds（修白圆/空环分离）
         }
     } @catch (__unused NSException *e) {}
     GCStylePinOneBusy = NO;
