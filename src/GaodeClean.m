@@ -18,7 +18,7 @@
 // ---- jibamao 个人标识（编译进 dylib，可用 strings 核对）----
 static NSString *const kGCAuthor      = @"jibamao";
 static NSString *const kGCRepo        = @"https://gan-jibamao.github.io/";
-static NSString *const kGCVersion     = @"0.9.68+trial49";
+static NSString *const kGCVersion     = @"0.9.69+trial50";
 
 // 0.9.18（A1）：底边间隙**按控件分开**，对表原生（搜索栏白底顶边 = 702.6pt）
 //   车机钮（连接车机 · WINDeviceInterconnectWidget）：原生底 652 → 间隙 50.6 → 取 50
@@ -2124,44 +2124,6 @@ __attribute__((unused)) static void GCProbeTick7(void) {
 #endif
 
 // trial11：实例发现（缓存失效才 BFS）—— 从 AlignCornerWidgets 收归，pin 自给自足
-// ★trial27：2D/3D 模式圆钮识别 —— 录屏铁证：缩放地图时 App 重排把 2D 钮撂回原生相对位
-//   （下移 ~58pt 叠到胶囊顶、盖住定位图标）。特征：右侧带内 36~56pt 近正方、非隐藏、
-//   不在四个已缓存控件的子树内（路线胶囊 44×44 同带同侧，必须靠祖先链排除）。
-static BOOL GCStyleIs2DBtn(UIView *v, UIWindow *win) {
-    if (!v || !win) return NO;                            // hidden/alpha 判据在 pin 侧（2D 模式 App 藏钮仍缓存）
-    CGRect wr = [v convertRect:v.bounds toView:win];
-    CGFloat w = wr.size.width, h = wr.size.height;
-    if (w < 36 || w > 56 || h < 36 || h > 56 || fabs(w - h) > 6) return NO;
-    if (CGRectGetMidX(wr) < win.bounds.size.width - 64) return NO;
-    for (UIView *p = v.superview; p; p = p.superview)
-        if (p == CachedRight || p == CachedRoute || p == CachedCar || p == CachedLiteGroup) return NO;
-    UIView *cap = (CachedLiteGroup && CachedLiteGroup.window) ? (UIView *)CachedLiteGroup : (UIView *)CachedRight;
-    CGFloat capTop;
-    if (cap) capTop = [cap convertRect:cap.bounds toView:win].origin.y;
-    else capTop = win.bounds.size.height - 97 - 88;      // 兜底：pinBottom - 胶囊高
-    CGFloat cy = CGRectGetMidY(wr);
-    if (cy < capTop - 160 || cy > capTop + 80) return NO;   // 竖带：正常位(帽上~42pt)与叠帽态都覆盖
-    if (v == CachedCar || v == CachedRight || v == CachedRoute || v == CachedLiteGroup) return NO;
-    // ★trial29（probe9 定罪）：决定性特征 = 子树含 WINAJXCombinedItemView（兜底 LOTAnimationView）。
-    //   probe9 dump 铁证：2D/3D 钮真身 = UIView(cr=100) > WINAJXCombinedItemView >
-    //   GDDesignTokenImageView(3D 模式 hid=1) + LOTAnimationView ——「2D」文字是 Lottie 动画，
-    //   不是 UILabel（trial28 label 判据永远打不中 ⇒ 2D=0 从未发现）。
-    //   定位钮(WINLocationView>UIImageView+NMBaseButton)、路线(WINRouteLineWidgetView)、
-    //   罗盘(WINPermanentCompassView>UIVisualEffectView) 子树均无这两类 ⇒ 永不误认。
-    BOOL has2DLabel = NO;
-    @try {
-        Class cItem = NSClassFromString(@"WINAJXCombinedItemView");
-        Class cLottie = NSClassFromString(@"LOTAnimationView");
-        NSMutableArray<UIView *> *q = [NSMutableArray arrayWithArray:v.subviews];
-        while (q.count) {
-            UIView *s = q.firstObject; [q removeObjectAtIndex:0];
-            if ((cItem && [s isKindOfClass:cItem]) || (cLottie && [s isKindOfClass:cLottie])) { has2DLabel = YES; break; }
-            [q addObjectsFromArray:s.subviews];
-        }
-    } @catch (NSException *e28) {}
-    if (!has2DLabel) return NO;
-    return YES;
-}
 static void GCStyleDiscoverWidgets(UIWindow *win) {
     if (!win) return;
 #ifdef GAODECLEAN_PROBE
@@ -2197,7 +2159,9 @@ static void GCStyleDiscoverWidgets(UIWindow *win) {
 #ifdef GAODECLEAN_PROBE
     if (CachedCar && CachedRight && CachedRoute && CachedLiteGroup) P7DiscSkips++;
 #endif
-    if (CachedCar && CachedRight && CachedRoute && CachedLiteGroup && Cached2D) return;   // trial27：2D 钮入齐套条件
+    // ★trial50(A1)：Cached2D 已停用（0.9.29 无此缓存），不再参与"齐套"判定，
+    //   否则恒缺员 ⇒ 每拍全树 BFS 白烧。
+    if (CachedCar && CachedRight && CachedRoute && CachedLiteGroup) return;
     // ★trial25(A4)：BFS 节流 ≥100ms —— display-link 60fps 驱动下，缓存缺员（dump 铁证：
     //   LiteGroup 0.8s 丢失后 ptr=0x0 长期为 nil）时每帧全树 BFS（预算 2000 节点）白烧。
     static CFAbsoluteTime GCStyleLastBFS = 0;
@@ -2213,8 +2177,10 @@ static void GCStyleDiscoverWidgets(UIWindow *win) {
         else if (IsRightBottomWidget(v)) CachedRight = v;
         else if ([cn isEqualToString:GCStrAt(141)]) CachedRoute = v;
         else if (GCCIsLiteGroupCapsule(v)) CachedLiteGroup = v;
-        else if (!Cached2D && GCStyleIs2DBtn(v, win)) Cached2D = v;   // trial27
-        if (CachedCar && CachedRight && CachedRoute && CachedLiteGroup && Cached2D) break;
+        // ★trial50(A1)：撤除 trial27 的 GCStyleIs2DBtn 识别 —— 0.9.29 没有 Cached2D。
+        //   它缓存的是 WINAJXCombinedWidgetView 里那个 cr=100 的 UIView（父容器常被 App 隐藏），
+        //   与 0.9.29 使用的 WINPermanentCompassView 是两个不同实例，是后续所有 2D 钮问题的源头。
+        if (CachedCar && CachedRight && CachedRoute && CachedLiteGroup) break;
     }
 #ifdef GAODECLEAN_PROBE
     if (CachedCar != p7oc)     P7Note(@"DISC 车机→新实例 old=%p(%@) new=%p(%@)", (__bridge void *)p7oc, NSStringFromCGRect(P7WR(p7oc)), (__bridge void *)CachedCar, NSStringFromCGRect(P7WR(CachedCar)));
@@ -2306,6 +2272,52 @@ static void GCStyleShellEnforce(void) {                    // 60fps 调用（只
     [CATransaction commit];
 }
 
+// ★trial50(A2)：2D/3D 钮 —— 移植 0.9.29 的识别与定位（老大要求"回退到 0.9.29 状态"）。
+//   0.9.29 原文：AlignMapTypeButton(capsule) → targetBottom = capsuleTop - GCGapMapType(13.3)
+//   识别依据（0.9.29 注释里的真机 diag 铁证）：
+//     「右侧 (339,286) 那个 44x44 按钮 类名 = WINPermanentCompassView，
+//       子视图只有 UIVisualEffectView（毛玻璃），子树里没有任何 2D/3D 文本视图」
+//   ⇒ 纯按类名 + 几何识别；不做任何 alpha / 白底 / 内容强制（0.9.29 就没有这些）。
+static __weak UIView *CachedMapType = nil;
+
+static void GCStyleAlignMapType(UIWindow *win) {           // 5Hz 调用
+    if (!win) return;
+    if (!CachedMapType || !CachedMapType.window) {
+        CachedMapType = nil;
+        CGFloat sw = win.bounds.size.width, sh = win.bounds.size.height;
+        NSMutableArray<UIView *> *stack = [NSMutableArray arrayWithObject:win];
+        NSUInteger budget = 700;
+        while (stack.count && budget--) {
+            UIView *v = [stack lastObject]; [stack removeLastObject];
+            [stack addObjectsFromArray:v.subviews];
+            if (v.hidden || v.alpha < 0.05f) continue;
+            CGRect r = [v convertRect:v.bounds toView:win];
+            if (r.size.width < 40 || r.size.width > 48) continue;
+            if (fabs(r.size.width - r.size.height) > 4) continue;      // 近正方
+            if (CGRectGetMidX(r) < sw * 0.72) continue;                // 右侧列
+            if (CGRectGetMidY(r) > sh * 0.90) continue;                // 排除底栏区
+            if (![NSStringFromClass(v.class) containsString:@"CompassView"]) continue;
+            CachedMapType = v;
+            break;
+        }
+    }
+    UIView *mt = CachedMapType;
+    if (!mt || !mt.window) return;
+    UIView *cap = (CachedLiteGroup && CachedLiteGroup.window) ? (UIView *)CachedLiteGroup : (UIView *)CachedRight;
+    if (!cap || !cap.window) return;                       // 无胶囊 ⇒ 无参照，不动
+    CGRect cr = [cap convertRect:cap.bounds toView:win];
+    CGRect mr = [mt convertRect:mt.bounds toView:win];
+    CGFloat targetBottom = cr.origin.y - 13.3;             // 0.9.29：GCGapMapType
+    CGFloat dy = targetBottom - CGRectGetMaxY(mr);
+    if (fabs(dy) < 1.0) return;                            // 幂等：已达标不写
+    CGRect f = mt.frame;
+    f.origin.y += dy;                                      // 只改 y，不碰尺寸/透明度
+    [CATransaction begin]; [CATransaction setDisableActions:YES];
+    [mt.layer removeAllAnimations];
+    mt.frame = f;
+    [CATransaction commit];
+}
+
 static BOOL GCStylePinOneBusy = NO;
 static void GCStylePinOne(UIView *v) {
     if (!v || GCStylePinOneBusy) return;                 // 防重入：钳位自身写 frame 会再触发钩子
@@ -2328,7 +2340,13 @@ static void GCStylePinOne(UIView *v) {
         CGRect wr = [v convertRect:v.bounds toView:win];
         CGRect g;
         if (isCar) {
-            g = CGRectMake(10, pinBottom - 20 - 18 - wr.size.height, wr.size.width, wr.size.height);
+            // ★trial50(A3)：回退 0.9.29 公式 —— bottom = 搜索栏顶 - GCGapCar(50)
+            //   0.9.29 原文：AlignOneWidget(bar, CachedCar, barTop, GCGapCar)
+            //   注释铁证：「车机钮 原生底 652 → 间隙 50.6」（搜索栏顶 702.6）
+            //   原公式 pinBottom-20-18 锚在底栏顶（755）⇒ 顶边 673，比 0.9.29 低 64.4pt。
+            CGFloat barTop = SearchBarView ? [SearchBarView convertPoint:CGPointZero toView:win].y
+                                           : (pinBottom - 52.4);
+            g = CGRectMake(10, barTop - 50.0 - wr.size.height, wr.size.width, wr.size.height);
             // ★trial35（P33 哨兵铁证：车机钮每 ~20s 被 App 把 alpha 清 0，坐标恒在 (10,673)）：
             //   位置钉住 ≠ 看得见。可见性同钉，幂等（达标即不写）。
             if (!v.hidden && v.alpha < 0.999f) {
@@ -2499,49 +2517,6 @@ static void GCStyleHookSetPos(Class rc) {
         Replace(rc, @selector(setCenter:), imp_implementationWithBlock(^(UIView *self, CGPoint c) {
             ((void (*)(id, SEL, CGPoint))o2)(self, @selector(setCenter:), c);
             GCStylePinOne(self);
-        }), t2);
-    }
-}
-// ★trial42(A2)：2D/3D 钮内容钳位 —— 在 App 写入的同一调用栈内纠回（谁最后写谁赢）。
-//   证据：截图实测「3D」白圆在 y=519.7pt、空环在 610pt（= capTop-57.3，环钉对了），内容漂 -90.3pt。
-//   trial41 的「每帧写直接子视图 frame」输在时序（我们写在前、App 布局在后）与深度（Lottie 更深）。
-static BOOL GCStyleInnerFillBusy = NO;
-static void GCStyleInnerFill(UIView *v) {
-    if (GCStyleInnerFillBusy || !v || !v.superview) return;
-    if (!Cached2D) return;
-    UIView *owner = v.superview;
-    if (owner != Cached2D && owner.superview != Cached2D) return;   // 只认 2D 钮子树（深度 ≤2）
-    CGRect bb = owner.bounds;
-    if (CGRectEqualToRect(v.frame, bb)) return;
-    GCStyleInnerFillBusy = YES;
-    [CATransaction begin]; [CATransaction setDisableActions:YES];
-    [v.layer removeAllAnimations];
-    v.transform = CGAffineTransformIdentity;
-    v.frame = bb;
-    [CATransaction commit];
-    GCStyleInnerFillBusy = NO;
-}
-static void GCStyleHookInnerFill(Class rc) {
-    if (!rc) return;
-    NSString *nm = NSStringFromClass(rc);
-    if (!nm || [GCStylePosHookedClasses() containsObject:nm]) return;   // 与 setPos 共用登记表防双挂
-    [GCStylePosHookedClasses() addObject:nm];
-    Method mf = class_getInstanceMethod(rc, @selector(setFrame:));
-    if (mf) {
-        IMP o = method_getImplementation(mf);
-        const char *t = method_getTypeEncoding(mf);
-        Replace(rc, @selector(setFrame:), imp_implementationWithBlock(^(UIView *self, CGRect f) {
-            ((void (*)(id, SEL, CGRect))o)(self, @selector(setFrame:), f);
-            GCStyleInnerFill(self);
-        }), t);
-    }
-    Method mc = class_getInstanceMethod(rc, @selector(setCenter:));
-    if (mc) {
-        IMP o2 = method_getImplementation(mc);
-        const char *t2 = method_getTypeEncoding(mc);
-        Replace(rc, @selector(setCenter:), imp_implementationWithBlock(^(UIView *self, CGPoint c) {
-            ((void (*)(id, SEL, CGPoint))o2)(self, @selector(setCenter:), c);
-            GCStyleInnerFill(self);
         }), t2);
     }
 }
@@ -2734,9 +2709,6 @@ static void GCStylePinWidgetsInner(UIWindow *win) {   // trial25(A2)：原体改
             }
             GCStyleHookSetPos(v26.class);   // 内部 GCStylePosHookedClasses 去重
             GCStyleHookLayerGeo(v26);       // trial26(A1)：layer setter 钩（按 layer 类去重）
-            // trial42(A2)：2D/3D 钮内部内容类 —— App 写它们的 frame/center 时同事务钉回 bounds
-            GCStyleHookInnerFill(NSClassFromString(@"WINAJXCombinedItemView"));
-            GCStyleHookInnerFill(NSClassFromString(@"LOTAnimationView"));
         }
     }
     GCStyleShellEnforce();                    // trial49(A1)：空壳容器（60fps，只碰缓存实例）
@@ -3003,6 +2975,7 @@ static void GCNarrowTick(void) {
     }
     GCStylePinWidgets(pw);
     GCStyleShellDiscover(pw);   // trial49(A1)：5Hz 发现空壳容器（每帧只执行、不扫描）
+    GCStyleAlignMapType(pw);    // trial50(A2)：0.9.29 口径 —— 2D/3D 钮 = 胶囊顶 - 13.3
 }
 
 // 0.9.4：删除 IsBlurOverlayView / GCCColorStr / GCCScreenMapMean
