@@ -18,7 +18,7 @@
 // ---- jibamao 个人标识（编译进 dylib，可用 strings 核对）----
 static NSString *const kGCAuthor      = @"jibamao";
 static NSString *const kGCRepo        = @"https://gan-jibamao.github.io/";
-static NSString *const kGCVersion     = @"0.9.56+trial40";
+static NSString *const kGCVersion     = @"0.9.57+trial41";
 
 // 0.9.18（A1）：底边间隙**按控件分开**，对表原生（搜索栏白底顶边 = 702.6pt）
 //   车机钮（连接车机 · WINDeviceInterconnectWidget）：原生底 652 → 间隙 50.6 → 取 50
@@ -1753,6 +1753,7 @@ static void GCStyleTab(UIView *anchor) {
         //   旧写法 if (!it.backgroundColor) 只在 nil 时补 —— App 一旦把底色设成**透明**（非 nil）
         //   就永久跳过 ⇒ 白圆消失、图标悬在地图上 = 老大看到的「按钮在乱跑」。
         //   改为每帧无条件强制写回（幂等，值相同不触发重绘）。
+        it.translatesAutoresizingMaskIntoConstraints = YES;   // trial41：关自动约束，frame 权威
         it.backgroundColor = [UIColor colorWithWhite:0.96 alpha:0.92];
         if (it.alpha < 0.999f) it.alpha = 1.0f;
         if (it.hidden) it.hidden = NO;
@@ -2309,6 +2310,11 @@ static void GCStylePinOne(UIView *v) {
             }
         }
 #endif
+        // ★trial41（截图铁证：3D 内容跑到 561pt、610pt 处只剩空圆环；缩放时首页/我的也跳）：
+        //   根因 = 这些控件仍受 App 的 AutoLayout 约束管理 ⇒ 我们写 frame 被布局引擎覆盖，
+        //   每帧互相覆盖 = 跳动。改为：**关掉自动约束**（frame 权威），并同步把内部内容钉回自身 bounds。
+        if (v.translatesAutoresizingMaskIntoConstraints) { }
+        else v.translatesAutoresizingMaskIntoConstraints = YES;
         if (!CGRectEqualToRect(local, v.frame)) {
             [CATransaction begin]; [CATransaction setDisableActions:YES];
             [v.layer removeAllAnimations]; v.frame = local;
@@ -2319,6 +2325,16 @@ static void GCStylePinOne(UIView *v) {
                 P7Write(3, wr, local, c2);
             }
 #endif
+        }
+        if (is2D) {   // 内部内容（WINAJXCombinedItemView/LOTAnimationView）钉回自身 bounds
+            CGRect bb = CGRectMake(0, 0, local.size.width, local.size.height);
+            for (UIView *sv41 in [v.subviews copy]) {
+                if (!CGRectEqualToRect(sv41.frame, bb)) {
+                    [CATransaction begin]; [CATransaction setDisableActions:YES];
+                    [sv41.layer removeAllAnimations]; sv41.frame = bb;
+                    [CATransaction commit];
+                }
+            }
         }
     } @catch (__unused NSException *e) {}
     GCStylePinOneBusy = NO;
