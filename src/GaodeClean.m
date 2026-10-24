@@ -408,6 +408,26 @@ static void P25EnvOnce(void) {
     P25Append([NSString stringWithFormat:@"环境: CADisableMinimumFrameDurationOnPhone=%@ 屏上限=%ld\n",
                v ?: @"（缺失）", (long)UIScreen.mainScreen.maximumFramesPerSecond]);
 }
+
+// ── probe29(A2)：底栏 item 的渲染层状态（此前探针完全看不见 layer.mask）────
+static struct { CGRect b; float dia, a; int hid, mk, anim; int has; } P29T[2];
+static void P29Tab(int i, UIView *v, CGFloat dia, CAShapeLayer *mk) {
+    if (i < 0 || i > 1 || !v) return;
+    CGRect b = v.bounds; float a = (float)v.alpha;
+    int hid = v.hidden ? 1 : 0, m = (mk && mk.path) ? 1 : 0;
+    int anim = (int)v.layer.animationKeys.count;
+    if (P29T[i].has
+        && fabs(b.size.width - P29T[i].b.size.width) < 0.5
+        && fabs(b.size.height - P29T[i].b.size.height) < 0.5
+        && fabs(dia - (CGFloat)P29T[i].dia) < 0.5
+        && fabsf(a - P29T[i].a) < 0.02f
+        && hid == P29T[i].hid && m == P29T[i].mk && anim == P29T[i].anim) return;
+    P29T[i].b = b; P29T[i].dia = (float)dia; P29T[i].a = a;
+    P29T[i].hid = hid; P29T[i].mk = m; P29T[i].anim = anim; P29T[i].has = 1;
+    P25Append([NSString stringWithFormat:
+        @"t=%.2f TAB[%d] bounds=%.1fx%.1f dia=%.1f a=%.2f hid=%d mask=%d anim=%d\n",
+        P7Now(), i, b.size.width, b.size.height, dia, a, hid, m, anim]);
+}
 static void P25FpsTick(void) {
     P25EnvOnce();
     P25FrameCnt++;
@@ -2030,8 +2050,16 @@ static void GCStyleTab(UIView *anchor) {
         //   置 YES 不会移除 App 既有 NSLayoutConstraint，而是额外造一套去撞它们（引擎每 pass 随机破
         //   一条）⇒ 同一控件在两个位置间跳。正解是不碰约束标志，靠 A2 的同事务钳位取胜。
         it.backgroundColor = [UIColor colorWithWhite:0.96 alpha:0.92];
-        if (it.alpha < 0.999f) it.alpha = 1.0f;
-        if (it.hidden) it.hidden = NO;
+        if (it.alpha < 0.999f) { it.alpha = 1.0f;
+#ifdef GAODECLEAN_PROBE
+            P25Append([NSString stringWithFormat:@"t=%.2f PIN-TAB alpha→1\n", P7Now()]);
+#endif
+        }
+        if (it.hidden) { it.hidden = NO;
+#ifdef GAODECLEAN_PROBE
+            P25Append([NSString stringWithFormat:@"t=%.2f PIN-TAB hidden→NO\n", P7Now()]);
+#endif
+        }
         it.layer.cornerRadius = d * 0.5;
         it.layer.masksToBounds = YES;
         for (UIView *si in it.subviews) {   // subitem 同步 54；图标居中；标签隐藏
@@ -2260,7 +2288,9 @@ static void GCProbeDump7(NSString *reason) {
     {   // probe10：全局逐帧轨迹（目标清单 + 每目标跳变次数 + 跳变事件的全目标快照）
         NSMutableString *tl = [NSMutableString string];
         for (int i = 0; i < P37N; i++)
-            [tl appendFormat:@"[%d]%s(跳%.0f) ", i, P37Name[i], P37Jumps[i]];
+            // probe29(A4)：%s 按 ASCII 解码，中文全变乱码（首页显示成 ËΩ¶Êú∫），改 %@
+            [tl appendFormat:@"[%d]%@(跳%.0f) ", i,
+                [NSString stringWithUTF8String:P37Name[i]] ?: @"?", P37Jumps[i]];
         [o appendFormat:@"P37目标(%d): %@ 换实例=%d 帧数=%d\n", P37N, tl, P37PtrSwap, P37RingN];
         for (int e = 0; e < P37EvCnt; e++) {
             int tg = P37EvTarget[e];
@@ -3243,6 +3273,10 @@ static void GCStylePinTabItems(UIWindow *win) {
             it.layer.mask = mk;
         }
         CGFloat iw = it.bounds.size.width, ih = it.bounds.size.height;
+        // ★probe29(A1)：App 在 2D/3D 切换时会把 item 的 bounds 缩小，
+        //   dia=MIN(54,ih) 随之塌成 0，圆形 mask 把整个按钮裁没 = 老大看到的「闪一下/消失」。
+        //   尺寸异常时不动 mask，等 App 过渡结束再收圆（最多一瞬显示成胶囊，不会消失）。
+        if (iw < 40.0f || ih < 40.0f) { [CATransaction commit]; continue; }
         CGFloat dia = MIN(54.0, ih);                          // 直径 = 高度，上限 54
         CGRect circle = CGRectMake((iw - dia) * 0.5, (ih - dia) * 0.5, dia, dia);
         if (!CGRectEqualToRect(mk.frame, it.bounds)) mk.frame = it.bounds;
@@ -3253,6 +3287,9 @@ static void GCStylePinTabItems(UIWindow *win) {
             mk.path = p23;
             CGPathRelease(p23);
         }
+#ifdef GAODECLEAN_PROBE
+        P29Tab(i, it, dia, mk);
+#endif
 
         // ★probe23(A2)：内容子项水平居中 —— 实测 SubItem 54 宽贴在 x=0，
         //   图标中心 27 而 item 中心 42，右边空 30pt，视觉重心失衡。
