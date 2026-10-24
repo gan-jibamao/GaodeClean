@@ -2137,7 +2137,7 @@ __attribute__((unused)) static void GCProbeTick7(void) {
 //   probe20 起改为零 swizzle，写入者信息由 GCStylePinTabItems 的纠正量间接给出。
 // 性质：纯只读，不修改任何视图属性。
 // ══════════════════════════════════════════════════════════════════════════
-#define P19_N 8
+#define P19_N 12
 static __weak UIView *P19View[P19_N];
 static CGRect P19Base[P19_N];
 static BOOL   P19Has[P19_N];
@@ -2149,21 +2149,36 @@ static void P19Flush(NSString *reason) {
     if (P19Dumps >= 40 || !P19Log.length) return;
     P19Dumps++;
     NSMutableString *o = [NSMutableString stringWithFormat:
-        @"\n########## probe20 %@ #%d build=%@ ##########\n", reason, P19Dumps, kGCVersion];
-    [o appendString:@"三钮基线: "];
+        @"\n########## probe21 %@ #%d build=%@ ##########\n", reason, P19Dumps, kGCVersion];
+    [o appendString:@"候选: "];
     for (int i = 0; i < P19_N; i++)
         [o appendFormat:@"[%d]%@ base=%@  ", i,
             P19View[i] ? NSStringFromClass(P19View[i].class) : @"nil",
             P19Has[i] ? NSStringFromCGRect(P19Base[i]) : @"-"];
     [o appendString:@"\n"];
     [o appendString:P19Log];
-    @try { [UIPasteboard generalPasteboard].string = o; } @catch (__unused NSException *e19a) {}
     @try {
         NSString *dir = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES).firstObject;
-        [o writeToFile:[dir stringByAppendingPathComponent:@"GaodeClean-probe19.txt"]
-            atomically:YES encoding:NSUTF8StringEncoding error:nil];
+        NSString *path = [dir stringByAppendingPathComponent:@"GaodeClean-probe21.txt"];
+        // ★probe21(A5)：追加写入 —— probe20 用 writeToFile:atomically:YES 每次都覆盖，
+        //   用户从剪贴板只能拿到最后一份，前面 17 次事件全丢。现在累积保留全部事件。
+        NSData *data = [o dataUsingEncoding:NSUTF8StringEncoding];
+        NSFileManager *fm = [NSFileManager defaultManager];
+        if (![fm fileExistsAtPath:path]) {
+            [data writeToFile:path atomically:YES];
+        } else {
+            NSFileHandle *fh = [NSFileHandle fileHandleForWritingAtPath:path];
+            if (fh) { @try { [fh seekToEndOfFile]; [fh writeData:data]; } @finally { [fh closeFile]; } }
+        }
     } @catch (__unused NSException *e19b) {}
-    NSLog(@"[probe20] %@ #%d 已落盘 (%lu 字符)", reason, P19Dumps, (unsigned long)o.length);
+    // 剪贴板只放摘要，避免覆盖用户内容太狠；完整记录在 Documents 文件里。
+    @try {
+        NSString *brief = o.length > 4000 ? [o substringToIndex:4000] : o;
+        [UIPasteboard generalPasteboard].string = [NSString stringWithFormat:
+            @"[probe21] %@ #%d build=%@\n完整记录见 Documents/GaodeClean-probe21.txt\n\n%@",
+            reason, P19Dumps, kGCVersion, brief];
+    } @catch (__unused NSException *e19a) {}
+    NSLog(@"[probe21] %@ #%d 已落盘 (%lu 字符)", reason, P19Dumps, (unsigned long)o.length);
     [P19Log setString:@""];
 }
 
@@ -2191,7 +2206,21 @@ static void P19Discover(void) {
         CGRect r = [v convertRect:v.bounds toView:win];
         if (r.size.width < 40 || r.size.width > 70) continue;
         if (fabs(r.size.width - r.size.height) > 8) continue;
-        if (r.origin.y < sh * 0.85) continue;            // ★probe20(A4)：底栏条带全树找
+        if (r.origin.y < sh * 0.85) continue;            // 底栏条带
+        // ★probe21(A1)：必须在屏幕内。probe20 只设了下界，结果把 y=930~1048（屏高 852）
+        //   的面板元素也收了进来，7 个 AJXContainerView 占满槽位，把「我的」挤出候选列表。
+        if (CGRectGetMaxY(r) > sh + 1) continue;
+        if (r.origin.y < 0) continue;
+        // ★probe21(A2)：父链必须归属底栏；若不在底栏子树（如中间搜索钮），
+        //   则要求与底栏矩形相交，避免把碰巧同高度的面板元素当成按钮。
+        BOOL inBar = NO;
+        for (UIView *a = v; a; a = a.superview) {
+            if (a == CachedTabBar || [NSStringFromClass(a.class) containsString:@"WINTabBar"]) { inBar = YES; break; }
+        }
+        if (!inBar && CachedTabBar.window) {
+            CGRect br = [CachedTabBar convertRect:CachedTabBar.bounds toView:win];
+            if (!CGRectIntersectsRect(r, br)) continue;
+        }
         [cand addObject:v];
     }
     // 去掉"父视图也在候选里"的内层重复（SubItem 与 Item 同矩形，只留外层）
@@ -2206,8 +2235,17 @@ static void P19Discover(void) {
         return [a convertRect:a.bounds toView:win].origin.x < [b convertRect:b.bounds toView:win].origin.x
                ? NSOrderedAscending : NSOrderedDescending;
     }];
+    // ★probe21(A3)：同一 x（±20pt）只留第一个 —— 噪声不会再挤掉真实按钮。
+    NSMutableArray<UIView *> *uniq = [NSMutableArray array];
+    for (UIView *v in top) {
+        CGFloat x = [v convertRect:v.bounds toView:win].origin.x;
+        BOOL dup = NO;
+        for (UIView *u in uniq)
+            if (fabs([u convertRect:u.bounds toView:win].origin.x - x) < 20) { dup = YES; break; }
+        if (!dup) [uniq addObject:v];
+    }
     for (int i = 0; i < P19_N; i++) {
-        UIView *v = (i < (int)top.count) ? top[i] : nil;
+        UIView *v = (i < (int)uniq.count) ? uniq[i] : nil;
         if (v == P19View[i]) continue;
         P19View[i] = v; P19Has[i] = NO;
         if (v) {
@@ -2245,15 +2283,22 @@ static void P19Tick(void) {
             [P19Log appendFormat:@"\n===== 事件%d 起 t=%.2f =====\n", ++P19EventNo, CACurrentMediaTime()];
         }
         if (P19EventFrames > 0) {
-            [P19Log appendFormat:@"t=%.2f i=%d %@ dx=%.1f dy=%.1f win=%@ pres=%@ anim=%@ tr=(%.2f,%.2f,%.2f,%.2f) sup=%@ supF=%@ bar=%@\n",
-                CACurrentMediaTime(), i, NSStringFromClass(v.class), dx, dy,
-                NSStringFromCGRect(r), CGRectIsNull(pb) ? @"-" : NSStringFromCGRect(pb),
-                v.layer.animationKeys.count ? [v.layer.animationKeys componentsJoinedByString:@","] : @"-",
-                v.transform.a, v.transform.b, v.transform.c, v.transform.d,
-                NSStringFromClass(v.superview.class), NSStringFromCGRect(v.superview.frame),
-                NSStringFromCGAffineTransform(bar.transform)];
-            if (dev) P19EventFrames = 90;
-            else if (--P19EventFrames <= 0) {
+            // ★probe21(A4)：只记录真正动了的索引 —— probe20 每帧打印全部 8 个，
+            //   8×30=240 行里 210 行是噪声，真实位移被淹没。静止时每 10 帧补一行快照。
+            if (dev) {
+                [P19Log appendFormat:@"t=%.2f i=%d %@ dx=%.1f dy=%.1f win=%@ pres=%@ anim=%@ tr=(%.2f,%.2f,%.2f,%.2f) sup=%@ supF=%@ bar=%@\n",
+                    CACurrentMediaTime(), i, NSStringFromClass(v.class), dx, dy,
+                    NSStringFromCGRect(r), CGRectIsNull(pb) ? @"-" : NSStringFromCGRect(pb),
+                    v.layer.animationKeys.count ? [v.layer.animationKeys componentsJoinedByString:@","] : @"-",
+                    v.transform.a, v.transform.b, v.transform.c, v.transform.d,
+                    NSStringFromClass(v.superview.class), NSStringFromCGRect(v.superview.frame),
+                    NSStringFromCGAffineTransform(bar.transform)];
+                P19EventFrames = 90;
+            } else if (fc % 10 == 0) {
+                [P19Log appendFormat:@"  .t=%.2f i=%d 静止 win=%@\n",
+                    CACurrentMediaTime(), i, NSStringFromCGRect(r)];
+            }
+            if (!dev && --P19EventFrames <= 0) {
                 [P19Log appendFormat:@"----- 事件%d 结束 -----\n", P19EventNo];
                 P19Flush(@"事件");
             }
