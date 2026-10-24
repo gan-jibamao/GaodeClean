@@ -18,7 +18,7 @@
 // ---- jibamao 个人标识（编译进 dylib，可用 strings 核对）----
 static NSString *const kGCAuthor      = @"jibamao";
 static NSString *const kGCRepo        = @"https://gan-jibamao.github.io/";
-static NSString *const kGCVersion     = @"0.9.45+trial35";
+static NSString *const kGCVersion     = @"0.9.46+trial36";
 
 // 0.9.18（A1）：底边间隙**按控件分开**，对表原生（搜索栏白底顶边 = 702.6pt）
 //   车机钮（连接车机 · WINDeviceInterconnectWidget）：原生底 652 → 间隙 50.6 → 取 50
@@ -1658,7 +1658,8 @@ static void GCStylePinOne(UIView *v) {
     BOOL isCar = (v == CachedCar);
     BOOL isCap = (capNow && v == capNow);
     BOOL is2D = (v == Cached2D);                          // trial27
-    if (is2D && (v.hidden || v.alpha < 0.5)) return;      // 2D 模式 App 藏钮期间不钉
+    if (is2D && v.hidden) return;                         // trial36：只跳过真隐藏；淡出期间照钉
+    //   （旧守卫 alpha<0.5 就整帧跳过 ⇒ 切换时 App 淡出+下滑无人拦，视频 11.0s 铁证）
     if (!isCar && !isCap && !is2D) return;
     GCStylePinOneBusy = YES;
     @try {
