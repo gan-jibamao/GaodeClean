@@ -18,7 +18,7 @@
 // ---- jibamao 个人标识（编译进 dylib，可用 strings 核对）----
 static NSString *const kGCAuthor      = @"jibamao";
 static NSString *const kGCRepo        = @"https://gan-jibamao.github.io/";
-static NSString *const kGCVersion     = @"0.9.40+trial30";
+static NSString *const kGCVersion     = @"0.9.41+trial31";
 
 // 0.9.18（A1）：底边间隙**按控件分开**，对表原生（搜索栏白底顶边 = 702.6pt）
 //   车机钮（连接车机 · WINDeviceInterconnectWidget）：原生底 652 → 间隙 50.6 → 取 50
@@ -138,6 +138,7 @@ static double P7T0;
 static int P7NTicks, P7DiscCalls, P7DiscSkips, P7PinCalls, P7WTicks;
 static int P7Writes[6];      // 0=车机 1=右胶囊 2=路线 3=2D 4=天气行 5=保留
 static int P7Solid;          // trial30：2D 钮「实心钉」触发次数（alpha/白底写入）
+static CGFloat P7Dx31, P7Dy31;   // trial31：2D 钮父容器 presentation 平移差（诊断跳动来源）
 static int P7WGates[3];      // 0=通过 1=bar非视图 2=评估
 static double P7FirstSeen[6], P7FirstPin[6], P7FirstKey;
 static __weak UIView *P7LastPW;
@@ -1420,12 +1421,13 @@ static void GCProbeDump7(NSString *reason) {
             }
         }
     }
-    if (Cached2D)   // trial27：2D 钮自证行（类名/窗口系 rect/hidden）；trial30 补 alpha/白底α/实心钉计数
-        [o appendFormat:@"2D钮 %@ win=%@ hid=%d a=%.2f bgA=%.2f 实心=%d\n", NSStringFromClass(Cached2D.class),
+    if (Cached2D)   // trial27：2D 钮自证行；trial30 补 alpha/白底α/实心钉；trial31 补父容器 Δ 与父类名
+        [o appendFormat:@"2D钮 %@ win=%@ hid=%d a=%.2f bgA=%.2f 实心=%d sup=%@ d=(%.1f,%.1f)\n",
+            NSStringFromClass(Cached2D.class),
             NSStringFromCGRect([Cached2D convertRect:Cached2D.bounds toView:nil]), Cached2D.hidden,
             Cached2D.alpha,
             Cached2D.backgroundColor ? CGColorGetAlpha(Cached2D.backgroundColor.CGColor) : 0,
-            P7Solid];
+            P7Solid, NSStringFromClass(Cached2D.superview.class), P7Dx31, P7Dy31];
     if (CachedCar) {
         CALayer *p8pl = CachedCar.layer.presentationLayer;
         NSMutableString *p8tf = [NSMutableString string];
@@ -1634,6 +1636,35 @@ static void GCStylePinOne(UIView *v) {
             }
         } else g = CGRectMake(sw - 10 - wr.size.width, pinBottom - wr.size.height, wr.size.width, wr.size.height);
         CGRect local = [v.superview convertRect:g fromView:win];
+        // ★trial31（老大报「缩放时 2D/3D 钮跳动」）：真凶 = 动画跑在 presentation 层，
+        //   模型帧从不变 ⇒ 下面的 CGRectEqualToRect 永不触发（trial30 dump 2D=0 铁证）。
+        //   A1 父容器视觉补偿：父视图 presentation 与 model 的窗口系平移差 Δ ⇒ local 反向偏移 −Δ，
+        //      视觉钉死而 App 动画照常跑（仅纯平移补偿；缩放/旋转不碰，避免误伤地图动画）。
+        //   A2 自身看门狗：钮自身 layer 的 presentation 与 model 分歧 >0.6pt ⇒ 只杀钮自己的位移动画。
+        if (is2D) {
+            CALayer *svp31 = v.superview.layer.presentationLayer;
+            if (svp31 && win.layer) {
+                CGRect svModelWin = [v.superview convertRect:v.superview.bounds toView:win];
+                CGRect svPresWin  = [svp31 convertRect:svp31.bounds toLayer:win.layer];
+                if (fabs(svPresWin.size.width - svModelWin.size.width) < 1.0) {
+                    CGFloat dx31 = svPresWin.origin.x - svModelWin.origin.x;
+                    CGFloat dy31 = svPresWin.origin.y - svModelWin.origin.y;
+#ifdef GAODECLEAN_PROBE
+                    P7Dx31 = dx31; P7Dy31 = dy31;
+#endif
+                    if (fabs(dx31) > 0.6 || fabs(dy31) > 0.6) local = CGRectOffset(local, -dx31, -dy31);
+                }
+            }
+            CALayer *pl31 = v.layer.presentationLayer;
+            if (pl31 && !CGRectEqualToRect(pl31.frame, v.layer.frame)) {
+                if (fabs(pl31.frame.origin.x - v.layer.frame.origin.x) > 0.6 ||
+                    fabs(pl31.frame.origin.y - v.layer.frame.origin.y) > 0.6) {
+                    [CATransaction begin]; [CATransaction setDisableActions:YES];
+                    [v.layer removeAllAnimations];
+                    [CATransaction commit];
+                }
+            }
+        }
         if (!CGRectEqualToRect(local, v.frame)) {
             [CATransaction begin]; [CATransaction setDisableActions:YES];
             [v.layer removeAllAnimations]; v.frame = local;
