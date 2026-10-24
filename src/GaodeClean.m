@@ -252,7 +252,7 @@ static void P33Watch(UIView *v, int tag) {
 //   ③ 新增「跳变流水」40 条（每起都记，永不丢）  ④ 天气行升为固定目标
 //   ⑤ 实例更换只对固定目标统计，重扫时重置基线
 #define P37_MAX 12
-#define P37_RING 120
+#define P37_RING 240
 #define P37_EVN 6
 #define P37_EVF 40
 #define P37_LOG 40
@@ -318,7 +318,7 @@ static void P37RefreshTargets(void) {
 //     ③ 全量 dump 只有 5/15/30/45/60/90/120 七个点。
 //   本块把记录精度提到帧级：同一目标的一次连续运动合并成一行（起止时刻+帧数+起止坐标+透明度），
 //   静止 3 帧收笔；每行立即追加到 Documents/GaodeClean-changes.txt，不等定时 dump。
-#define P25_QUIET 3
+#define P25_QUIET 6          // 6帧：60fps=100ms / 120fps=50ms
 static BOOL  P25Act[P37_MAX], P25WasNil[P37_MAX];
 static float P25FromX[P37_MAX], P25FromY[P37_MAX], P25FromA[P37_MAX];
 static float P25LastX[P37_MAX], P25LastY[P37_MAX], P25LastA[P37_MAX];
@@ -346,13 +346,18 @@ static void P25Append(NSString *s) {
     if (P25Buf.length > 8192) P25Flush();
 }
 
+static NSString *P25Name(int i) {
+    NSString *s = [NSString stringWithUTF8String:P37Name[i]];
+    return s.length ? s : @"?";
+}
+
 static void P25Episode(int i, float x, float y, float a, int hid, float t) {
     if (i < 0 || i >= P37_MAX) return;
     if (P25WasNil[i]) {                    // 弱引用恢复：重置基线并记一行
         P25WasNil[i] = NO; P25Act[i] = NO;
         P25LastX[i] = x; P25LastY[i] = y; P25LastA[i] = a; P25LastHid[i] = hid;
-        P25Append([NSString stringWithFormat:@"t=%.2f FOUND %s (%.1f,%.1f) a=%.2f\n",
-                   t, P37Name[i], x, y, a]);
+        P25Append([NSString stringWithFormat:@"t=%.2f FOUND %@ (%.1f,%.1f) a=%.2f\n",
+                   t, P25Name(i), x, y, a]);
         return;
     }
     BOOL moved = (fabsf(x - P25LastX[i]) > 0.5f || fabsf(y - P25LastY[i]) > 0.5f
@@ -369,18 +374,39 @@ static void P25Episode(int i, float x, float y, float a, int hid, float t) {
     } else if (P25Act[i] && ++P25Quiet[i] >= P25_QUIET) {   // 静止 3 帧 → 收笔
         P25Act[i] = NO;
         P25Append([NSString stringWithFormat:
-            @"t=%.2f→%.2f (%d帧) %s (%.1f,%.1f)→(%.1f,%.1f) d=(%+.1f,%+.1f) a=%.2f→%.2f hid=%d→%d\n",
-            P25StartT[i], t, P25Frames[i], P37Name[i],
+            @"t=%.2f→%.2f (%d帧) %@ (%.1f,%.1f)→(%.1f,%.1f) d=(%+.1f,%+.1f) a=%.2f→%.2f hid=%d→%d\n",
+            P25StartT[i], t, P25Frames[i], P25Name(i),
             P25FromX[i], P25FromY[i], P25LastX[i], P25LastY[i],
             P25LastX[i] - P25FromX[i], P25LastY[i] - P25FromY[i],
             P25FromA[i], P25LastA[i], P25FromHid[i], P25LastHid[i]]);
     }
 }
 
+static void P25Swap(int i, float x, float y, float a, int hid, float t) {
+    if (i < 0 || i >= P37_MAX) return;
+    P25Act[i] = NO; P25Quiet[i] = 0; P25WasNil[i] = NO;
+    P25LastX[i] = x; P25LastY[i] = y; P25LastA[i] = a; P25LastHid[i] = hid;
+    P25Append([NSString stringWithFormat:@"t=%.2f SWAP 槽位%d → %@ (基线重置)\n", t, i, P25Name(i)]);
+}
+
+static long P25FrameCnt;
+static double P25FpsT0;
+static void P25FpsTick(void) {
+    P25FrameCnt++;
+    double now = CACurrentMediaTime();
+    if (P25FpsT0 <= 0) { P25FpsT0 = now; return; }
+    double dt = now - P25FpsT0;
+    if (dt >= 2.0) {
+        P25Append([NSString stringWithFormat:@"t=%.1f fps=%.1f 屏上限=%ld\n",
+                   P7Now(), P25FrameCnt / dt, (long)UIScreen.mainScreen.maximumFramesPerSecond]);
+        P25FrameCnt = 0; P25FpsT0 = now;
+    }
+}
+
 static void P25Lost(int i, float t) {
     if (i < 0 || i >= P37_MAX || P25WasNil[i]) return;
     P25WasNil[i] = YES; P25Act[i] = NO;
-    P25Append([NSString stringWithFormat:@"t=%.2f LOST %s\n", t, P37Name[i]]);
+    P25Append([NSString stringWithFormat:@"t=%.2f LOST %@\n", t, P25Name(i)]);
 }
 
 static void P37Sample(void) {
@@ -404,13 +430,16 @@ static void P37Sample(void) {
                 CGRect pr = [svp convertRect:pl.frame toLayer:v.window.layer];
                 c->px = (float)pr.origin.x; c->py = (float)pr.origin.y;
             } else { c->px = c->mx; c->py = c->my; }
-            P25Episode(i, c->mx, c->my, c->a, c->hid, t);
             void *p = (__bridge void *)v;
-            if (i < P37Fixed && P37LastPtr[i] && P37LastPtr[i] != p) {
-                P37PtrSwap++;
-                if (jumpIdx < 0) { jumpIdx = i; jumpFrom = -1; jumpTo = -1; jumpA0 = c->a; jumpA1 = c->a; }
+            if (P37LastPtr[i] && P37LastPtr[i] != p) {
+                P25Swap(i, c->mx, c->my, c->a, c->hid, t);
+                if (i < P37Fixed) {
+                    P37PtrSwap++;
+                    if (jumpIdx < 0) { jumpIdx = i; jumpFrom = -1; jumpTo = -1; jumpA0 = c->a; jumpA1 = c->a; }
+                }
             }
             P37LastPtr[i] = p;
+            P25Episode(i, c->mx, c->my, c->a, c->hid, t);
             if (P37LastPy[i] > 0 && fabsf(c->py - P37LastPy[i]) > 0.5f) {
                 P37Jumps[i]++;
                 if (jumpIdx < 0) { jumpIdx = i; jumpFrom = P37LastPy[i]; jumpTo = c->py; jumpA0 = c->a; jumpA1 = c->a; }
@@ -1986,7 +2015,8 @@ static void P7LiveScan(NSMutableString *o) {
 }
 static void GCProbeDump7(NSString *reason) {
     NSMutableString *o = [NSMutableString string];
-    [o appendFormat:@"\n########## probe7 dump reason=%@ t=%.1fs 构建=%@ ##########\n", reason, P7Now(), kGCVersion];
+    [o appendFormat:@"\n########## probe7 dump reason=%@ t=%.1fs 构建=%@ maxFps=%ld ##########\n",
+     reason, P7Now(), kGCVersion, (long)UIScreen.mainScreen.maximumFramesPerSecond];
     [o appendFormat:@"TickCount=%d settled=%d | pin调=%d discover调=%d(早退%d) narrowTick=%d 天气tick=%d\n",
         TickCount, SearchBarSettled, P7PinCalls, P7DiscCalls, P7DiscSkips, P7NTicks, P7WTicks];
     [o appendFormat:@"天气行门: 评估=%d 通过=%d bar非视图=%d\n", P7WGates[2], P7WGates[0], P7WGates[1]];
@@ -3108,6 +3138,7 @@ static void GCStylePinWidgets(UIWindow *win) {
 - (void)fire {
 #ifdef GAODECLEAN_PROBE
     P8Trace();
+    P25FpsTick();
 #endif
     UIView *av = CachedCar ?: CachedRight ?: CachedRoute;
     UIWindow *pw = av.window ?: CachedTabBar.window ?: SearchBarView.window;
@@ -5746,6 +5777,11 @@ __attribute__((constructor)) static void Initialize(void) {
             if (!GCStylePinDrv) {
                 GCStylePinDrv = [GCStylePinDriver new];
                 CADisplayLink *pdl = [CADisplayLink displayLinkWithTarget:GCStylePinDrv selector:@selector(fire)];
+#ifdef GAODECLEAN_PROBE
+                if (@available(iOS 15.0, *)) {
+                    pdl.preferredFrameRateRange = CAFrameRateRangeMake(80, 120, 120);   // 探针要满帧，正式包不动
+                }
+#endif
                 [pdl addToRunLoop:NSRunLoop.mainRunLoop forMode:NSRunLoopCommonModes];
             }
         });
