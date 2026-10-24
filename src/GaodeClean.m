@@ -18,7 +18,7 @@
 // ---- jibamao 个人标识（编译进 dylib，可用 strings 核对）----
 static NSString *const kGCAuthor      = @"jibamao";
 static NSString *const kGCRepo        = @"https://gan-jibamao.github.io/";
-static NSString *const kGCVersion     = @"0.9.67+trial48";
+static NSString *const kGCVersion     = @"0.9.68+trial49";
 
 // 0.9.18（A1）：底边间隙**按控件分开**，对表原生（搜索栏白底顶边 = 702.6pt）
 //   车机钮（连接车机 · WINDeviceInterconnectWidget）：原生底 652 → 间隙 50.6 → 取 50
@@ -2258,6 +2258,54 @@ static void GCStylePinTwinFaces(UIView *w) {
         }
     }
 }
+// ★trial49(A1)：右侧空壳容器清理 —— 修 (339,610) 那圈 1px 灰环。
+//   证据：截图实测 x339-380 / y612-652 细环、内部完全透明（背景灰透出）；
+//         probe18 t=10.2~10.8 连续 5 次「同步位移 c11:UIVisualEffectView:610→632…682」
+//         ⇒ App 把 WINPermanentCompassView 的内容往下搬走，容器留在原地成了空环。
+//   策略：5Hz 发现（避免每帧全树扫描），60fps 只对缓存实例执行；内容回来即自动恢复。
+static __weak UIView *CachedShell = nil;
+
+static BOOL GCStyleIsEmptyShell(UIView *v) {
+    if (!v || v.subviews.count == 0) return NO;
+    CGRect bb = CGRectInset(v.bounds, -2, -2);
+    for (UIView *c in v.subviews) {
+        if (CGRectIntersectsRect(c.frame, bb)) return NO;   // 有内容在范围内 ⇒ 不是空壳
+    }
+    return YES;                                             // 全部内容跑出 bounds ⇒ 空壳
+}
+
+static void GCStyleShellDiscover(UIWindow *win) {          // 5Hz 调用
+    if (!win) return;
+    if (CachedShell && CachedShell.window) return;         // 已有有效目标
+    CGFloat sw = win.bounds.size.width, sh = win.bounds.size.height;
+    NSMutableArray<UIView *> *stack = [NSMutableArray arrayWithObject:win];
+    NSUInteger budget = 900;
+    while (stack.count && budget--) {
+        UIView *v = [stack lastObject]; [stack removeLastObject];
+        [stack addObjectsFromArray:v.subviews];
+        if (v.hidden || v.alpha < 0.05f) continue;
+        CGRect r = [v convertRect:v.bounds toView:win];
+        if (r.size.width < 32 || r.size.width > 56) continue;
+        if (fabs(r.size.width - r.size.height) > 6) continue;      // 近正方
+        if (CGRectGetMidX(r) < sw * 0.72) continue;                // 右侧列
+        if (CGRectGetMidY(r) < sh * 0.55) continue;                // 下半屏
+        if (![NSStringFromClass(v.class) containsString:@"CompassView"]) continue;
+        if (!GCStyleIsEmptyShell(v)) continue;
+        CachedShell = v;
+        return;
+    }
+}
+
+static void GCStyleShellEnforce(void) {                    // 60fps 调用（只碰缓存实例）
+    UIView *s = CachedShell;
+    if (!s || !s.window) return;
+    BOOL empty = GCStyleIsEmptyShell(s);
+    if (empty == s.hidden) return;                          // 状态已正确
+    [CATransaction begin]; [CATransaction setDisableActions:YES];
+    s.hidden = empty;                                       // 空壳就藏；内容回来就恢复
+    [CATransaction commit];
+}
+
 static BOOL GCStylePinOneBusy = NO;
 static void GCStylePinOne(UIView *v) {
     if (!v || GCStylePinOneBusy) return;                 // 防重入：钳位自身写 frame 会再触发钩子
@@ -2691,6 +2739,7 @@ static void GCStylePinWidgetsInner(UIWindow *win) {   // trial25(A2)：原体改
             GCStyleHookInnerFill(NSClassFromString(@"LOTAnimationView"));
         }
     }
+    GCStyleShellEnforce();                    // trial49(A1)：空壳容器（60fps，只碰缓存实例）
     GCStylePinTabItems(win);                  // trial42(A3)：首页/我的 每帧钉 x
     if (Cached2D) GCStylePinOne(Cached2D);   // trial27：帧级主动钉（钩子通道只拦 App 写入，发现即纠）
 }
@@ -2953,6 +3002,7 @@ static void GCNarrowTick(void) {
         }
     }
     GCStylePinWidgets(pw);
+    GCStyleShellDiscover(pw);   // trial49(A1)：5Hz 发现空壳容器（每帧只执行、不扫描）
 }
 
 // 0.9.4：删除 IsBlurOverlayView / GCCColorStr / GCCScreenMapMean
