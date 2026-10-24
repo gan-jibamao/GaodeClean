@@ -18,7 +18,7 @@
 // ---- jibamao 个人标识（编译进 dylib，可用 strings 核对）----
 static NSString *const kGCAuthor      = @"jibamao";
 static NSString *const kGCRepo        = @"https://gan-jibamao.github.io/";
-static NSString *const kGCVersion     = @"0.9.52+probe14";
+static NSString *const kGCVersion     = @"0.9.53+trial38";
 
 // 0.9.18（A1）：底边间隙**按控件分开**，对表原生（搜索栏白底顶边 = 702.6pt）
 //   车机钮（连接车机 · WINDeviceInterconnectWidget）：原生底 652 → 间隙 50.6 → 取 50
@@ -115,6 +115,23 @@ static BOOL IsRightBottomWidget(UIView *v);            // trial11：前置声明
 static BOOL GCCIsLiteGroupCapsule(UIView *v);          // trial11：前置声明（discover 用）
 static BOOL FixingHintText;
 static __weak UIView *CachedTabBar;
+
+// ★trial38（probe14 日志铁证）：锚点必须**跟随底栏**，不能用窗口绝对坐标。
+//   日志：祖先容器 c11:UIView 的 presentation 在 610→570→551→466→439…790→763→702→674 之间被
+//   App 连续搬动；同时截图实测底栏三圆钮也从 768 上移到 610 —— 整块 UI（含底栏）一起位移。
+//   我们却按 sh-97 的绝对位置往回拉 ⇒ 每帧对拉 = 老大看到的「乱跑/抖动」。
+//   原生关系：胶囊底 = 底栏顶 − 13（正常态 768 − 13 = 755，与原式一致）。
+static CGFloat GCPinBottom(UIWindow *win) {
+    CGFloat sh = win ? win.bounds.size.height : 852.0;
+    CGFloat fb = sh - 81 - 16;
+    UIView *tb = CachedTabBar;
+    if (win && tb && tb.window == win) {
+        CGRect r = [tb convertRect:tb.bounds toView:win];
+        if (r.size.height > 20 && r.size.height < 140 && r.origin.y > sh * 0.35)
+            return r.origin.y - 13.0;
+    }
+    return fb;
+}
 static int BarFixStalls;      // 0.6.8：早退续窗次数上限，防止 8ms 自旋
 static int BarFixIdle;        // 0.6.9：连续「无改动」拍数，够了就立刻收窗
 static void AlignWeatherRowTick(UIWindow *win);
@@ -2114,8 +2131,8 @@ static void GCStylePinOne(UIView *v) {
     if (!isCar && !isCap && !is2D) return;
     GCStylePinOneBusy = YES;
     @try {
-        CGFloat sw = win.bounds.size.width, sh = win.bounds.size.height;
-        const CGFloat pinBottom = sh - 81 - 16;          // 与 GCStylePinWidgets 同源
+        CGFloat sw = win.bounds.size.width;
+        const CGFloat pinBottom = GCPinBottom(win);          // 与 GCStylePinWidgets 同源
         CGRect wr = [v convertRect:v.bounds toView:win];
         CGRect g;
         if (isCar) {
@@ -2281,8 +2298,8 @@ static void GCStyleLayerFix(CALayer *la) {
     GCStyleLayerFixBusy = YES;
     @try {
         UIWindow *win = v.window;
-        CGFloat sw = win.bounds.size.width, sh = win.bounds.size.height;
-        const CGFloat pinBottom = sh - 81 - 16;
+        CGFloat sw = win.bounds.size.width;
+        const CGFloat pinBottom = GCPinBottom(win);
         CGRect wr = [v convertRect:v.bounds toView:win];
         CGRect g;
         if (v == CachedCar) {
@@ -2384,8 +2401,8 @@ static void GCStylePinWidgetsInner(UIWindow *win) {   // trial25(A2)：原体改
         P7LastCont = p7oc;
     }
 #endif
-    CGFloat sw = win.bounds.size.width, sh = win.bounds.size.height;
-    const CGFloat pinBottom = sh - 81 - 16;   // 圆钮行顶(771) 上 16pt
+    CGFloat sw = win.bounds.size.width;
+    const CGFloat pinBottom = GCPinBottom(win);   // trial38：跟随底栏（圆钮行顶 771 上 16pt）
     UIView *cap = (CachedLiteGroup && CachedLiteGroup.window) ? CachedLiteGroup : CachedRight;
     if (cap && cap.window && cap.superview) {
         CGRect wr = [cap convertRect:cap.bounds toView:win];
@@ -3120,7 +3137,7 @@ static void AlignWeatherRow(UIView *row) {
     // trial24：y 不再读车机钮实际位（拉锯期 608↔673 ⇒ 天气行镜像跳 65pt，probe7 三段
     //   快照 735/670 铁证）—— 改与 GCStylePinWidgets 同源纯公式：
     //   车机钮目标 y = sh-97-20-18-44，行顶 = 其底 + 18 ⇒ 行顶恒 = sh-117（钉死）。
-    CGFloat carTgtTop = win.bounds.size.height - 81 - 16 - 20 - 18 - 44;
+    CGFloat carTgtTop = GCPinBottom(win) - 20 - 18 - 44;   // trial38：与 pin 同源跟随底栏
     CGPoint wantWin = CGPointMake(carRect.origin.x,
                                   carTgtTop + 44 + 18);
     CGPoint wantInParent = [row.superview convertPoint:wantWin fromView:win];
