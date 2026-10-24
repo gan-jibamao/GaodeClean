@@ -18,7 +18,7 @@
 // ---- jibamao 个人标识（编译进 dylib，可用 strings 核对）----
 static NSString *const kGCAuthor      = @"jibamao";
 static NSString *const kGCRepo        = @"https://gan-jibamao.github.io/";
-static NSString *const kGCVersion     = @"0.9.35+trial26";
+static NSString *const kGCVersion     = @"0.9.36+trial27";
 
 // 0.9.18（A1）：底边间隙**按控件分开**，对表原生（搜索栏白底顶边 = 702.6pt）
 //   车机钮（连接车机 · WINDeviceInterconnectWidget）：原生底 652 → 间隙 50.6 → 取 50
@@ -100,6 +100,7 @@ static __weak UIView *BarParent;
 static __weak UIView *CachedCar, *CachedRight, *CachedRoute;
 // 0.9.16（A2）：App 原生「轻量控件组」容器（中部裸露胶囊的真身，见 A1）
 static __weak UIView *CachedLiteGroup;
+static __weak UIView *Cached2D;          // trial27：2D/3D 模式圆钮（缩放时 App 重排会撂回原生位）
 static NSHashTable<UIView *> *GCWeatherHeldRows;   // 0.9.3：冷启动被扣留的天气行（锚点未就绪期间不显示）
 static __weak id CachedTabs;
 static __weak UIView *SearchBarView;   // 0.5.58   // 0.5.55：用于判断当前是否「首页」选中
@@ -1363,6 +1364,9 @@ static void GCProbeDump7(NSString *reason) {
         (P8CarMinY > 1e8 || P8CarMaxY < -1e8) ? -1.0 : P8CarMaxY - P8CarMinY];
     [o appendFormat:@"P8 layerフック: fires=%ld fixes=%ld フック済みレイヤークラス=%@\n",
         P8LayerFires, P8LayerFixes, [GCStyleLayerHookedClasses() allObjects]];
+    if (Cached2D)   // trial27：2D 钮自证行（类名/窗口系 rect/hidden）
+        [o appendFormat:@"2D钮 %@ win=%@ hid=%d\n", NSStringFromClass(Cached2D.class),
+            NSStringFromCGRect([Cached2D convertRect:Cached2D.bounds toView:nil]), Cached2D.hidden];
     if (CachedCar) {
         CALayer *p8pl = CachedCar.layer.presentationLayer;
         NSMutableString *p8tf = [NSMutableString string];
@@ -1416,6 +1420,26 @@ __attribute__((unused)) static void GCProbeTick7(void) {
 #endif
 
 // trial11：实例发现（缓存失效才 BFS）—— 从 AlignCornerWidgets 收归，pin 自给自足
+// ★trial27：2D/3D 模式圆钮识别 —— 录屏铁证：缩放地图时 App 重排把 2D 钮撂回原生相对位
+//   （下移 ~58pt 叠到胶囊顶、盖住定位图标）。特征：右侧带内 36~56pt 近正方、非隐藏、
+//   不在四个已缓存控件的子树内（路线胶囊 44×44 同带同侧，必须靠祖先链排除）。
+static BOOL GCStyleIs2DBtn(UIView *v, UIWindow *win) {
+    if (!v || !win) return NO;                            // hidden/alpha 判据在 pin 侧（2D 模式 App 藏钮仍缓存）
+    CGRect wr = [v convertRect:v.bounds toView:win];
+    CGFloat w = wr.size.width, h = wr.size.height;
+    if (w < 36 || w > 56 || h < 36 || h > 56 || fabs(w - h) > 6) return NO;
+    if (CGRectGetMidX(wr) < win.bounds.size.width - 64) return NO;
+    for (UIView *p = v.superview; p; p = p.superview)
+        if (p == CachedRight || p == CachedRoute || p == CachedCar || p == CachedLiteGroup) return NO;
+    UIView *cap = (CachedLiteGroup && CachedLiteGroup.window) ? (UIView *)CachedLiteGroup : (UIView *)CachedRight;
+    CGFloat capTop;
+    if (cap) capTop = [cap convertRect:cap.bounds toView:win].origin.y;
+    else capTop = win.bounds.size.height - 97 - 88;      // 兜底：pinBottom - 胶囊高
+    CGFloat cy = CGRectGetMidY(wr);
+    if (cy < capTop - 160 || cy > capTop + 80) return NO;   // 竖带：正常位(帽上~42pt)与叠帽态都覆盖
+    if (v == CachedCar || v == CachedRight || v == CachedRoute || v == CachedLiteGroup) return NO;
+    return YES;
+}
 static void GCStyleDiscoverWidgets(UIWindow *win) {
     if (!win) return;
 #ifdef GAODECLEAN_PROBE
@@ -1447,10 +1471,11 @@ static void GCStyleDiscoverWidgets(UIWindow *win) {
         if (!GCStyleGoneAt[3]) GCStyleGoneAt[3] = gnow;
         if (gnow - GCStyleGoneAt[3] > 1.0) { CachedLiteGroup = nil; GCStyleGoneAt[3] = 0; }
     } else GCStyleGoneAt[3] = 0;
+    if (Cached2D && !Cached2D.window) Cached2D = nil;   // trial27：2D 钮断链即清（App 真删时 BFS 重发现）
 #ifdef GAODECLEAN_PROBE
     if (CachedCar && CachedRight && CachedRoute && CachedLiteGroup) P7DiscSkips++;
 #endif
-    if (CachedCar && CachedRight && CachedRoute && CachedLiteGroup) return;
+    if (CachedCar && CachedRight && CachedRoute && CachedLiteGroup && Cached2D) return;   // trial27：2D 钮入齐套条件
     // ★trial25(A4)：BFS 节流 ≥100ms —— display-link 60fps 驱动下，缓存缺员（dump 铁证：
     //   LiteGroup 0.8s 丢失后 ptr=0x0 长期为 nil）时每帧全树 BFS（预算 2000 节点）白烧。
     static CFAbsoluteTime GCStyleLastBFS = 0;
@@ -1466,7 +1491,8 @@ static void GCStyleDiscoverWidgets(UIWindow *win) {
         else if (IsRightBottomWidget(v)) CachedRight = v;
         else if ([cn isEqualToString:GCStrAt(141)]) CachedRoute = v;
         else if (GCCIsLiteGroupCapsule(v)) CachedLiteGroup = v;
-        if (CachedCar && CachedRight && CachedRoute && CachedLiteGroup) break;
+        else if (!Cached2D && GCStyleIs2DBtn(v, win)) Cached2D = v;   // trial27
+        if (CachedCar && CachedRight && CachedRoute && CachedLiteGroup && Cached2D) break;
     }
 #ifdef GAODECLEAN_PROBE
     if (CachedCar != p7oc)     P7Note(@"DISC 车机→新实例 old=%p(%@) new=%p(%@)", (__bridge void *)p7oc, NSStringFromCGRect(P7WR(p7oc)), (__bridge void *)CachedCar, NSStringFromCGRect(P7WR(CachedCar)));
@@ -1490,20 +1516,32 @@ static void GCStylePinOne(UIView *v) {
     UIView *capNow = (CachedLiteGroup && CachedLiteGroup.window) ? CachedLiteGroup : CachedRight;
     BOOL isCar = (v == CachedCar);
     BOOL isCap = (capNow && v == capNow);
-    if (!isCar && !isCap) return;
+    BOOL is2D = (v == Cached2D);                          // trial27
+    if (is2D && (v.hidden || v.alpha < 0.5)) return;      // 2D 模式 App 藏钮期间不钉
+    if (!isCar && !isCap && !is2D) return;
     GCStylePinOneBusy = YES;
     @try {
         CGFloat sw = win.bounds.size.width, sh = win.bounds.size.height;
         const CGFloat pinBottom = sh - 81 - 16;          // 与 GCStylePinWidgets 同源
         CGRect wr = [v convertRect:v.bounds toView:win];
-        CGRect g = isCar
-            ? CGRectMake(10, pinBottom - 20 - 18 - wr.size.height, wr.size.width, wr.size.height)
-            : CGRectMake(sw - 10 - wr.size.width, pinBottom - wr.size.height, wr.size.width, wr.size.height);
+        CGRect g;
+        if (isCar) g = CGRectMake(10, pinBottom - 20 - 18 - wr.size.height, wr.size.width, wr.size.height);
+        else if (is2D) {                                  // trial27：2D 钮 = 胶囊水平居中、帽顶上方 15pt
+            CGRect capw = [capNow convertRect:capNow.bounds toView:win];
+            g = CGRectMake(CGRectGetMidX(capw) - wr.size.width / 2,
+                           capw.origin.y - 15 - wr.size.height, wr.size.width, wr.size.height);
+        } else g = CGRectMake(sw - 10 - wr.size.width, pinBottom - wr.size.height, wr.size.width, wr.size.height);
         CGRect local = [v.superview convertRect:g fromView:win];
         if (!CGRectEqualToRect(local, v.frame)) {
             [CATransaction begin]; [CATransaction setDisableActions:YES];
             [v.layer removeAllAnimations]; v.frame = local;
             [CATransaction commit];
+#ifdef GAODECLEAN_PROBE
+            if (is2D) {
+                CGRect c2 = capNow ? [capNow convertRect:capNow.bounds toView:win] : CGRectNull;
+                P7Write(3, wr, local, c2);
+            }
+#endif
         }
     } @catch (__unused NSException *e) {}
     GCStylePinOneBusy = NO;
@@ -1740,8 +1778,8 @@ static void GCStylePinWidgetsInner(UIWindow *win) {   // trial25(A2)：原体改
     //   cap 回退 WINAJXCombinedWidgetView，但一次性标志已置位 ⇒ 胶囊真身类从未挂上钩。
     //   改为按当前实例类名动态登记；三类钩子（layoutSubviews/setPos/layerGeo）均类级去重。
     {
-        UIView *w26[2] = { car, cap };
-        for (int i26 = 0; i26 < 2; i26++) {
+        UIView *w26[3] = { car, cap, Cached2D };   // trial27：2D 钮入三件套挂钩（类级去重天然防重挂）
+        for (int i26 = 0; i26 < 3; i26++) {
             UIView *v26 = w26[i26];
             if (!v26) continue;
             NSString *cn26 = NSStringFromClass(v26.class);
@@ -1753,6 +1791,7 @@ static void GCStylePinWidgetsInner(UIWindow *win) {   // trial25(A2)：原体改
             GCStyleHookLayerGeo(v26);       // trial26(A1)：layer setter 钩（按 layer 类去重）
         }
     }
+    if (Cached2D) GCStylePinOne(Cached2D);   // trial27：帧级主动钉（钩子通道只拦 App 写入，发现即纠）
 }
 // ★trial25(A2)：重入守卫包装 —— pin 现有帧级驱动/容器钩子/子控件钩子/layoutSubviews 钩子
 //   四路并发，写 frame 会级联触发钩子，无守卫有自激风暴风险。
