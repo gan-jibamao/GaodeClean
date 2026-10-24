@@ -18,7 +18,7 @@
 // ---- jibamao 个人标识（编译进 dylib，可用 strings 核对）----
 static NSString *const kGCAuthor      = @"jibamao";
 static NSString *const kGCRepo        = @"https://gan-jibamao.github.io/";
-static NSString *const kGCVersion     = @"0.9.43+trial33";
+static NSString *const kGCVersion     = @"0.9.44+trial34";
 
 // 0.9.18（A1）：底边间隙**按控件分开**，对表原生（搜索栏白底顶边 = 702.6pt）
 //   车机钮（连接车机 · WINDeviceInterconnectWidget）：原生底 652 → 间隙 50.6 → 取 50
@@ -171,6 +171,44 @@ static void P7Write(int idx, CGRect before, CGRect after, CGRect contWin) {
         P7Note(@"WRITE#%d n=%d before=%@ after=%@ cont=%@", idx, P7Writes[idx],
                NSStringFromCGRect(before), NSStringFromCGRect(after), NSStringFromCGRect(contWin));
 }
+#ifdef GAODECLEAN_PROBE
+// ★trial34：消失事件哨兵 —— 车机/胶囊/2D 任一「不可见」状态翻转都记一条（时间/原因/坐标）。
+//   老大不记得触发时机 ⇒ 让程序自己记：下次 dump 直接给到消失时刻与原因。
+typedef struct { float t; int tag, alive, why; float x, y, w, h; } P33Ev;
+static P33Ev P33Evs[12];
+static int P33EvI, P33EvTotal, P33LastAlive[3] = {-1, -1, -1};
+static const char *P33TagName(int tag) { return tag == 0 ? "车机" : (tag == 1 ? "胶囊" : "2D钮"); }
+static const char *P33WhyName(int why) {
+    switch (why) {
+        case 1: return "脱窗"; case 2: return "hidden"; case 3: return "alpha0"; case 4: return "出屏";
+        default: return "正常";
+    }
+}
+static void P33Watch(UIView *v, int tag) {
+    if (!v) return;
+    int alive = 1, why = 0;
+    if (!v.window) { alive = 0; why = 1; }
+    else if (v.hidden) { alive = 0; why = 2; }
+    else if (v.alpha < 0.05f) { alive = 0; why = 3; }
+    else {
+        CGRect r0 = [v convertRect:v.bounds toView:v.window];
+        if (r0.origin.y < -40 || r0.origin.y > v.window.bounds.size.height - 10) { alive = 0; why = 4; }
+    }
+    if (alive != P33LastAlive[tag]) {
+        P33LastAlive[tag] = alive;
+        CGRect r = v.window ? [v convertRect:v.bounds toView:v.window] : CGRectZero;
+        P33Evs[P33EvI].t = (float)P7Now();
+        P33Evs[P33EvI].tag = tag;
+        P33Evs[P33EvI].alive = alive;
+        P33Evs[P33EvI].why = why;
+        P33Evs[P33EvI].x = (float)r.origin.x; P33Evs[P33EvI].y = (float)r.origin.y;
+        P33Evs[P33EvI].w = (float)r.size.width; P33Evs[P33EvI].h = (float)r.size.height;
+        P33EvI = (P33EvI + 1) % 12;
+        P33EvTotal++;
+    }
+}
+#endif
+
 // ══ probe8：2D/3D 切换车机位漂移定罪（帧级 presentation 分歧 + 驱动率 + 容器钩子）══
 static long P8Fires, P8Busy, P8NoWin, P8ContHooks, P8Diverge;
 static long P8LayerFires, P8LayerFixes;   // trial26：layer setter 钩子命中/纠偏计数
@@ -1440,6 +1478,17 @@ static void GCProbeDump7(NSString *reason) {
         }
         [o appendFormat:@"P32偏差: 帧数=%d 最近=%@\n", P32DevN, p32s.length ? p32s : @"(无)"];
     }
+    {   // trial34：消失事件（时间 / 哪个钮 / 现或隐 / 原因 / 当时窗口系坐标）
+        NSMutableString *e34 = [NSMutableString string];
+        for (int i34 = 0; i34 < 12; i34++) {
+            if (P33Evs[i34].t <= 0) continue;
+            [e34 appendFormat:@"(t=%.1f %s%s %s r=(%.0f,%.0f,%.0f,%.0f)) ",
+                P33Evs[i34].t, P33TagName(P33Evs[i34].tag), P33Evs[i34].alive ? "现" : "隐",
+                P33WhyName(P33Evs[i34].why), P33Evs[i34].x, P33Evs[i34].y,
+                P33Evs[i34].w, P33Evs[i34].h];
+        }
+        [o appendFormat:@"P33事件: 总数=%d 最近=%@\n", P33EvTotal, e34.length ? e34 : @"(无)"];
+    }
 #endif
     if (CachedCar) {
         CALayer *p8pl = CachedCar.layer.presentationLayer;
@@ -1954,6 +2003,11 @@ static void GCStylePinWidgets(UIWindow *win) {
     }
     GCStylePinBusy = YES;
     GCStylePinWidgetsInner(win);
+#ifdef GAODECLEAN_PROBE
+    P33Watch(CachedCar, 0);
+    P33Watch((UIView *)(CachedLiteGroup && CachedLiteGroup.window ? CachedLiteGroup : CachedRight), 1);
+    P33Watch(Cached2D, 2);
+#endif
     GCStylePinBusy = NO;
 }
 // ★trial25(A1)：帧级钉位驱动器。probe7 铁证：①慢出现——车机 见=1.0/钉=1.0，tick 仅 5Hz，
