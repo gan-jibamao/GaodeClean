@@ -18,7 +18,7 @@
 // ---- jibamao 个人标识（编译进 dylib，可用 strings 核对）----
 static NSString *const kGCAuthor      = @"jibamao";
 static NSString *const kGCRepo        = @"https://gan-jibamao.github.io/";
-static NSString *const kGCVersion     = @"0.9.50+probe13";
+static NSString *const kGCVersion     = @"0.9.51+trial37";
 
 // 0.9.18（A1）：底边间隙**按控件分开**，对表原生（搜索栏白底顶边 = 702.6pt）
 //   车机钮（连接车机 · WINDeviceInterconnectWidget）：原生底 652 → 间隙 50.6 → 取 50
@@ -349,6 +349,7 @@ static NSMutableArray<NSString *> *P39Wx, *P39Ink;
 static int P39WxBadFrames, P39LastInkBad = -1;
 static double P39WxSince;
 static int P39AlignCalls, P39AlignWrites, P39AlignSkipCar, P39AlignSkipReenter;
+static int P37ParentFix, P37FreeFix;   // trial37：父容器拉回次数 / 游离天气实例归位次数
 
 static NSString *P39Chain(UIView *v) {
     NSMutableString *s = [NSMutableString string];
@@ -1831,6 +1832,7 @@ static void GCProbeDump7(NSString *reason) {
         for (NSString *s39 in P39Wx) [o appendFormat:@"  · %@\n", s39];
         [o appendFormat:@"P39墨量快照(%lu份)\n", (unsigned long)(P39Ink ? P39Ink.count : 0)];
         for (NSString *s39 in P39Ink) [o appendFormat:@"  · %@\n", s39];
+        [o appendFormat:@"P40修正: 父容器=%d 游离实例=%d\n", P37ParentFix, P37FreeFix];
         [o appendFormat:@"P40天气实例: %@\n", P40WeatherList()];
         [o appendFormat:@"P40 2D钮: %@\n", P40BtnInfo()];
     }
@@ -2003,7 +2005,10 @@ static void GCStylePinOne(UIView *v) {
     BOOL isCar = (v == CachedCar);
     BOOL isCap = (capNow && v == capNow);
     BOOL is2D = (v == Cached2D);                          // trial27
-    if (is2D && v.hidden) return;                         // trial36：只跳过真隐藏；淡出期间照钉
+    // trial37（probe13 铁证）：hidden 期间**照钉几何**，只跳过可见性写入 ——
+    //   旧 return 让 App 藏钮期间把它漂到 167/69（P37 流水 WINAJXCombinedWidgetView:167→69→667），
+    //   复现时从错位跳回 = 老大说的「乱跑」。
+
     //   （旧守卫 alpha<0.5 就整帧跳过 ⇒ 切换时 App 淡出+下滑无人拦，视频 11.0s 铁证）
     if (!isCar && !isCap && !is2D) return;
     GCStylePinOneBusy = YES;
@@ -2053,6 +2058,21 @@ static void GCStylePinOne(UIView *v) {
                     P7Solid++;
 #endif
                 }
+            }
+            // ★trial37（probe13 铁证）：钮自身 a=1.00 却看不见 —— 真凶是**父容器**
+            //   WINAJXCombinedWidgetView 被 App 设 hidden=1 / alpha=0 / opacity=0（祖先链 dump 实录）。
+            //   老大选「要常显」⇒ 把父容器拉回可见；幂等（达标即不写）。
+            UIView *p37 = v.superview;
+            if (p37 && p37.window && !v.hidden
+                && (p37.hidden || p37.alpha < 0.05f || p37.layer.opacity < 0.05f)) {
+                [CATransaction begin]; [CATransaction setDisableActions:YES];
+                p37.hidden = NO;
+                p37.alpha = 1.0f;
+                p37.layer.opacity = 1.0f;
+                [CATransaction commit];
+#ifdef GAODECLEAN_PROBE
+                P37ParentFix++;
+#endif
             }
         } else g = CGRectMake(sw - 10 - wr.size.width, pinBottom - wr.size.height, wr.size.width, wr.size.height);
         CGRect local = [v.superview convertRect:g fromView:win];
@@ -2950,6 +2970,7 @@ static BOOL GCWeatherHoldRow(UIView *v) {
     v.hidden = YES;
     return YES;
 }
+static BOOL IsWeatherRowClass(NSString *cn);   // trial37：多实例归位要用（非探针口径也需要）
 static void AlignWeatherRow(UIView *row);      // 0.9.5：前置声明（释放路径要用）
 static BOOL IsWeatherRowView(UIView *v);       // 0.9.5：前置声明
 static void GCWeatherReleaseHeld(void) {
@@ -3026,6 +3047,30 @@ static void AlignWeatherRow(UIView *row) {
         P39AlignWrites++;
 #endif
         [CATransaction commit];
+    }
+    // ★trial37（probe13 铁证）：同一行可能有**多个实例** ——
+    //   WINGroupMapWidget@735 被 App 淡成 alpha=0，另有游离的
+    //   WINScaleLineLogoMapWidget@788 在显示（就是老大看到压在底栏上的 LOGO）。
+    //   只钉缓存那一个 ⇒ 游离实例永远在 788。这里把所有可见天气类实例统一钉到行顶，只改 y。
+    CGFloat rowTop37 = carTgtTop + 44 + 18;
+    NSMutableArray *q37 = [NSMutableArray arrayWithObject:win];
+    for (NSUInteger i37 = 0; i37 < q37.count && q37.count < 2000; i37++) {
+        UIView *v37 = q37[i37];
+        [q37 addObjectsFromArray:v37.subviews];
+        if (v37 == row || !v37.window || v37.hidden || v37.alpha < 0.05f) continue;
+        if (!IsWeatherRowClass(NSStringFromClass(v37.class))) continue;
+        if (v37.bounds.size.width < 60 || v37.bounds.size.height >= 40) continue;
+        CGRect r37 = [v37 convertRect:v37.bounds toView:win];
+        if (fabs(r37.origin.y - rowTop37) < 0.5) continue;
+        CGPoint wp37 = [v37.superview convertPoint:CGPointMake(r37.origin.x, rowTop37) fromView:win];
+        [CATransaction begin];
+        [CATransaction setDisableActions:YES];
+        [v37.layer removeAllAnimations];
+        v37.frame = CGRectMake(wp37.x, wp37.y, v37.bounds.size.width, v37.bounds.size.height);
+        [CATransaction commit];
+#ifdef GAODECLEAN_PROBE
+        P37FreeFix++;
+#endif
     }
     GCWeatherReleaseHeld();   // 0.9.3：对齐完成 → 恢复扣留的天气行（出现在正确位置）
     inAlign = NO;
