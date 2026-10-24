@@ -18,7 +18,7 @@
 // ---- jibamao 个人标识（编译进 dylib，可用 strings 核对）----
 static NSString *const kGCAuthor      = @"jibamao";
 static NSString *const kGCRepo        = @"https://gan-jibamao.github.io/";
-static NSString *const kGCVersion     = @"0.9.53+trial38";
+static NSString *const kGCVersion     = @"0.9.54+trial39";
 
 // 0.9.18（A1）：底边间隙**按控件分开**，对表原生（搜索栏白底顶边 = 702.6pt）
 //   车机钮（连接车机 · WINDeviceInterconnectWidget）：原生底 652 → 间隙 50.6 → 取 50
@@ -121,13 +121,26 @@ static __weak UIView *CachedTabBar;
 //   App 连续搬动；同时截图实测底栏三圆钮也从 768 上移到 610 —— 整块 UI（含底栏）一起位移。
 //   我们却按 sh-97 的绝对位置往回拉 ⇒ 每帧对拉 = 老大看到的「乱跑/抖动」。
 //   原生关系：胶囊底 = 底栏顶 − 13（正常态 768 − 13 = 755，与原式一致）。
+// trial39：**取表现层坐标** —— probe14 流水铁证：App 用 CAAnimation 连续搬动控件
+//   （py 609→582→558→525→485→451→417→388→360→336→316…），动画跑在 presentation 上；
+//   我们钉的是模型层 ⇒ 视觉上永远追不上，只能靠"对拉"硬碰，于是看到抖动/乱跑。
+static CGRect GCPresWinRect(UIView *v, UIWindow *win) {
+    if (!v || !win) return CGRectZero;
+    CALayer *pl = v.layer.presentationLayer;
+    CALayer *sv = v.superview.layer.presentationLayer;
+    if (pl && sv && win.layer) {
+        CGRect r = [sv convertRect:pl.frame toLayer:win.layer];
+        if (r.size.width > 0.5 && r.size.height > 0.5) return r;
+    }
+    return [v convertRect:v.bounds toView:win];
+}
 static CGFloat GCPinBottom(UIWindow *win) {
     CGFloat sh = win ? win.bounds.size.height : 852.0;
     CGFloat fb = sh - 81 - 16;
     UIView *tb = CachedTabBar;
     if (win && tb && tb.window == win) {
-        CGRect r = [tb convertRect:tb.bounds toView:win];
-        if (r.size.height > 20 && r.size.height < 140 && r.origin.y > sh * 0.35)
+        CGRect r = GCPresWinRect(tb, win);
+        if (r.size.height > 20 && r.size.height < 140 && r.origin.y > sh * 0.30)
             return r.origin.y - 13.0;
     }
     return fb;
@@ -2152,7 +2165,7 @@ static void GCStylePinOne(UIView *v) {
             //   probe9 铁证：原生 win y=609.7 = capTop(667)-57.3；trial27 用 capTop-15-44=608
             //   与原生差 1.7pt > 幂等容差 0.6 ⇒ 每帧拉锯（2D=198）。改用原生间距 ⇒ 收敛零拉锯，
             //   缩放撂回叠帽态（top=capTop+33）时照样纠回。
-            CGRect capw = [capNow convertRect:capNow.bounds toView:win];
+            CGRect capw = GCPresWinRect(capNow, win);   // trial39：用胶囊表现层，跟随 App 动画
             g = CGRectMake(CGRectGetMidX(capw) - wr.size.width / 2,
                            capw.origin.y - 57.3, wr.size.width, wr.size.height);
             // ★trial30（老大 12:59 截图铁证：44pt 位置精准、内部全透明只剩 1px 环）：
