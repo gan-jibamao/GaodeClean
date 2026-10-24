@@ -18,7 +18,7 @@
 // ---- jibamao 个人标识（编译进 dylib，可用 strings 核对）----
 static NSString *const kGCAuthor      = @"jibamao";
 static NSString *const kGCRepo        = @"https://gan-jibamao.github.io/";
-static NSString *const kGCVersion     = @"0.9.37+trial28";
+static NSString *const kGCVersion     = @"0.9.38+probe9";
 
 // 0.9.18（A1）：底边间隙**按控件分开**，对表原生（搜索栏白底顶边 = 702.6pt）
 //   车机钮（连接车机 · WINDeviceInterconnectWidget）：原生底 652 → 间隙 50.6 → 取 50
@@ -1364,6 +1364,61 @@ static void GCProbeDump7(NSString *reason) {
         (P8CarMinY > 1e8 || P8CarMaxY < -1e8) ? -1.0 : P8CarMaxY - P8CarMinY];
     [o appendFormat:@"P8 layerフック: fires=%ld fixes=%ld フック済みレイヤークラス=%@\n",
         P8LayerFires, P8LayerFixes, [GCStyleLayerHookedClasses() allObjects]];
+    // ★probe9：右侧带候选全扫描 —— 2D/3D 钮真身与文字绘制方式一次定罪
+    //   （trial28 dump 铁证：label text="2D"/"3D" 假设不成立，2D钮行消失+2D=0）
+    {
+        UIView *cap9 = (CachedLiteGroup && CachedLiteGroup.window) ? (UIView *)CachedLiteGroup : (UIView *)CachedRight;
+        UIWindow *w9m = cap9.window ?: CachedCar.window;
+        if (cap9 && w9m) {
+            CGRect capw9 = [cap9 convertRect:cap9.bounds toView:nil];
+            CGFloat sw9 = w9m.bounds.size.width;
+            [o appendFormat:@"---[右侧带候选 30~60pt正方 midX>%.0f midY∈(%.0f,%.0f)]---\n",
+                sw9 - 64, capw9.origin.y - 200, capw9.origin.y + 120];
+            for (UIWindow *w9 in GCAllWindows()) {
+                NSMutableArray *q9 = [NSMutableArray arrayWithObject:w9];
+                int n9 = 0;
+                while (q9.count && n9 < 3000) {
+                    UIView *v9 = q9.firstObject; [q9 removeObjectAtIndex:0]; n9++;
+                    CGRect r9 = [v9 convertRect:v9.bounds toView:nil];
+                    CGFloat ww9 = r9.size.width, hh9 = r9.size.height;
+                    if (ww9 >= 30 && ww9 <= 60 && hh9 >= 30 && hh9 <= 60 && fabs(ww9 - hh9) <= 10 &&
+                        CGRectGetMidX(r9) > sw9 - 64 &&
+                        CGRectGetMidY(r9) > capw9.origin.y - 200 && CGRectGetMidY(r9) < capw9.origin.y + 120) {
+                        [o appendFormat:@"%@ win=%@ hid=%d a=%.2f sub=%lu cr=%.1f\n",
+                            NSStringFromClass(v9.class), NSStringFromCGRect(r9), v9.hidden, v9.alpha,
+                            (unsigned long)v9.subviews.count, v9.layer.cornerRadius];
+                        for (UIView *s9 in v9.subviews) {
+                            NSMutableString *d9 = [NSMutableString stringWithFormat:@"    sub %@ own=%@ hid=%d",
+                                NSStringFromClass(s9.class), NSStringFromCGRect(s9.frame), s9.hidden];
+                            if ([s9 isKindOfClass:[UILabel class]]) {
+                                UILabel *l9 = (UILabel *)s9;
+                                [d9 appendFormat:@" text='%@' attr=%@", l9.text ?: @"", l9.attributedText ? @"Y" : @"N"];
+                                if (l9.attributedText) [d9 appendFormat:@" attrStr='%@'", l9.attributedText.string ?: @""];
+                            }
+                            if ([s9 isKindOfClass:[UIImageView class]])
+                                [d9 appendFormat:@" img=%@", ((UIImageView *)s9).image ? @"Y" : @"N"];
+                            if (s9.layer.contents)
+                                [d9 appendFormat:@" lcts=%@", NSStringFromClass([s9.layer.contents class])];
+                            [o appendFormat:@"%@\n", d9];
+                            for (UIView *t9 in s9.subviews) {
+                                NSMutableString *e9 = [NSMutableString stringWithFormat:@"      sub2 %@ own=%@",
+                                    NSStringFromClass(t9.class), NSStringFromCGRect(t9.frame)];
+                                if ([t9 isKindOfClass:[UILabel class]])
+                                    [e9 appendFormat:@" text='%@' attr=%@", ((UILabel *)t9).text ?: @"",
+                                        ((UILabel *)t9).attributedText ? @"Y" : @"N"];
+                                if ([t9 isKindOfClass:[UIImageView class]])
+                                    [e9 appendFormat:@" img=%@", ((UIImageView *)t9).image ? @"Y" : @"N"];
+                                if (t9.layer.contents)
+                                    [e9 appendFormat:@" lcts=%@", NSStringFromClass([t9.layer.contents class])];
+                                [o appendFormat:@"%@\n", e9];
+                            }
+                        }
+                    }
+                    [q9 addObjectsFromArray:v9.subviews];
+                }
+            }
+        }
+    }
     if (Cached2D)   // trial27：2D 钮自证行（类名/窗口系 rect/hidden）
         [o appendFormat:@"2D钮 %@ win=%@ hid=%d\n", NSStringFromClass(Cached2D.class),
             NSStringFromCGRect([Cached2D convertRect:Cached2D.bounds toView:nil]), Cached2D.hidden];
