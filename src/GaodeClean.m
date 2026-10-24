@@ -18,7 +18,7 @@
 // ---- jibamao 个人标识（编译进 dylib，可用 strings 核对）----
 static NSString *const kGCAuthor      = @"jibamao";
 static NSString *const kGCRepo        = @"https://gan-jibamao.github.io/";
-static NSString *const kGCVersion     = @"0.9.42+trial32";
+static NSString *const kGCVersion     = @"0.9.43+trial33";
 
 // 0.9.18（A1）：底边间隙**按控件分开**，对表原生（搜索栏白底顶边 = 702.6pt）
 //   车机钮（连接车机 · WINDeviceInterconnectWidget）：原生底 652 → 间隙 50.6 → 取 50
@@ -1649,40 +1649,29 @@ static void GCStylePinOne(UIView *v) {
             }
         } else g = CGRectMake(sw - 10 - wr.size.width, pinBottom - wr.size.height, wr.size.width, wr.size.height);
         CGRect local = [v.superview convertRect:g fromView:win];
-        // ★trial32（老大：还是会跳；trial31 dump d=(0,0)/2D=0 = 采样时刻全正常）：
-        //   跳动只发生在手势进行中的帧 ⇒ ①逐帧取证（偏差帧计数+最近样本）②链式补偿：
-        //   按 presentation 链量钮的真实屏幕位（不只比父层），父层不动而祖辈动画也能纠正。
-        if (is2D) {
-            // ① 先杀钮自身位移动画（自身动画会覆盖 model 写入，不清掉就纠不回来）
-            CALayer *pl32 = v.layer.presentationLayer;
-            if (pl32 && !CGRectEqualToRect(pl32.frame, v.layer.frame)
-                && (fabs(pl32.frame.origin.x - v.layer.frame.origin.x) > 0.6
-                    || fabs(pl32.frame.origin.y - v.layer.frame.origin.y) > 0.6)) {
-                [CATransaction begin]; [CATransaction setDisableActions:YES];
-                [v.layer removeAllAnimations];
-                [CATransaction commit];
-            }
-            // ② 链式视觉补偿
-            CALayer *pl2 = v.layer.presentationLayer;
-            CALayer *svp32 = v.superview.layer.presentationLayer;
-            if (pl2 && svp32 && win.layer) {
-                CGRect presWin = [svp32 convertRect:pl2.frame toLayer:win.layer];
-                CGFloat dx32 = presWin.origin.x - g.origin.x;
-                CGFloat dy32 = presWin.origin.y - g.origin.y;
+        // ★trial33（老大：完全乱了，车机钮与 2D 钮不见）：trial32 的链式补偿被整体撤掉。
+        //   判定：dump 采样时刻一切正常（车机 673 / 2D 609.7 / 天气 735），乱是采样之后才发生；
+        //   trial32 唯一新增的写入路径就是这里 ⇒ 先撤写入，改为「只读取证」。
+        //   本块不写任何几何/动画，物理上不可能影响布局。
 #ifdef GAODECLEAN_PROBE
-                P7Dx31 = dx32; P7Dy31 = dy32;
-                if ((fabs(dx32) > 1.0 || fabs(dy32) > 1.0) && fabs(dx32) < 400 && fabs(dy32) < 400) {
+        if (is2D) {
+            CALayer *pl33 = v.layer.presentationLayer;
+            CALayer *svp33 = v.superview.layer.presentationLayer;
+            if (pl33 && svp33 && win.layer) {
+                CGRect presWin = [svp33 convertRect:pl33.frame toLayer:win.layer];
+                CGFloat dx33 = presWin.origin.x - g.origin.x;
+                CGFloat dy33 = presWin.origin.y - g.origin.y;
+                P7Dx31 = dx33; P7Dy31 = dy33;
+                if ((fabs(dx33) > 1.0 || fabs(dy33) > 1.0) && fabs(dx33) < 400 && fabs(dy33) < 400) {
                     P32DevN++;
                     P32Dev[P32DevI].t = (float)P7Now();
-                    P32Dev[P32DevI].dx = (float)dx32;
-                    P32Dev[P32DevI].dy = (float)dy32;
+                    P32Dev[P32DevI].dx = (float)dx33;
+                    P32Dev[P32DevI].dy = (float)dy33;
                     P32DevI = (P32DevI + 1) % 6;
                 }
-#endif
-                if ((fabs(dx32) > 0.5 || fabs(dy32) > 0.5) && fabs(dx32) < 400 && fabs(dy32) < 400)
-                    local = CGRectOffset(local, -dx32, -dy32);
             }
         }
+#endif
         if (!CGRectEqualToRect(local, v.frame)) {
             [CATransaction begin]; [CATransaction setDisableActions:YES];
             [v.layer removeAllAnimations]; v.frame = local;
