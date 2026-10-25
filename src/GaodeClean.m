@@ -659,6 +659,48 @@ static void P32Pixel(UIView *a, UIView *b) {
     (void)lastMx;
 }
 
+// probe35(A1)：祖先链的「表现层」状态。
+//   probe34 铁证：item 自身 model/pres 全绿、无动画、树无变化，屏幕却整块消失。
+//   => 唯一没查的是祖先的 presentationLayer：祖先跑淡出动画时模型值恒 1.00，
+//      子视图全绿，屏幕上整棵子树消失。
+//   搜索钮不在 WINTabBar 里（WINQuickSearchBarV2 是独立视图），所以它不受影响。
+static void P34Anc(int i, UIView *v) {
+    if (i < 0 || i > 1 || !v) return;
+    NSMutableString *s = [NSMutableString string];
+    unsigned sig = 0;
+    UIView *p = v;
+    for (int k = 0; k < 8 && p; k++, p = p.superview) {
+        CALayer *L = p.layer;
+        CALayer *pl = L.presentationLayer ?: L;
+        float mo = (float)L.opacity, po = (float)pl.opacity;
+        int nk = (int)L.animationKeys.count;
+        CGRect pb = pl.bounds;
+        [s appendFormat:@"%@[m%.2f p%.2f k%d %.0fx%.0f h%d] ", NSStringFromClass(p.class),
+            (double)mo, (double)po, nk, pb.size.width, pb.size.height, p.hidden ? 1 : 0];
+        sig = sig * 31u + (unsigned)(po * 100.0f) + (unsigned)nk * 7u + (unsigned)pb.size.width;
+    }
+    static unsigned last[2]; static int has[2];
+    if (has[i] && sig == last[i]) return;
+    has[i] = 1; last[i] = sig;
+    P25Append([NSString stringWithFormat:@"t=%.2f ANC[%d] %@\n", P7Now(), i, s]);
+}
+
+// probe35(A2)：2Hz 打印底栏全部子视图，确认中间那个圆钮到底是谁。
+static void P34BarKids(UIView *bar) {
+    static int tick;
+    if (++tick % 30) return;
+    if (!bar) return;
+    NSMutableString *s = [NSMutableString string];
+    for (UIView *v in bar.subviews) {
+        CALayer *pl = v.layer.presentationLayer ?: v.layer;
+        [s appendFormat:@"%@(%.0f,%.0f,%.0fx%.0f m%.2f/p%.2f h%d) ",
+         NSStringFromClass(v.class), v.frame.origin.x, v.frame.origin.y,
+         v.frame.size.width, v.frame.size.height,
+         (double)v.layer.opacity, (double)pl.opacity, v.hidden ? 1 : 0];
+    }
+    P25Append([NSString stringWithFormat:@"t=%.2f KIDS %@\n", P7Now(), s]);
+}
+
 // probe32(A1)：每帧算一次「到底看不看得见」，翻转即记。
 //   probe31b 铁证：心跳零断档 + 属性全恒定 + 屏幕上整块没有
 //   => 成因只可能在「兄弟遮挡」或「自身绘制内容被清」，两者 SNAP 都没覆盖。
@@ -3560,6 +3602,7 @@ static void GCStylePinTabItems(UIWindow *win) {
 #ifdef GAODECLEAN_PROBE
     P29Bar(CachedTabBar);
     P30Heartbeat(CachedTabItemA ? 1 : 0, CachedTabItemB ? 1 : 0, CachedTabBar ? 1 : 0, CachedTabBar);
+    P34BarKids(CachedTabBar);
 #endif
     UIView *arr[2] = { CachedTabItemA, CachedTabItemB };
     for (int i = 0; i < 2; i++) {
@@ -3628,6 +3671,7 @@ static void GCStylePinTabItems(UIWindow *win) {
           } }
         P31Vis(i, it, mk, win);
         P33Mask(i, it, mk);
+        P34Anc(i, it);
 #endif
 
         // ★probe23(A2)：内容子项水平居中 —— 实测 SubItem 54 宽贴在 x=0，
