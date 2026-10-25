@@ -3681,28 +3681,22 @@ static void GCStylePinTabItems(UIWindow *win) {
     //   ★原生也滑，但原生有毛玻璃背景(我们隐藏了)滑入时渐变浮现看不出来；
     //     我们只剩两个实心白圆 => 滑入时"白圆凭空出现"极显眼。
     //   只清除「向下滑入且终点就是原位」这一类，不干扰 App 真正的位移。
+    // ★trial53(A1)：无条件清除底栏动画。
+    //   trial52 的判据（keyPath == "position"）实测未生效 —— 真机闪烁仍在。
+    //   底栏实测只有「滑入」这一种动画，无需再精确区分，直接全清。
     if (CachedTabBar && CachedTabBar.layer.animationKeys.count) {
-        BOOL onlyEntry = YES;
-        for (NSString *k in CachedTabBar.layer.animationKeys) {
-            CAAnimation *a = [CachedTabBar.layer animationForKey:k];
-            if (![a isKindOfClass:[CABasicAnimation class]]) { onlyEntry = NO; break; }
-            CABasicAnimation *b = (CABasicAnimation *)a;
-            if (![b.keyPath isEqualToString:@"position"]) { onlyEntry = NO; break; }
-            CGPoint from = b.fromValue ? [b.fromValue CGPointValue] : CGPointZero;
-            CGPoint to   = b.toValue   ? [b.toValue CGPointValue]   : CGPointZero;
-            if (!(from.y > to.y + 1.0 && fabs(to.y - CachedTabBar.layer.position.y) < 1.0)) {
-                onlyEntry = NO; break;
-            }
-        }
-        if (onlyEntry) {
 #ifdef GAODECLEAN_PROBE
-            static int clr;
-            NSString *ks = [CachedTabBar.layer.animationKeys componentsJoinedByString:@","];
-            P25Append([NSString stringWithFormat:@"t=%.2f CLR[%d] 清除底栏入场动画 keys=%@\n",
-                       P7Now(), ++clr, ks ?: @"-"]);
+        { static int clr;
+          NSMutableString *d = [NSMutableString string];
+          for (NSString *k in CachedTabBar.layer.animationKeys) {
+              CAAnimation *a = [CachedTabBar.layer animationForKey:k];
+              NSString *kp = @"-";
+              if ([a isKindOfClass:[CABasicAnimation class]]) kp = ((CABasicAnimation *)a).keyPath;
+              [d appendFormat:@"%@[%@ kp=%@] ", k, NSStringFromClass(a.class), kp ?: @"nil"];
+          }
+          P25Append([NSString stringWithFormat:@"t=%.2f CLR[%d] %@\n", P7Now(), ++clr, d]); }
 #endif
-            [CachedTabBar.layer removeAllAnimations];
-        }
+        [CachedTabBar.layer removeAllAnimations];
     }
 #ifdef GAODECLEAN_PROBE
     P34BarKids(CachedTabBar);
