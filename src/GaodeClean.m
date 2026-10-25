@@ -111,6 +111,7 @@ static void AlignCornerWidgets(UIView *bar);
 static void GCStyleDiscoverWidgets(UIWindow *win);   // trial11：实例发现独立成函数（pin 自给自足）
 static void GCStylePinWidgets(UIWindow *win);        // trial25(A2)：重入守卫包装前置声明（容器钩子/驱动器用）
 static void GCStylePinTabItems(UIWindow *win);       // trial42(A3)：首页/我的 帧级钉位前置声明
+static void GCStylePinCapsuleFill(void);             // trial54(A2)：搜索胶囊白底 60fps 前置声明
 static NSMutableSet<NSString *> *GCStyleLayerHookedClasses(void);   // trial26：定义在后，P8 dump 段先用
 static BOOL IsRightBottomWidget(UIView *v);            // trial11：前置声明（discover 用）
 static BOOL GCCIsLiteGroupCapsule(UIView *v);          // trial11：前置声明（discover 用）
@@ -3634,8 +3635,34 @@ static void GCStylePinWidgetsInner(UIWindow *win) {   // trial25(A2)：原体改
     P19Tick();                                // ★probe20(A2)：必须在 pin 之前采样，否则自己的纠正会擦掉证据
 #endif
     GCStylePinTabItems(win);                  // trial42(A3)：首页/我的 每帧钉 x
+    GCStylePinCapsuleFill();                  // ★trial54(A2)：搜索胶囊白底 60fps
     if (Cached2D) GCStylePinOne(Cached2D);   // trial27：帧级主动钉（钩子通道只拦 App 写入，发现即纠）
 }
+// ★trial54(A2)：搜索胶囊白底 60fps 强制写回（与两钮同因：App 按帧重置成透明）。
+static void GCStylePinCapsuleFill(void) {
+    UIView *anchor = SearchBarView;
+    if (!anchor || !anchor.window) return;
+    UIView *cap = GCStyleCapsule(anchor);
+    if (!cap) return;
+    static UIColor *kCapFill;
+    if (!kCapFill) kCapFill = [UIColor colorWithWhite:0.96 alpha:0.92];
+    CGColorRef want = kCapFill.CGColor;
+    if (!cap.layer.backgroundColor || !CGColorEqualToColor(cap.layer.backgroundColor, want)) {
+        [CATransaction begin]; [CATransaction setDisableActions:YES];
+        cap.backgroundColor = kCapFill;
+        [CATransaction commit];
+#ifdef GAODECLEAN_PROBE
+        { static int refill2;
+          P25Append([NSString stringWithFormat:@"t=%.2f FILL-CAP 搜索钮白底被重置→补回 (第%d次)\n",
+                     P7Now(), ++refill2]); }
+#endif
+    }
+    if ([cap isKindOfClass:UIVisualEffectView.class]) {
+        UIVisualEffectView *ev = (UIVisualEffectView *)cap;
+        if (ev.effect != nil) ev.effect = nil;
+    }
+}
+
 // ★trial42(A3)：首页/我的 帧级钉位（60fps）。
 //   证据：这两个 WINTabBarItem 只有 GCStyleTab 在写，而 GCStyleTab 来自 GCNarrowApply
 //   （5Hz tick + layoutSubviews）⇒ App 一搬动，最慢 200ms 才纠回 = 肉眼看到的「左右移动」。
@@ -3726,6 +3753,27 @@ static void GCStylePinTabItems(UIWindow *win) {
         // ★probe23(A1)：视觉收圆，不碰 item 的 frame（避免与 App 布局对拉）。
         //   实测 App 原生 item = 84x54 corner=27 ⇒ 跑道形胶囊；用 54x54 圆形 mask 收成正圆。
         [CATransaction begin]; [CATransaction setDisableActions:YES];
+        // ★trial54(A1)：白底 60fps 强制写回。
+        //   根因：GCStyleTab 只在 5Hz 写 backgroundColor，而 App 按帧把它重置成透明
+        //   => 白圆只在补的那一帧出现，其余时间透明 = 用户看到的"白圆在闪"。
+        //   trial40 的注释早已写明「App 一旦把底色设成透明就永久跳过」，
+        //   当时只改了判据（无条件写），没改频率（仍 5Hz）= 等于没修。这次连频率一起改。
+        //   值相同时 CALayer 不触发重绘，幂等。
+        {
+            static UIColor *kTabFill;
+            if (!kTabFill) kTabFill = [UIColor colorWithWhite:0.96 alpha:0.92];
+            CGColorRef want = kTabFill.CGColor;
+            if (!it.layer.backgroundColor || !CGColorEqualToColor(it.layer.backgroundColor, want)) {
+                it.backgroundColor = kTabFill;
+#ifdef GAODECLEAN_PROBE
+                { static int refill;
+                  P25Append([NSString stringWithFormat:@"t=%.2f FILL[%d] 白底被重置→补回 (第%d次)\n",
+                             P7Now(), i, ++refill]); }
+#endif
+            }
+            if (fabs(it.layer.cornerRadius - 27.0) > 0.5) it.layer.cornerRadius = 27.0;
+            if (!it.layer.masksToBounds) it.layer.masksToBounds = YES;
+        }
         CAShapeLayer *mk = nil;
         if ([it.layer.mask isKindOfClass:[CAShapeLayer class]]) {
             mk = (CAShapeLayer *)it.layer.mask;
