@@ -3671,6 +3671,40 @@ static void GCStylePinTabItems(UIWindow *win) {
 #ifdef GAODECLEAN_PROBE
     P29Bar(CachedTabBar);
     P30Heartbeat(CachedTabItemA ? 1 : 0, CachedTabItemB ? 1 : 0, CachedTabBar ? 1 : 0, CachedTabBar);
+#endif
+
+    // ★trial52(A1)：清除 App 反复给底栏加的「滑入」动画。
+    //   probe37 铁证：App 在主线程 RunLoop 里给 WINTabBar 加
+    //   position{from={0,84} to={0,0} dur=0.20}，动画期间表现层 y=882
+    //   而屏高 852 => 整条栏在屏幕外 0.2 秒 = 闪烁。
+    //   我们从未清除过底栏自身的动画（所有 removeAllAnimations 都只作用于子视图）。
+    //   ★原生也滑，但原生有毛玻璃背景(我们隐藏了)滑入时渐变浮现看不出来；
+    //     我们只剩两个实心白圆 => 滑入时"白圆凭空出现"极显眼。
+    //   只清除「向下滑入且终点就是原位」这一类，不干扰 App 真正的位移。
+    if (CachedTabBar && CachedTabBar.layer.animationKeys.count) {
+        BOOL onlyEntry = YES;
+        for (NSString *k in CachedTabBar.layer.animationKeys) {
+            CAAnimation *a = [CachedTabBar.layer animationForKey:k];
+            if (![a isKindOfClass:[CABasicAnimation class]]) { onlyEntry = NO; break; }
+            CABasicAnimation *b = (CABasicAnimation *)a;
+            if (![b.keyPath isEqualToString:@"position"]) { onlyEntry = NO; break; }
+            CGPoint from = b.fromValue ? [b.fromValue CGPointValue] : CGPointZero;
+            CGPoint to   = b.toValue   ? [b.toValue CGPointValue]   : CGPointZero;
+            if (!(from.y > to.y + 1.0 && fabs(to.y - CachedTabBar.layer.position.y) < 1.0)) {
+                onlyEntry = NO; break;
+            }
+        }
+        if (onlyEntry) {
+#ifdef GAODECLEAN_PROBE
+            static int clr;
+            NSString *ks = [CachedTabBar.layer.animationKeys componentsJoinedByString:@","];
+            P25Append([NSString stringWithFormat:@"t=%.2f CLR[%d] 清除底栏入场动画 keys=%@\n",
+                       P7Now(), ++clr, ks ?: @"-"]);
+#endif
+            [CachedTabBar.layer removeAllAnimations];
+        }
+    }
+#ifdef GAODECLEAN_PROBE
     P34BarKids(CachedTabBar);
     P35Anim(0, CachedTabBar);
     P36Track(CachedTabBar);
