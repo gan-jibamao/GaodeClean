@@ -659,6 +659,44 @@ static void P32Pixel(UIView *a, UIView *b) {
     (void)lastMx;
 }
 
+// probe37(A1)：抓「谁在给底栏加滑入动画」—— 直接打调用栈。
+//   本轮实测：底栏移除 0 次，滑入动画 10 次，每次 position{from={0,84} to={0,0}}。
+//   t=10.51 表现层 y=882（屏高 852）=> 整条栏在屏幕外 = 闪烁。
+//   栈里出现 GaodeClean 就是我们的写入引起的；没有就是 App 自己的转场。
+static void P36Who(void) {
+    static double last; static int n;
+    double now = P7Now();
+    if (n >= 4 || now - last < 2.0) return;
+    last = now; n++;
+    NSArray<NSString *> *cs = [NSThread callStackSymbols];
+    NSMutableString *s = [NSMutableString string];
+    NSUInteger lim = cs.count < 16 ? cs.count : 16;
+    for (NSUInteger i = 0; i < lim; i++) [s appendFormat:@"\n    %@", cs[i]];
+    P25Append([NSString stringWithFormat:@"t=%.2f WHO 调用栈=%@\n", now, s]);
+}
+
+// probe37(A2)：记录动画期间底栏表现层的实际 y 范围。
+//   10 次动画里只有 1 次抓到 y=882，必须确认是全都滑出还是个别。
+static void P36Track(UIView *bar) {
+    static int active; static float ymin, ymax; static double t0;
+    if (!bar) return;
+    CALayer *L = bar.layer;
+    int nk = (int)L.animationKeys.count;
+    if (nk > 0) {
+        CALayer *pl = L.presentationLayer;
+        float y = pl ? (float)pl.position.y : (float)L.position.y;
+        if (!active) { active = 1; ymin = ymax = y; t0 = P7Now(); }
+        else { if (y < ymin) ymin = y; if (y > ymax) ymax = y; }
+    } else if (active) {
+        active = 0;
+        CGFloat sh = bar.window ? bar.window.bounds.size.height : 0.0;
+        P25Append([NSString stringWithFormat:
+            @"t=%.2f TRK 动画期间 y=[%.0f,%.0f] 起%.2f 屏高%.0f %@\n",
+            P7Now(), ymin, ymax, t0, sh,
+            (sh > 0 && ymax > sh - 30) ? @"★整条滑出屏幕" : @"(未滑出)"]);
+    }
+}
+
 // probe36(A1)：把动画本身摊开 —— 键名 + from/to + 时长 + 表现层位置/变换。
 //   probe35 铁证：四次闪烁精确对应 WINTabBar 的 k1，但 model/pres 透明度恒 1.00、
 //   bounds 恒 393x60，视频显示两钮先消失再从下方偏外回来
@@ -680,6 +718,7 @@ static void P35Anim(int i, UIView *v) {
             [s appendFormat:@"%@{%@} ", k, NSStringFromClass(a.class)];
         }
     }
+    if (i == 0 && keys.count) P36Who();
     CALayer *pl = L.presentationLayer ?: L;
     P25Append([NSString stringWithFormat:
         @"t=%.2f ANM[%d] %@ %@| pos=(%.1f,%.1f)->(%.1f,%.1f) tf=(%.3f,%.3f,%.3f,%.3f) o=%.2f\n",
@@ -3634,6 +3673,7 @@ static void GCStylePinTabItems(UIWindow *win) {
     P30Heartbeat(CachedTabItemA ? 1 : 0, CachedTabItemB ? 1 : 0, CachedTabBar ? 1 : 0, CachedTabBar);
     P34BarKids(CachedTabBar);
     P35Anim(0, CachedTabBar);
+    P36Track(CachedTabBar);
     P35Anim(1, CachedTabItemA);
     P35Anim(2, CachedTabItemB);
 #endif
