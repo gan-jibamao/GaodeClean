@@ -516,24 +516,43 @@ static void P31Shot(int i, CGRect wr, UIWindow *win) {
 // probe33(A1)：把 WINTabBar 单独渲染成位图（不含任何外部遮挡），采样按钮处亮度。
 //   probe32 铁证：9 条属性判据全绿(bits=0x000)，屏幕整块消失 => 属性对不等于像素对。
 //   栏内渲染有白圆而屏幕没有 => 被遮挡；栏内也没有 => 自身内容/裁剪问题。
+// probe34(A2)：自动标定坐标偏移。probe33 实测 全图max=0（内容被推到画布外）。
+//   renderInContext 的绘制原点不确定，两种偏移各试一次，取最大亮度高的那个。
 static unsigned char *P32RenderBar(UIView *bar, size_t *ow, size_t *oh) {
     CGRect b = bar.bounds;
     size_t w = (size_t)b.size.width, h = (size_t)b.size.height;
     if (w < 8 || h < 8 || w > 2048 || h > 2048) return NULL;
-    unsigned char *buf = (unsigned char *)calloc(w * h * 4, 1);
-    if (!buf) return NULL;
-    CGColorSpaceRef cs = CGColorSpaceCreateDeviceRGB();
-    CGContextRef ctx = CGBitmapContextCreate(buf, w, h, 8, w * 4, cs, kCGImageAlphaPremultipliedLast);
-    CGColorSpaceRelease(cs);
-    if (!ctx) { free(buf); return NULL; }
-    CGContextTranslateCTM(ctx, 0, (CGFloat)h);
-    CGContextScaleCTM(ctx, 1.0, -1.0);
+    unsigned char *best = NULL; int bestMax = -1;
     CGRect fr = bar.frame;
-    CGContextTranslateCTM(ctx, -fr.origin.x, -fr.origin.y);
-    @try { [bar.layer renderInContext:ctx]; } @catch (__unused NSException *e) {}
-    CGContextRelease(ctx);
+    CGFloat offs[2][2] = { {0.0, 0.0}, {-fr.origin.x, -fr.origin.y} };
+    for (int t = 0; t < 2; t++) {
+        unsigned char *buf = (unsigned char *)calloc(w * h * 4, 1);
+        if (!buf) continue;
+        CGColorSpaceRef cs = CGColorSpaceCreateDeviceRGB();
+        CGContextRef ctx = CGBitmapContextCreate(buf, w, h, 8, w * 4, cs, kCGImageAlphaPremultipliedLast);
+        CGColorSpaceRelease(cs);
+        if (!ctx) { free(buf); continue; }
+        CGContextTranslateCTM(ctx, 0, (CGFloat)h);
+        CGContextScaleCTM(ctx, 1.0, -1.0);
+        CGContextTranslateCTM(ctx, offs[t][0], offs[t][1]);
+        @try { [bar.layer renderInContext:ctx]; } @catch (__unused NSException *e) {}
+        CGContextRelease(ctx);
+        int mx = 0;
+        for (size_t k = 0; k < w * h; k++) {
+            int v = (buf[k * 4] * 30 + buf[k * 4 + 1] * 59 + buf[k * 4 + 2] * 11) / 100;
+            if (v > mx) mx = v;
+        }
+        static int loggedOffset;
+        if (mx > bestMax) { if (best) free(best); best = buf; bestMax = mx; }
+        else free(buf);
+        if (!loggedOffset && mx > 50) {
+            loggedOffset = 1;
+            P25Append([NSString stringWithFormat:@"t=%.2f RENDER-CAL offset=%d max=%d\n", P7Now(), t, mx]);
+        }
+    }
+    if (!best) return NULL;
     *ow = w; *oh = h;
-    return buf;
+    return best;
 }
 
 // probe33(A2)：白圆消失时把「栏的渲染结果」存图，上限 6 张。
@@ -563,6 +582,33 @@ static void P32Shot(int i, UIView *bar) {
         }
     } @catch (__unused NSException *e) {}
     free(buf);
+}
+
+// probe34(A1)：mask 层全状态。probe33 只看了 path 包围盒(恒 54x54)，
+//   但 mask 能不能透出内容还取决于 frame/position/opacity/hidden/动画。
+//   两个钮同时消失、搜索钮不受影响、属性全绿 => 最大嫌疑就是这个 mask。
+static void P33Mask(int i, UIView *it, CAShapeLayer *mk) {
+    if (!mk || i < 0 || i > 1 || !it) return;
+    CALayer *pl = mk.presentationLayer;
+    CGRect mf = mk.frame, pf = pl ? pl.frame : CGRectZero;
+    float v[8] = { (float)mf.origin.x, (float)mf.origin.y, (float)mf.size.width, (float)mf.size.height,
+                   (float)mk.opacity, (float)pf.origin.x, (float)pf.origin.y, (float)pf.size.width };
+    int h[3] = { mk.hidden ? 1 : 0, (int)mk.animationKeys.count, (it.layer.mask == mk) ? 1 : 0 };
+    static float lv[2][8]; static int lh[2][3]; static int has[2];
+    BOOL ch = !has[i];
+    if (!ch) { for (int k = 0; k < 8; k++) if (fabsf(v[k] - lv[i][k]) > 0.5f) { ch = YES; break; } }
+    if (!ch) { for (int k = 0; k < 3; k++) if (h[k] != lh[i][k]) { ch = YES; break; } }
+    if (!ch) return;
+    has[i] = 1;
+    for (int k = 0; k < 8; k++) lv[i][k] = v[k];
+    for (int k = 0; k < 3; k++) lh[i][k] = h[k];
+    CGRect bb = mk.path ? CGPathGetBoundingBox(mk.path) : CGRectZero;
+    P25Append([NSString stringWithFormat:
+        @"t=%.2f MSK[%d] f=(%.1f,%.1f,%.1fx%.1f) pres=(%.1f,%.1f,%.1f) o=%.2f h=%d anim=%d inst=%d path=%.0fx%.0f keys=%@\n",
+        P7Now(), i, mf.origin.x, mf.origin.y, mf.size.width, mf.size.height,
+        pf.origin.x, pf.origin.y, pf.size.width, (double)mk.opacity,
+        h[0], h[1], h[2], bb.size.width, bb.size.height,
+        mk.animationKeys.count ? [mk.animationKeys componentsJoinedByString:@","] : @"-"]);
 }
 
 // probe33(A1)：每 2 帧采一次。同时统计全图最大亮度做自检（渲染失败会接近 0）。
@@ -596,7 +642,7 @@ static void P32Pixel(UIView *a, UIView *b) {
         if (cur[i] < 0) continue;
         int now = (cur[i] > 180) ? 1 : 0;
         int old = (la[i] == -999) ? now : ((la[i] > 180) ? 1 : 0);
-        if (now != old || mx < 50) {
+        if (now != old) {
             la[i] = cur[i];
             P25Append([NSString stringWithFormat:
                 @"t=%.2f PIX[%d] 亮度=%d 全图max=%d => %@ | 栏f=(%.0f,%.0f,%.0fx%.0f)\n",
@@ -604,10 +650,13 @@ static void P32Pixel(UIView *a, UIView *b) {
                 now ? @"白圆在(栏内画出来了→被遮挡)" : @"白圆不在(栏内也没画→自身问题)",
                 bar.frame.origin.x, bar.frame.origin.y, bar.frame.size.width, bar.frame.size.height]);
             if (!now) P32Shot(i, bar);
-        } else { la[i] = cur[i]; }
+        }
+        la[i] = cur[i];
     }
-    if (mx < 50 && lastMx >= 50) P25Append([NSString stringWithFormat:@"t=%.2f RENDER-FAIL max=%d\n", P7Now(), mx]);
-    lastMx = mx;
+    static int zeroRun;
+    if (mx < 50) { zeroRun++; } else { zeroRun = 0; }
+    if (zeroRun == 30) P25Append([NSString stringWithFormat:@"t=%.2f RENDER-FAIL 连续30次 max<50\n", P7Now()]);
+    (void)lastMx;
 }
 
 // probe32(A1)：每帧算一次「到底看不看得见」，翻转即记。
@@ -3578,6 +3627,7 @@ static void GCStylePinTabItems(UIWindow *win) {
               P30Snap(i, it, mk);
           } }
         P31Vis(i, it, mk, win);
+        P33Mask(i, it, mk);
 #endif
 
         // ★probe23(A2)：内容子项水平居中 —— 实测 SubItem 54 宽贴在 x=0，
