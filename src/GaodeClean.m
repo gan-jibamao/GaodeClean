@@ -659,6 +659,36 @@ static void P32Pixel(UIView *a, UIView *b) {
     (void)lastMx;
 }
 
+// probe36(A1)：把动画本身摊开 —— 键名 + from/to + 时长 + 表现层位置/变换。
+//   probe35 铁证：四次闪烁精确对应 WINTabBar 的 k1，但 model/pres 透明度恒 1.00、
+//   bounds 恒 393x60，视频显示两钮先消失再从下方偏外回来
+//   => 动画一定在 position/transform 上。
+static void P35Anim(int i, UIView *v) {
+    if (i < 0 || i > 2 || !v) return;
+    CALayer *L = v.layer;
+    NSArray<NSString *> *keys = L.animationKeys;
+    static NSArray *last[3]; static int has[3];
+    if (has[i] && ((!keys && !last[i]) || (keys && [keys isEqualToArray:last[i]]))) return;
+    has[i] = 1; last[i] = keys;
+    NSMutableString *s = [NSMutableString string];
+    for (NSString *k in keys) {
+        CAAnimation *a = [L animationForKey:k];
+        if ([a isKindOfClass:[CABasicAnimation class]]) {
+            CABasicAnimation *b = (CABasicAnimation *)a;
+            [s appendFormat:@"%@{from=%@ to=%@ dur=%.2f} ", k, b.fromValue, b.toValue, (double)b.duration];
+        } else if (a) {
+            [s appendFormat:@"%@{%@} ", k, NSStringFromClass(a.class)];
+        }
+    }
+    CALayer *pl = L.presentationLayer ?: L;
+    P25Append([NSString stringWithFormat:
+        @"t=%.2f ANM[%d] %@ %@| pos=(%.1f,%.1f)->(%.1f,%.1f) tf=(%.3f,%.3f,%.3f,%.3f) o=%.2f\n",
+        P7Now(), i, NSStringFromClass(v.class), s.length ? s : @"(无)",
+        L.position.x, L.position.y, pl.position.x, pl.position.y,
+        pl.transform.m11, pl.transform.m22, pl.transform.m41, pl.transform.m42,
+        (double)pl.opacity]);
+}
+
 // probe35(A1)：祖先链的「表现层」状态。
 //   probe34 铁证：item 自身 model/pres 全绿、无动画、树无变化，屏幕却整块消失。
 //   => 唯一没查的是祖先的 presentationLayer：祖先跑淡出动画时模型值恒 1.00，
@@ -3603,6 +3633,9 @@ static void GCStylePinTabItems(UIWindow *win) {
     P29Bar(CachedTabBar);
     P30Heartbeat(CachedTabItemA ? 1 : 0, CachedTabItemB ? 1 : 0, CachedTabBar ? 1 : 0, CachedTabBar);
     P34BarKids(CachedTabBar);
+    P35Anim(0, CachedTabBar);
+    P35Anim(1, CachedTabItemA);
+    P35Anim(2, CachedTabItemB);
 #endif
     UIView *arr[2] = { CachedTabItemA, CachedTabItemB };
     for (int i = 0; i < 2; i++) {
