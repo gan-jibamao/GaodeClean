@@ -513,6 +513,103 @@ static void P31Shot(int i, CGRect wr, UIWindow *win) {
     } @catch (__unused NSException *e) {}
 }
 
+// probe33(A1)：把 WINTabBar 单独渲染成位图（不含任何外部遮挡），采样按钮处亮度。
+//   probe32 铁证：9 条属性判据全绿(bits=0x000)，屏幕整块消失 => 属性对不等于像素对。
+//   栏内渲染有白圆而屏幕没有 => 被遮挡；栏内也没有 => 自身内容/裁剪问题。
+static unsigned char *P32RenderBar(UIView *bar, size_t *ow, size_t *oh) {
+    CGRect b = bar.bounds;
+    size_t w = (size_t)b.size.width, h = (size_t)b.size.height;
+    if (w < 8 || h < 8 || w > 2048 || h > 2048) return NULL;
+    unsigned char *buf = (unsigned char *)calloc(w * h * 4, 1);
+    if (!buf) return NULL;
+    CGColorSpaceRef cs = CGColorSpaceCreateDeviceRGB();
+    CGContextRef ctx = CGBitmapContextCreate(buf, w, h, 8, w * 4, cs, kCGImageAlphaPremultipliedLast);
+    CGColorSpaceRelease(cs);
+    if (!ctx) { free(buf); return NULL; }
+    CGContextTranslateCTM(ctx, 0, (CGFloat)h);
+    CGContextScaleCTM(ctx, 1.0, -1.0);
+    CGRect fr = bar.frame;
+    CGContextTranslateCTM(ctx, -fr.origin.x, -fr.origin.y);
+    @try { [bar.layer renderInContext:ctx]; } @catch (__unused NSException *e) {}
+    CGContextRelease(ctx);
+    *ow = w; *oh = h;
+    return buf;
+}
+
+// probe33(A2)：白圆消失时把「栏的渲染结果」存图，上限 6 张。
+static void P32Shot(int i, UIView *bar) {
+    static int shots;
+    if (shots >= 6) return;
+    size_t w = 0, h = 0;
+    unsigned char *buf = P32RenderBar(bar, &w, &h);
+    if (!buf) return;
+    shots++;
+    @try {
+        CGColorSpaceRef cs = CGColorSpaceCreateDeviceRGB();
+        CGContextRef c2 = CGBitmapContextCreate(buf, w, h, 8, w * 4, cs, kCGImageAlphaPremultipliedLast);
+        CGColorSpaceRelease(cs);
+        if (c2) {
+            CGImageRef cg = CGBitmapContextCreateImage(c2);
+            if (cg) {
+                UIImage *img = [UIImage imageWithCGImage:cg];
+                NSString *dir = [NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES) firstObject];
+                NSString *path = [dir stringByAppendingPathComponent:
+                                  [NSString stringWithFormat:@"GaodeClean-bar%d-%d.png", i, shots]];
+                [UIImagePNGRepresentation(img) writeToFile:path atomically:YES];
+                P25Append([NSString stringWithFormat:@"t=%.2f BARSHOT %@\n", P7Now(), path.lastPathComponent]);
+                CGImageRelease(cg);
+            }
+            CGContextRelease(c2);
+        }
+    } @catch (__unused NSException *e) {}
+    free(buf);
+}
+
+// probe33(A1)：每 2 帧采一次。同时统计全图最大亮度做自检（渲染失败会接近 0）。
+static void P32Pixel(UIView *a, UIView *b) {
+    static int tick;
+    if (++tick % 2) return;
+    UIView *bar = CachedTabBar;
+    if (!bar || !a || !b) return;
+    size_t w = 0, h = 0;
+    unsigned char *buf = P32RenderBar(bar, &w, &h);
+    if (!buf) return;
+    int mx = 0;
+    for (size_t k = 0; k < w * h; k++) {
+        int v = (buf[k * 4] * 30 + buf[k * 4 + 1] * 59 + buf[k * 4 + 2] * 11) / 100;
+        if (v > mx) mx = v;
+    }
+    CGRect fa = a.frame, fb = b.frame;
+    int cur[2] = { -1, -1 };
+    CGRect fr[2] = { fa, fb };
+    for (int i = 0; i < 2; i++) {
+        CGFloat px = CGRectGetMidX(fr[i]), py = CGRectGetMinY(fr[i]) + 47.0;
+        if (px >= 0 && py >= 0 && px < (CGFloat)w && py < (CGFloat)h) {
+            size_t o = ((size_t)py * w + (size_t)px) * 4;
+            cur[i] = (buf[o] * 30 + buf[o + 1] * 59 + buf[o + 2] * 11) / 100;
+        }
+    }
+    free(buf);
+    static int la[2] = { -999, -999 };
+    static int lastMx;
+    for (int i = 0; i < 2; i++) {
+        if (cur[i] < 0) continue;
+        int now = (cur[i] > 180) ? 1 : 0;
+        int old = (la[i] == -999) ? now : ((la[i] > 180) ? 1 : 0);
+        if (now != old || mx < 50) {
+            la[i] = cur[i];
+            P25Append([NSString stringWithFormat:
+                @"t=%.2f PIX[%d] 亮度=%d 全图max=%d => %@ | 栏f=(%.0f,%.0f,%.0fx%.0f)\n",
+                P7Now(), i, cur[i], mx,
+                now ? @"白圆在(栏内画出来了→被遮挡)" : @"白圆不在(栏内也没画→自身问题)",
+                bar.frame.origin.x, bar.frame.origin.y, bar.frame.size.width, bar.frame.size.height]);
+            if (!now) P32Shot(i, bar);
+        } else { la[i] = cur[i]; }
+    }
+    if (mx < 50 && lastMx >= 50) P25Append([NSString stringWithFormat:@"t=%.2f RENDER-FAIL max=%d\n", P7Now(), mx]);
+    lastMx = mx;
+}
+
 // probe32(A1)：每帧算一次「到底看不看得见」，翻转即记。
 //   probe31b 铁证：心跳零断档 + 属性全恒定 + 屏幕上整块没有
 //   => 成因只可能在「兄弟遮挡」或「自身绘制内容被清」，两者 SNAP 都没覆盖。
@@ -526,6 +623,8 @@ static void P31Vis(int i, UIView *v, CAShapeLayer *mk, UIWindow *win) {
         if (p.alpha < 0.05f) { bits |= 1u << 4; if (culprit.length < 2) culprit = [NSString stringWithFormat:@"%@.alpha=%.2f", NSStringFromClass(p.class), (double)p.alpha]; }
         if (p.layer.hidden) { bits |= 1u << 4; if (culprit.length < 2) culprit = [NSString stringWithFormat:@"%@.lh", NSStringFromClass(p.class)]; }
         if (p.layer.opacity < 0.05f) { bits |= 1u << 4; if (culprit.length < 2) culprit = [NSString stringWithFormat:@"%@.lo=%.2f", NSStringFromClass(p.class), (double)p.layer.opacity]; }
+        if (!P30IsIdentity(p.layer.transform)) { bits |= 1u << 4; if (culprit.length < 2) culprit = [NSString stringWithFormat:@"%@.xform", NSStringFromClass(p.class)]; }
+        if (p.bounds.size.width < 4.0f || p.bounds.size.height < 4.0f) { bits |= 1u << 4; if (culprit.length < 2) culprit = [NSString stringWithFormat:@"%@.bounds0", NSStringFromClass(p.class)]; }
     }
     if (v.hidden) bits |= 1u << 0;
     if (v.alpha < 0.05f) bits |= 1u << 1;
@@ -3492,6 +3591,9 @@ static void GCStylePinTabItems(UIWindow *win) {
         }
         [CATransaction commit];
     }
+#ifdef GAODECLEAN_PROBE
+    P32Pixel(CachedTabItemA, CachedTabItemB);
+#endif
 }
 // ★trial25(A2)：重入守卫包装 —— pin 现有帧级驱动/容器钩子/子控件钩子/layoutSubviews 钩子
 //   四路并发，写 frame 会级联触发钩子，无守卫有自激风暴风险。
