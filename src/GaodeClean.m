@@ -3188,6 +3188,21 @@ static void GCStyleShellEnforce(void) {                    // 60fps 调用（只
 //   ⇒ 纯按类名 + 几何识别；不做任何 alpha / 白底 / 内容强制（0.9.29 就没有这些）。
 static __weak UIView *CachedMapType = nil;
 
+// probe48(A2)：2D/3D 钮的文字判据。
+//   ★probe43 失败的真正原因：那道闸门只找 "2D"，可**地图在 2D 模式时按钮显示的是「3D」**
+//     （点一下去 3D）。老大截图实证：白圆里就是「3D」两个字。所以必须两串都认。
+static BOOL GCStyleHas2D3DText(UIView *v) {
+    for (UIView *s in v.subviews) {
+        if ([s isKindOfClass:[UILabel class]]) {
+            NSString *t = ((UILabel *)s).text;
+            if ([t isEqualToString:@"2D"] || [t isEqualToString:@"3D"] ||
+                [t isEqualToString:@"2d"] || [t isEqualToString:@"3d"]) return YES;
+        }
+        if (s.subviews.count && GCStyleHas2D3DText(s)) return YES;
+    }
+    return NO;
+}
+
 static void GCStyleMapTypeDiscover(UIWindow *win) {        // 5Hz：只做树遍历发现
     if (!win) return;
     if (CachedMapType && CachedMapType.window) return;
@@ -3195,7 +3210,8 @@ static void GCStyleMapTypeDiscover(UIWindow *win) {        // 5Hz：只做树遍
         CachedMapType = nil;
         CGFloat sw = win.bounds.size.width, sh = win.bounds.size.height;
         NSMutableArray<UIView *> *stack = [NSMutableArray arrayWithObject:win];
-        NSUInteger budget = 700;
+        NSUInteger budget = 1500;                     // probe48：预算 700→1500，确保能走到右下角
+        UIView *byText = nil, *byCompass = nil;
         while (stack.count && budget--) {
             UIView *v = [stack lastObject]; [stack removeLastObject];
             [stack addObjectsFromArray:v.subviews];
@@ -3205,87 +3221,59 @@ static void GCStyleMapTypeDiscover(UIWindow *win) {        // 5Hz：只做树遍
             if (fabs(r.size.width - r.size.height) > 4) continue;      // 近正方
             if (CGRectGetMidX(r) < sw * 0.72) continue;                // 右侧列
             if (CGRectGetMidY(r) > sh * 0.90) continue;                // 排除底栏区
-            if (![NSStringFromClass(v.class) containsString:@"CompassView"]) continue;
-            CachedMapType = v;
-            break;
+            // probe48(A2)：双判据 —— ① 子树里有 2D/3D 文字（语义，最准，优先）
+            //                        ② 类名含 CompassView（历史口径，兜底）
+            if (GCStyleHas2D3DText(v)) { byText = v; break; }
+            if (!byCompass && [NSStringFromClass(v.class) containsString:@"CompassView"]) byCompass = v;
         }
+        CachedMapType = byText ? byText : byCompass;
+#ifdef GAODECLEAN_PROBE
+        { static int n = 0; if (CachedMapType && n < 3) { n++;
+            CGRect r = [CachedMapType convertRect:CachedMapType.bounds toView:win];
+            P7Note(@"2DFIND by=%@ cls=%@ win=(%.0f,%.0f,%.0f,%.0f)",
+                   byText ? @"text" : @"compass", @(class_getName(object_getClass(CachedMapType))),
+                   r.origin.x, r.origin.y, r.size.width, r.size.height); } }
+#endif
     }
 }
 
-// trial51(A4)：纯几何对齐，无树遍历 ⇒ 可进 60fps。App 每帧都能挪，我们每帧拉回。
-// ── 2D/3D 钮对齐：当前口径（0.9.98 整理，改前先读这 5 行）─────────────────
-//   基准 cap = (CachedLiteGroup && 在窗口) ? CachedLiteGroup : CachedRight
-//   目标① 钮底 = capTop − GCGapMapType(13.3)            ← 本函数
-//   目标② 钮顶 = capTop − GCBtnAboveCapTop(57.3)        ← GCStylePinOne 的 is2D 分支
-//   两者恒等：57.3 = 13.3 + 44（钮边长）⇒ 改任一处必须同步另一处
-//   守卫：钮 hidden / alpha<0.05 不钉；mt.layer 有动画在跑不钉（probe41 B1）
+// ── 2D/3D 钮：当前口径（probe48 重写，改前先读这 8 行）───────────────────────
+//   现状：该钮**已被彻底移除**（hidden+alpha=0+禁交互，60fps 每帧压回）。不再纠位。
+//
+//   ★这颗钮到底是什么（probe47 血的教训）：
+//     · 右下有一组 44×88 胶囊 = WINAJXCombinedWidgetView，装的是**路线/导航**
+//     · 2D/3D 是**另一颗独立** 44×44 白圆（类名含 CompassView），与车机钮同一行
+//     · probe47 把前者当成 2D 隐藏 ⇒ 「3D 还在、导航没了」。两者几何接近，别混。
+//
+//   ★为什么 probe43 的标签闸门恒 0：
+//     那道闸门只找文本 "2D"，可**地图在 2D 模式时按钮显示的是「3D」**（点一下去 3D）。
+//     现在 GCStyleHas2D3DText 两串都认，并且优先于「类名含 CompassView」的历史兜底。
+//
+//   发现：GCStyleMapTypeDiscover（5Hz，树遍历，预算 1500）
+//   动作：GCStyleMapTypeAlign（60fps，压回隐藏；调用点名字保留以免扩散改动）
 // ─────────────────────────────────────────────────────────────────────
-// ── probe43(A1/A2)：本版本把「2D / 导航」并成了一颗 44×88 胶囊 ─────────────────
-//   截图实测（1179×2556 @3x）：右侧胶囊 (339.3, 667.3) 43.3×87.3，
-//   左侧车机钮 (10.3, 608.3) 43.3×43.3 ⇒ 两者首行本应同高，实际错开 59pt。
-//   原因：该胶囊不再是「CompassView 44×44」，GCStyleMapTypeDiscover 认不出 ⇒
-//   CachedMapType 恒 nil ⇒ GCStyleMapTypeAlign 立刻 return，整组停在原生位。
-//   兜底：无独立 2D 钮时，把 CachedRight（右下控件）**顶边**对齐到车机钮顶边；
-//   两者首行都是 44 高 ⇒ 2D 与车机同高，胶囊底边落在 695.6，仍在底栏（768）之上。
-//   守卫（缺一不动，宁可不动也不挪错）：
-//     · 必须能在子树里找到一个 2 字符且以 'D' 结尾的 UILabel（即「2D」/「3D」）
-//       —— 用来区分「2D/导航组」与「定位/路线胶囊」，两者几何完全一样
-//     · 宽度 40~48、高度 76~100、右列（midX ≥ 72% 屏宽）、无动画在跑
 
-static void GCStyleHideMapTypeGroup(UIWindow *win) {
-    // 0.9.99：老大定「2D 那个按钮彻底移除」——右下 44×88 胶囊（WINAJXCombinedWidgetView）
-    //   本版本把「2D/3D」和「路线/导航」并成了同一颗胶囊，几何上无法只切一半
-    //   （切上半格会剩一个空白胶囊），所以整颗移除。
-    //   ★App 会周期性把它重新显示（hid 在 1/0 之间反复切换，probe44 日志实证），
-    //   本函数挂在 60fps 通道上，每帧压回隐藏，幂等。
-    //   守卫：宽 40~48 / 高 76~100 / 右列 midX≥72%屏宽 —— 只认这颗胶囊，别的一律不碰。
-    UIView *grp = CachedRight;
-    if (!grp || !grp.window) return;
-    CGRect gr = GCModelWinRect(grp, win);
-    if (gr.size.width  < 40.0f || gr.size.width  > 48.0f) return;
-    if (gr.size.height < 76.0f || gr.size.height > 100.0f) return;
-    if (CGRectGetMidX(gr) < win.bounds.size.width * 0.72) return;
-    if (grp.hidden && grp.alpha < 0.01f) return;            // 已彻底不可见 ⇒ 无事可做
-    grp.hidden = YES;
-    grp.alpha = 0.0f;
-    grp.userInteractionEnabled = NO;
-#ifdef GAODECLEAN_PROBE
-    { static BOOL logged = NO;
-      if (!logged) { logged = YES;
-          P7Note(@"RM2D 已隐藏 cls=%@ win=(%.0f,%.0f,%.0f,%.0f) sub=%lu",
-                 @(class_getName(object_getClass(grp))), gr.origin.x, gr.origin.y,
-                 gr.size.width, gr.size.height, (unsigned long)grp.subviews.count);
-      } }
-#endif
-}
 
 static void GCStyleMapTypeAlign(UIWindow *win) {
+    // ── probe48(A3)：从「对齐」改为「移除」──────────────────────────────
+    //   老大指令：把 2D 那个按钮彻底移除。
+    //   前情：probe47 我误把 CachedRight（右下 44×88）当成它隐藏了，结果
+    //         「3D 钮还在、下面的路线/导航没了」——那颗胶囊装的是路线/导航，
+    //         2D/3D 是**另一颗** 44×44 白圆（老大截图：白圆里写着「3D」）。
+    //   本函数挂在 60fps 通道，App 重显就压回，幂等。
     if (!win) return;
     UIView *mt = CachedMapType;
-    if (!mt || !mt.window) { GCStyleHideMapTypeGroup(win); return; }       // 0.9.99：无独立 2D 钮 ⇒ 直接移除整颗胶囊
-    if (mt.hidden || mt.alpha < 0.05f) return;   // probe28(A5)：隐形时不钉，避免与 App 隐藏态打架
-    UIView *cap = (CachedLiteGroup && CachedLiteGroup.window) ? (UIView *)CachedLiteGroup : (UIView *)CachedRight;
-    if (!cap || !cap.window) return;                       // 无胶囊 ⇒ 无参照，不动
-    CGRect cr = [cap convertRect:cap.bounds toView:win];
-    CGRect mr = [mt convertRect:mt.bounds toView:win];
-    CGFloat targetBottom = cr.origin.y - GCGapMapType;    // 0.9.98（A1）：裸 13.3 → 已有常量
-    CGFloat dy = targetBottom - CGRectGetMaxY(mr);
-    if (fabs(dy) < 1.0) return;                            // 幂等：已达标不写
-    // ★probe41(B1)：App 正在做显隐动画时不纠位，且不再 removeAllAnimations。
-    //   铁证：日志 32 条「PIN 2D钮 y 584.0→653.7」全部集中在 WINPermanentCompassView
-    //   的 alpha 1.00→0.00 / 0.00→1.00 时刻（17.89 / 23.10 / 56.57 / 58.01 / 87.56 …）
-    //   —— 原来我们在这里杀掉 App 的淡入淡出动画，并把它的过渡位（540）硬拖回 609.7，
-    //   造成 2D 钮在过渡中单帧跳位。原生过渡不该被我们打断。
-    if (mt.layer.animationKeys.count > 0) return;
-    CGRect f = mt.frame;
-    f.origin.y += dy;                                      // 只改 y，不碰尺寸/透明度
-    [CATransaction begin]; [CATransaction setDisableActions:YES];
-    mt.frame = f;
+    if (!mt || !mt.window) return;
+    if (mt.hidden && mt.alpha < 0.01f) return;             // 已彻底不可见 ⇒ 无事可做
+    mt.hidden = YES;
+    mt.alpha = 0.0f;
+    mt.userInteractionEnabled = NO;
 #ifdef GAODECLEAN_PROBE
-    P25Append([NSString stringWithFormat:@"t=%.2f PIN 2D钮 y %.1f→%.1f a=%.2f hid=%d\n",
-               P7Now(), CGRectGetMaxY(mr), targetBottom, mt.alpha, mt.hidden ? 1 : 0]);
+    { static int n = 0; if (n < 3) { n++;
+        CGRect r = [mt convertRect:mt.bounds toView:win];
+        P7Note(@"2DHIDE cls=%@ win=(%.0f,%.0f,%.0f,%.0f)",
+               @(class_getName(object_getClass(mt))), r.origin.x, r.origin.y, r.size.width, r.size.height); } }
 #endif
-    [CATransaction commit];
 }
 
 static void GCStyleAlignMapType(UIWindow *win) {           // 5Hz 入口：发现 + 对齐
