@@ -170,7 +170,7 @@ OBFHIT=$(strings -a "$DYL" | grep -cE "$GC_OBF_PROBE" || true)
 if [ "${OBFHIT:-0}" -eq 0 ]; then
   ok "字符串混淆生效（抽样 6 类敏感明文命中 0）"
 else
-  bad "明文未混淆：命中 ${OBFHIT} 条（$GC_OBF_PROBE）"
+  bad "明文未混淆：命中 ${OBFHIT} 条（${GC_OBF_PROBE:-}）"
 fi
 # 7b 中文关键词按 UTF-16 形状核验（Objective-C 中文字面量编成 UTF-16）
 CNHIT=0

@@ -3286,7 +3286,7 @@ static void GCCapTrace(UIWindow *win) {
     {
         NSMutableArray<UIView *> *q = [NSMutableArray arrayWithObject:win];
         NSUInteger budget = 1200;
-        Class capCls = NSClassFromString(@"WINAJXCombinedWidgetView");
+        Class capCls = NSClassFromString(GCStrAt(128));   // 混淆表索引，禁止明文类名
         if (!capCls) return;
         for (NSUInteger i = 0; i < q.count && budget--; i++) {
             UIView *v = q[i];
