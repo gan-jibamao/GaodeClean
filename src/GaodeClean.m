@@ -3376,6 +3376,72 @@ static void GCCapTrace(UIWindow *win) {
 static void GCCapTrace(UIWindow *win);            // probe50：前置声明（5Hz 用）
 #endif
 
+// ════════════════════════════════════════════════════════════════════
+//  0.9.101（老大指令「全改」）：统一深色压白
+//  背景：per-point 修法（5 处硬编码）只覆盖了其中一部分。实测截图里
+//        底栏仍有白圆（左定位 / 右「我的」），图标又是白色 ⇒ 白底白图标 = 一片白。
+//  策略：不逐个认控件，改为**按几何批量压**：窗口内凡是
+//        · 近圆形（宽高差 ≤6pt）
+//        · 边长 44~60pt
+//        · 底色亮度 > 0.80（亮底）
+//        · 位于屏幕下半部
+//        且当前为深色主题的，统一写 white:0.16 alpha:0.92。
+//  幂等：值相同不写。亮色主题下整段直接返回，零影响。
+//  ⚠ 只改 backgroundColor（模型层），不碰 frame/alpha/hidden。
+// ════════════════════════════════════════════════════════════════════
+static void GCStyleDarkenRoundWidgets(UIWindow *win) {
+    if (!win) return;
+    BOOL dark = NO;
+    if (@available(iOS 13.0, *)) {
+        UITraitCollection *tc = win.traitCollection;
+        if (tc.userInterfaceStyle == UIUserInterfaceStyleDark) dark = YES;
+    }
+    if (!dark) return;                       // 亮色主题：一律不碰
+    static int busy;
+    if (busy) return;
+    busy = 1;
+    CGFloat sh = win.bounds.size.height;
+    UIView *root = (CachedTabBar && CachedTabBar.window) ? CachedTabBar.superview : win;
+    if (!root) root = win;
+    NSMutableArray<UIView *> *stack = [NSMutableArray arrayWithObject:root];
+    NSUInteger budget = 400;
+    UIColor *fill = GCStyleFillColor(win);
+    while (stack.count && budget--) {
+        UIView *v = [stack lastObject]; [stack removeLastObject];
+        if (v.hidden || v.alpha < 0.05f) continue;
+        if (v.subviews.count < 60) [stack addObjectsFromArray:v.subviews];
+        CGRect r = [v convertRect:v.bounds toView:win];
+        if (r.size.width < 42 || r.size.width > 62) continue;
+        if (fabs(r.size.width - r.size.height) > 6) continue;    // 近圆形
+        if (CGRectGetMidY(r) < sh * 0.85) continue;              // 只认底部 15%（底栏区）
+        if (CGRectGetMidX(r) < 0) continue;
+        UIColor *bg = v.backgroundColor;
+        if (!bg) continue;
+        CGFloat a = CGColorGetAlpha(bg.CGColor);
+        if (a < 0.15f) continue;                                 // 几乎透明的不管
+        CGFloat w0 = 0, al = 0;
+        if (![bg getWhite:&w0 alpha:&al]) {
+            CGFloat rr = 0, gg = 0, bb = 0;
+            if (![bg getRed:&rr green:&gg blue:&bb alpha:&al]) continue;
+            w0 = 0.299f * rr + 0.587f * gg + 0.114f * bb;        // 感知亮度
+        }
+        if (w0 < 0.80f) continue;                                // 只压亮底
+        if (!CGColorEqualToColor(v.backgroundColor.CGColor, fill.CGColor)) {
+            [CATransaction begin]; [CATransaction setDisableActions:YES];
+            v.backgroundColor = fill;
+            [CATransaction commit];
+#ifdef GAODECLEAN_PROBE
+            if (!GCProbeBuf6) GCProbeBuf6 = [NSMutableString string];
+            [GCProbeBuf6 appendString:[NSString stringWithFormat:
+                @"\nDARK cls=%@ win=(%.0f,%.0f,%.0f,%.0f) w0=%.2f\n",
+                @(class_getName(object_getClass(v))), r.origin.x, r.origin.y,
+                r.size.width, r.size.height, w0]];
+#endif
+        }
+    }
+    busy = 0;
+}
+
 static void GCStyleMapTypeAlign(UIWindow *win) {
     // ── probe48(A3)：从「对齐」改为「移除」──────────────────────────────
     //   老大指令：把 2D 那个按钮彻底移除。
@@ -3385,6 +3451,20 @@ static void GCStyleMapTypeAlign(UIWindow *win) {
     //   本函数挂在 60fps 通道，App 重显就压回，幂等。
     if (!win) return;
     UIView *mt = CachedMapType;
+    // probe55：诊断用 —— 打印真实 traitCollection，确认高德是否跟随系统深色
+#ifdef GAODECLEAN_PROBE
+    { static int n = 0; if (n < 3) { n++;
+        UITraitCollection *tc = mt.traitCollection ?: win.traitCollection;
+        BOOL dark = NO;
+        if (@available(iOS 13.0, *)) dark = (tc.userInterfaceStyle == UIUserInterfaceStyleDark);
+        if (!GCProbeBuf6) GCProbeBuf6 = [NSMutableString string];
+        [GCProbeBuf6 appendString:[NSString stringWithFormat:
+            @"\nTRAIT#%d style=%ld dark=%d winStyle=%ld override=%ld\n",
+            n, (long)(tc.userInterfaceStyle), dark,
+            (long)(win.traitCollection.userInterfaceStyle),
+            (long)(win.overrideUserInterfaceStyle)]];
+    } }
+#endif
     if (!mt || !mt.window) return;
     if (mt.hidden && mt.alpha < 0.01f) return;             // 已彻底不可见 ⇒ 无事可做
     mt.hidden = YES;
@@ -4045,6 +4125,7 @@ static void GCStylePinWidgets(UIWindow *win) {
     }
     GCStylePinBusy = YES;
     GCStylePinWidgetsInner(win);
+    GCStyleDarkenRoundWidgets(win);   // 0.9.101：深色下统一压白（底栏圆钮等，无条件执行）
 #ifdef GAODECLEAN_PROBE
     P33Watch(CachedCar, 0);
     P33Watch((UIView *)(CachedLiteGroup && CachedLiteGroup.window ? CachedLiteGroup : CachedRight), 1);
