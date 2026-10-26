@@ -3254,6 +3254,61 @@ static void GCStyleMapTypeDiscover(UIWindow *win) {        // 5Hz：只做树遍
 // ─────────────────────────────────────────────────────────────────────
 
 
+// ── probe49(A1/A2/A4)：导航胶囊「晚出现」定责探针 ────────────────────────────
+//   现象：地图 t=2.0s 出现，右下 44×88 胶囊 t=6.3s 才出现（视频实测差 4.3s）；
+//         老大说原生「秒出」。但 probe48 日志里 `时间线 胶囊 0.0/0.0` = 我们从未见过它，
+//         同时又 `写入次数 胶囊=2` —— 两个统计自相矛盾，必须用直接日志澄清。
+//   本探针只读不写，不改任何行为。
+//   三件事：
+//     ① 胶囊实例替换 / hidden 翻转的准确时刻（相对启动 t0），与视频对齐
+//     ② 翻转成可见那一刻的调用栈 —— 栈里有 GaodeClean 就是我们，没有就是 App
+//     ③ 逐层父容器状态 —— 隐藏到底挂在哪一层
+#ifdef GAODECLEAN_PROBE
+static void GCCapTrace(UIWindow *win) {
+    if (!win) return;
+    static __weak UIView *lastInst;
+    static int lastHid = -1;
+    static double t0;
+    static int nInst, nHid;
+    if (t0 <= 0) {                                  // A4：起点锚，日志与视频对齐用
+        t0 = P7Now();
+        P25Append([NSString stringWithFormat:
+            @"t=0.00 CAP-T0 锚点（P7Now=%.2f）—— 之后所有 CAP-* 都相对此刻\n", t0]);
+    }
+    UIView *cap = CachedRight;
+    if (!cap || !cap.window) return;
+
+    if (cap != lastInst) {
+        lastInst = cap; lastHid = -1;
+        if (nInst < 6) { nInst++;
+            P25Append([NSString stringWithFormat:
+                @"t=%.2f CAP-INST#%d cls=%@ win=%@ sub=%lu hid=%d\n",
+                P7Now() - t0, nInst, @(class_getName(object_getClass(cap))),
+                NSStringFromCGRect(GCModelWinRect(cap, win)),
+                (unsigned long)cap.subviews.count, cap.hidden ? 1 : 0]);
+        }
+    }
+    if ((int)cap.hidden != lastHid) {
+        int was = lastHid;
+        lastHid = (int)cap.hidden;
+        if (nHid < 12) { nHid++;
+            NSMutableString *chain = [NSMutableString string];
+            UIView *p = cap.superview;
+            for (int i = 0; i < 4 && p; i++, p = p.superview) {
+                [chain appendFormat:@"\n      L%d %@ hid=%d a=%.2f op=%.2f",
+                 i, @(class_getName(object_getClass(p))), p.hidden ? 1 : 0,
+                 p.alpha, p.layer.opacity];
+            }
+            P25Append([NSString stringWithFormat:
+                @"t=%.2f CAP-HID %d→%d a=%.2f op=%.2f anims=%lu%@\n",
+                P7Now() - t0, was, (int)cap.hidden, cap.alpha, cap.layer.opacity,
+                (unsigned long)cap.layer.animationKeys.count, chain]);
+            if (!cap.hidden) P36Who();      // 首次变可见：抓调用栈定责
+        }
+    }
+}
+#endif
+
 static void GCStyleMapTypeAlign(UIWindow *win) {
     // ── probe48(A3)：从「对齐」改为「移除」──────────────────────────────
     //   老大指令：把 2D 那个按钮彻底移除。
@@ -3360,6 +3415,16 @@ static void GCStylePinOne(UIView *v) {
                     double n40 = CACurrentMediaTime();
                     if (n40 - sP40Last > 0.3) {
                         sP40Last = n40;
+#ifdef GAODECLEAN_PROBE
+                        // probe49(A3)：自证 —— 我们到底有没有把父容器强行设出来？
+                        //   触发条件：p40.hidden || p40.alpha<0.05 || p40.opacity<0.05
+                        //   若这是 App 启动期的正常隐藏，我们就是把它提前拽亮了。
+                        P25Append([NSString stringWithFormat:
+                            @"t=%.2f P40-WRITE cls=%@ hid=%d→0 a=%.2f→1.00 op=%.2f→1.00 子=%@\n",
+                            P7Now(), @(class_getName(object_getClass(p40))),
+                            p40.hidden ? 1 : 0, p40.alpha, p40.layer.opacity,
+                            @(class_getName(object_getClass(v)))]);
+#endif
                         [CATransaction begin]; [CATransaction setDisableActions:YES];
                         p40.hidden = NO; p40.alpha = 1.0f; p40.layer.opacity = 1.0f;
                         [CATransaction commit];
@@ -3921,6 +3986,9 @@ static void GCStylePinWidgets(UIWindow *win) {
     P33Watch(Cached2D, 2);
     if (++P26Tick >= 3) { P26Tick = 0; P26TreeDiff(win, (float)P7Now()); }
     GCStyleMapTypeAlign(win);   // trial51(A4)：2D/3D 钮帧级对齐（App 每帧都能挪，5Hz 追不上）
+#ifdef GAODECLEAN_PROBE
+    GCCapTrace(win);            // probe49：导航胶囊晚出现定责（只读）
+#endif
     P37Sample();
     P39Sample();
     P43Snap();
