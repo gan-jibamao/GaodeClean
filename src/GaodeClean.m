@@ -3270,7 +3270,12 @@ static void GCStyleAlignRightGroupToCar(UIWindow *win) {
     if (cr.size.height < 30.0f || cr.size.height > 60.0f) return;
     CGFloat dy = cr.origin.y - gr.origin.y;                // 顶边对齐
     if (fabs(dy) < 1.0f) return;                           // 幂等
-    if (grp.layer.animationKeys.count > 0) return;         // 动画在跑不插手
+    // probe45：不能用 animationKeys.count 当闸门 —— App 给这个容器挂了一个**常驻**动画键
+    //   （dump 里 key=1 恒为 1），导致永远不挪。只认「真的在飞行中」：表现层与模型层不一致。
+    //   实测 m=(339,667) v=(339,667) ⇒ 静止，可以安全改写。
+    { CALayer *pl = grp.layer.presentationLayer;
+      if (pl) { CGPoint mp = grp.layer.position, pp = pl.position;
+          if (fabs(pp.x - mp.x) > 0.6f || fabs(pp.y - mp.y) > 0.6f) return; } }
     CGRect f = grp.frame;
     f.origin.y += dy;
     [CATransaction begin]; [CATransaction setDisableActions:YES];
