@@ -106,6 +106,9 @@ static char AlignedKey;
 static dispatch_source_t ScheduleTimer;
 static __weak UIView *BarParent;
 static __weak UIView *CachedCar, *CachedRight, *CachedRoute;
+#ifdef GAODECLEAN_PROBE
+static int GCCapEntered;                 // probe52：GCCapTrace 进入计数（dump 可读）
+#endif
 // 0.9.16（A2）：App 原生「轻量控件组」容器（中部裸露胶囊的真身，见 A1）
 static __weak UIView *CachedLiteGroup;
 static __weak UIView *Cached2D;          // trial27：2D/3D 模式圆钮（缩放时 App 重排会撂回原生位）
@@ -2619,6 +2622,9 @@ static void GCProbeDump7(NSString *reason) {
         TickCount, SearchBarSettled, P7PinCalls, P7DiscCalls, P7DiscSkips, P7NTicks, P7WTicks];
     [o appendFormat:@"天气行门: 评估=%d 通过=%d bar非视图=%d\n", P7WGates[2], P7WGates[0], P7WGates[1]];
     [o appendFormat:@"写入次数: 车机=%d 胶囊=%d 路线=%d 2D=%d\n", P7Writes[0], P7Writes[1], P7Writes[2], P7Writes[3]];
+#ifdef GAODECLEAN_PROBE
+    [o appendFormat:@"CAPTRACE: 进入=%d\n", GCCapEntered];
+#endif
     [o appendFormat:@"时间线(s): 车机 见=%.1f 钉=%.1f | 胶囊 %.1f/%.1f | 路线 %.1f/%.1f | 天气门首过=%.1f | KEY=%.1f\n",
         P7FirstSeen[0], P7FirstPin[0], P7FirstSeen[1], P7FirstPin[1], P7FirstSeen[2], P7FirstPin[2], P7FirstSeen[4], P7FirstKey];
     [o appendFormat:@"P8驱动: fires=%ld(%.0f/s) busySkip=%ld noWin=%ld 容器钩=%ld 分歧帧=%ld 车机Y[min=%.1f max=%.1f 跨度=%.1f]\n",
@@ -3265,6 +3271,7 @@ static void GCStyleMapTypeDiscover(UIWindow *win) {        // 5Hz：只做树遍
 //     ③ 逐层父容器状态 —— 隐藏到底挂在哪一层
 #ifdef GAODECLEAN_PROBE
 static void GCCapTrace(UIWindow *win) {
+    GCCapEntered++;                                // 无条件自增，证明函数被调用
     if (!win) return;
     static __weak UIView *lastInst;
     static int lastHid = -1;
