@@ -10,7 +10,7 @@
 | **Repo** | <https://gan-jibamao.github.io/> · Section `jibamao-Tweaks` |
 | **目标** | 高德地图 / AMap `com.autonavi.amap`（**版本限制已取消，全版本自适应**） |
 | **架构** | rootless `arm64` · RootHide `arm64e` · TrollFools 注入用裸 `arm64` dylib |
-| **许可** | 私有备份，不对外分发 |
+| **许可** | MIT（见 [LICENSE](LICENSE)） |
 
 ---
 
@@ -122,7 +122,7 @@ scripts/gate.sh           ★ 一键门禁（探针口径语法 / make check / �
 scripts/build.sh          ★ 一键出包（生成 control、临时改版本号并保证还原、构建、门禁、交付）
 controls/                 历史版本 control 存档（control.trialNN / control.probeNN，各版本可复现）
 scripts/gen_obf.py        字符串混淆生成器（可 --from-list 从清单逐字节复现数据头）
-scripts/obf_strings.txt   ★ 明文清单（私有仓库保留；**刻意不随源码包分发**）
+scripts/obf_strings.txt   ※ 混淆明文清单 —— **不入仓库、不随源码分发**（仅本机自测用，已在 .gitignore）
 scripts/obf_selftest.c    主机回环自测（把密文解回明文逐条比对 + 校验 FNV 摘要）
 src/GCStr.h               混淆串解码运行时（懒解码 + 缓存）
 src/GCObfMath.h           纯 C 解码数学（主机与设备同一份）
