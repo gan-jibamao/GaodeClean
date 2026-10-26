@@ -118,6 +118,9 @@ Makefile                  ★ 正式构建入口（theos 工程，GitHub Actions
 Makefile.local            本地临时验证构建入口（iSH clang 链，不产出发布资产）
 .github/workflows/build-theos.yml  ★ CI：macos-14 + theos，双架构出包 + 门禁 + 打 tag 自动发 Release
 scripts/verify_deb.sh     deb 核验门禁（载荷前缀 / 架构切片 / 日志剥离 / 混淆生效 / 符号剥离 / 过滤器）
+scripts/gate.sh           ★ 一键门禁（探针口径语法 / make check / 双包 verify_deb / 二进制取证）
+scripts/build.sh          ★ 一键出包（生成 control、临时改版本号并保证还原、构建、门禁、交付）
+controls/                 历史版本 control 存档（control.trialNN / control.probeNN，各版本可复现）
 scripts/gen_obf.py        字符串混淆生成器（可 --from-list 从清单逐字节复现数据头）
 scripts/obf_strings.txt   ★ 明文清单（私有仓库保留；**刻意不随源码包分发**）
 scripts/obf_selftest.c    主机回环自测（把密文解回明文逐条比对 + 校验 FNV 摘要）
@@ -188,6 +191,32 @@ $CLANG -target arm64e-apple-ios15.0 -isysroot $SDK \
   src/GaodeClean.m -o dist/GaodeClean-arm64e.dylib
 python3 scripts/fixarch.py dist/GaodeClean-arm64e.dylib 2
 ```
+
+### 一键门禁 / 一键出包（0.9.98 新增）
+
+手工跑门禁要记 6 条命令、4 个坑，现在固化进两个脚本：
+
+```bash
+# 只跑源码门禁（改完代码先跑这个）
+scripts/gate.sh
+
+# 出包（自动生成 control、临时改 kGCVersion、构建、门禁、交付；退出时必定还原源码）
+scripts/build.sh release 0.9.98+trial55     # 正式包
+scripts/build.sh probe   0.9.98+probe43     # 探针包
+```
+
+`gate.sh` 覆盖的四道门禁与它们各自防的坑：
+
+| 门 | 内容 | 防的坑 |
+|:--|:--|:--|
+| 1 | 探针口径 `clang -fsyntax-only -DGAODECLEAN_PROBE=1` | `make check` 只 grep warning，**抓不到 error** |
+| 2 | `make check` | 剥离/不剥离双跑 0 警告 + 混淆回环 295/295 + FNV 基线 |
+| 3 | `verify_deb` 双包 | 载荷路径、架构、维护脚本、符号剥离 |
+| 4 | 二进制取证 | 正式包探针残留必须 0；钩子符号必须还在；版本串必须可见 |
+
+取证那一关的两个已知陷阱（都写进脚本了）：纯 ASCII 串要用 `strings -a`，带中文的（内存里 UTF-16LE）要用 `strings -a -e l`；`_class_getName` 在正式包里缺失是**正常的**（只被探针块引用）。
+
+`build.sh` 的 `kGCVersion` 还原用 `trap EXIT INT TERM` —— 构建失败或 Ctrl-C 也会还原，不会再出现「源码里留着 probe 版本号」的脏提交。交付目录默认落在 `/var/minis/attachments/GaodeClean-<ver>-<suffix>/`（可用 `DEST=` 覆盖），并附 `control.<suffix>` 存档以便复现。
 
 ### 打包 deb（本地链，仅临时验证）
 
