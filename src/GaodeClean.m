@@ -30,6 +30,14 @@ static const CGFloat GCGapCapsule = 20.0;
 //   原生：2D 按钮顶 536.7 + 高 44 → 底 580.7；胶囊顶 594 ⇒ 间隙 13.3
 //   （0.9.18 用的 15 偏 1.7pt；本轮「真机 diag + 原生录屏模板匹配」双证）
 static const CGFloat GCGapMapType = 13.3;
+// 0.9.98（A2）：2D/3D 钮顶边相对胶囊顶的距离 —— 57.3 = GCGapMapType(13.3) + 钮边长(44)
+//   即「胶囊顶 − 13.3 = 钮底；钮底 − 44 = 钮顶」⇒ 钮顶 = 胶囊顶 − 57.3。
+//   probe9 铁证：原生 win y = 609.7 = 667 − 57.3。原为裸数字，收敛为具名常量，防改一处漏一处。
+//   注：钮的尺寸不在此处写死 —— 一律用当前 frame 的 wr.size，App 改尺寸时自动跟随。
+static const CGFloat GCBtnAboveCapTop = 57.3;
+// 0.9.98（A3）：SearchBarView 尚未就绪时，用「底栏底 − 52.4」估算搜索栏顶
+//   实测 702.6 − 755 ≈ −52.4；三处兜底同值同义，收敛为常量防漂移。
+static const CGFloat GCSearchTopFromPin = 52.4;
 
 // 对外签名（供 log / 诊断 / 二次核对使用）
 const char *GaodeCleanSignature(void) {
@@ -2879,9 +2887,12 @@ static void P19Flush(NSString *reason) {
 }
 
 // ★probe20(A1)：setter 钩子已全部删除 —— probe19 的 setFrame:/setCenter:/setTransform:
-//   在 WINTabBarSubItem 与 WINTabBarItem（父子类）上重复挂钩，导致"原实现"指向自身，
+//   对同一实现做了重复挂钩（当时误以为 WINTabBarSubItem 是 WINTabBarItem 的子类，
+//   probe42 实测两者并无继承关系：白名单判继承 ⇒ SUBhook=0），使"原实现"指向自身，
 //   真机崩溃报告 510 帧同一返回地址 0x114d0 = 纯自递归栈溢出（EXC_BAD_ACCESS / 栈区地址）。
 //   现在改为零 swizzle：只用"我们自己 pin 的纠正量"间接证明 App 动过。
+//   注：probe42 的挂钩改用「运行时类捕获 + 跨组去重」，且 Replace() 先 class_addMethod，
+//       根本上不会再出现"原实现指向自身"。
 static void P19NoteCorr(NSString *cls, CGFloat dx) {
     if (!P19Log) P19Log = [NSMutableString string];
     [P19Log appendFormat:@"  CORR %@ 原偏移=%.1fpt t=%.2f\n", cls, dx, CACurrentMediaTime()];
@@ -3201,6 +3212,13 @@ static void GCStyleMapTypeDiscover(UIWindow *win) {        // 5Hz：只做树遍
 }
 
 // trial51(A4)：纯几何对齐，无树遍历 ⇒ 可进 60fps。App 每帧都能挪，我们每帧拉回。
+// ── 2D/3D 钮对齐：当前口径（0.9.98 整理，改前先读这 5 行）─────────────────
+//   基准 cap = (CachedLiteGroup && 在窗口) ? CachedLiteGroup : CachedRight
+//   目标① 钮底 = capTop − GCGapMapType(13.3)            ← 本函数
+//   目标② 钮顶 = capTop − GCBtnAboveCapTop(57.3)        ← GCStylePinOne 的 is2D 分支
+//   两者恒等：57.3 = 13.3 + 44（钮边长）⇒ 改任一处必须同步另一处
+//   守卫：钮 hidden / alpha<0.05 不钉；mt.layer 有动画在跑不钉（probe41 B1）
+// ─────────────────────────────────────────────────────────────────────
 static void GCStyleMapTypeAlign(UIWindow *win) {
     if (!win) return;
     UIView *mt = CachedMapType;
@@ -3210,7 +3228,7 @@ static void GCStyleMapTypeAlign(UIWindow *win) {
     if (!cap || !cap.window) return;                       // 无胶囊 ⇒ 无参照，不动
     CGRect cr = [cap convertRect:cap.bounds toView:win];
     CGRect mr = [mt convertRect:mt.bounds toView:win];
-    CGFloat targetBottom = cr.origin.y - 13.3;             // 0.9.29：GCGapMapType
+    CGFloat targetBottom = cr.origin.y - GCGapMapType;    // 0.9.98（A1）：裸 13.3 → 已有常量
     CGFloat dy = targetBottom - CGRectGetMaxY(mr);
     if (fabs(dy) < 1.0) return;                            // 幂等：已达标不写
     // ★probe41(B1)：App 正在做显隐动画时不纠位，且不再 removeAllAnimations。
@@ -3262,8 +3280,8 @@ static void GCStylePinOne(UIView *v) {
             //   注释铁证：「车机钮 原生底 652 → 间隙 50.6」（搜索栏顶 702.6）
             //   原公式 pinBottom-20-18 锚在底栏顶（755）⇒ 顶边 673，比 0.9.29 低 64.4pt。
             CGFloat barTop = SearchBarView ? [SearchBarView convertPoint:CGPointZero toView:win].y
-                                           : (pinBottom - 52.4);
-            g = CGRectMake(10, barTop - 50.0 - wr.size.height, wr.size.width, wr.size.height);
+                                           : (pinBottom - GCSearchTopFromPin);
+            g = CGRectMake(10, barTop - GCGapCar - wr.size.height, wr.size.width, wr.size.height);
             // ★trial35（P33 哨兵铁证：车机钮每 ~20s 被 App 把 alpha 清 0，坐标恒在 (10,673)）：
             //   位置钉住 ≠ 看得见。可见性同钉，幂等（达标即不写）。
             if (!v.hidden && v.alpha < 0.999f) {
@@ -3281,7 +3299,7 @@ static void GCStylePinOne(UIView *v) {
             //   缩放撂回叠帽态（top=capTop+33）时照样纠回。
             CGRect capw = GCModelWinRect(capNow, win);  // trial43(D1)：模型层 —— 不再跟着 App 动画跑
             g = CGRectMake(CGRectGetMidX(capw) - wr.size.width / 2,
-                           capw.origin.y - 57.3, wr.size.width, wr.size.height);
+                           capw.origin.y - GCBtnAboveCapTop, wr.size.width, wr.size.height);
             // ★trial30（老大 12:59 截图铁证：44pt 位置精准、内部全透明只剩 1px 环）：
             //   钮的可见内容 = 自身 backgroundColor + Lottie 动画，App 在加载/切换态会淡掉或清底，
             //   trial29 只钉几何 ⇒ 透明态无人纠正。这里补「实心钉」，幂等（达标即不写）。
@@ -3462,8 +3480,8 @@ static void GCStyleLayerFix(CALayer *la) {
             //   而 0.9.29 的 AlignOneWidget(bar, CachedCar, barTop, 50) 给出 608.6。
             //   ★这是真正生效的路径（全局 layer 钩子），GCStylePinOne 的 isCar 分支是死代码。
             CGFloat barTopCar = SearchBarView ? [SearchBarView convertPoint:CGPointZero toView:win].y
-                                              : (pinBottom - 52.4);
-            g = CGRectMake(10, barTopCar - 50.0 - wr.size.height, wr.size.width, wr.size.height);
+                                              : (pinBottom - GCSearchTopFromPin);
+            g = CGRectMake(10, barTopCar - GCGapCar - wr.size.height, wr.size.width, wr.size.height);
         } else {
             g = CGRectMake(sw - 10 - wr.size.width, pinBottom - wr.size.height, wr.size.width, wr.size.height);
         }
@@ -3587,8 +3605,8 @@ static void GCStylePinWidgetsInner(UIWindow *win) {   // trial25(A2)：原体改
         {
             // ★trial51(A2)：与 A1 同步 —— 0.9.29 公式 bottom = 搜索栏顶 - 50
             CGFloat barTopCar = SearchBarView ? [SearchBarView convertPoint:CGPointZero toView:win].y
-                                              : (pinBottom - 52.4);
-            carY = barTopCar - 50.0 - wr.size.height;
+                                              : (pinBottom - GCSearchTopFromPin);
+            carY = barTopCar - GCGapCar - wr.size.height;
         }
         CGRect g = CGRectMake(10, carY, wr.size.width, wr.size.height);
         CGRect local = [car.superview convertRect:g fromView:win];
