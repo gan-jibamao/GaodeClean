@@ -3275,18 +3275,44 @@ static void GCCapTrace(UIWindow *win) {
         P25Append([NSString stringWithFormat:
             @"t=0.00 CAP-T0 锚点（P7Now=%.2f）—— 之后所有 CAP-* 都相对此刻\n", t0]);
     }
-    UIView *cap = CachedRight;
-    // ★probe50：不能要求 cap.window 非空 —— 启动期这颗胶囊会先在别的容器里
-    //   （t=0.7s DISC 拿到 0x13465ead0 @ y=340，尚未挂到主 window），
-    //   probe49 就是被这句挡掉、一条 CAP-* 都没打出来。
-    if (!cap) return;
+    // ★probe51：CachedRight 是 __weak，启动期 App 反复建/毁同一控件 ⇒ 缓存常年 nil，
+    //   probe49/50 两版都被「拿不到对象」挡死（CAP-* 一条没有）。
+    //   改为**每帧直接扫树**找那颗胶囊，绕开缓存。（扫的是同一个类，见 IsRightBottomWidget 口径）
+    static UIView *sCap;          // 扫到的实例缓存（强引用，仅在两次扫描间隔内有效）
+    static int sFound;            // 上次扫到几个
+    UIView *cap = sCap; int nFound = sFound;
+    if (!cap || !cap.window) {    // 只有缓存失效才扫树 —— 5Hz 调用点已是极限，60fps 走缓存
+    cap = nil; nFound = 0;
+    {
+        NSMutableArray<UIView *> *q = [NSMutableArray arrayWithObject:win];
+        NSUInteger budget = 1200;
+        Class capCls = NSClassFromString(@"WINAJXCombinedWidgetView");
+        if (!capCls) return;
+        for (NSUInteger i = 0; i < q.count && budget--; i++) {
+            UIView *v = q[i];
+            if ([v isKindOfClass:capCls]) {
+                nFound++;
+                if (!cap) cap = v;           // 取第一个
+            }
+            [q addObjectsFromArray:v.subviews];
+        }
+    }
+    sCap = cap; sFound = nFound;
+    }
+    if (!cap) {
+        static BOOL saidNil;
+        if (!saidNil) { saidNil = YES;
+            P25Append([NSString stringWithFormat:@"t=%.2f CAP-NIL 扫树没找到 WINAJXCombinedWidgetView（CachedRight=%s）\n",
+                       P7Now() - t0, CachedRight ? "非nil" : "nil"]); }
+        return;
+    }
 
     if (cap != lastInst) {
         lastInst = cap; lastHid = -1;
         if (nInst < 6) { nInst++;
             P25Append([NSString stringWithFormat:
-                @"t=%.2f CAP-INST#%d cls=%@ win=%@ sub=%lu hid=%d\n",
-                P7Now() - t0, nInst, @(class_getName(object_getClass(cap))),
+                @"t=%.2f CAP-INST#%d 共%d个 cls=%@ win=%@ sub=%lu hid=%d\n",
+                P7Now() - t0, nInst, nFound, @(class_getName(object_getClass(cap))),
                 NSStringFromCGRect(cap.window ? GCModelWinRect(cap, win) : cap.frame),
                 (unsigned long)cap.subviews.count, cap.hidden ? 1 : 0]);
         }
