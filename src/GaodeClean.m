@@ -3220,10 +3220,72 @@ static void GCStyleMapTypeDiscover(UIWindow *win) {        // 5Hz：只做树遍
 //   两者恒等：57.3 = 13.3 + 44（钮边长）⇒ 改任一处必须同步另一处
 //   守卫：钮 hidden / alpha<0.05 不钉；mt.layer 有动画在跑不钉（probe41 B1）
 // ─────────────────────────────────────────────────────────────────────
+// ── probe43(A1/A2)：本版本把「2D / 导航」并成了一颗 44×88 胶囊 ─────────────────
+//   截图实测（1179×2556 @3x）：右侧胶囊 (339.3, 667.3) 43.3×87.3，
+//   左侧车机钮 (10.3, 608.3) 43.3×43.3 ⇒ 两者首行本应同高，实际错开 59pt。
+//   原因：该胶囊不再是「CompassView 44×44」，GCStyleMapTypeDiscover 认不出 ⇒
+//   CachedMapType 恒 nil ⇒ GCStyleMapTypeAlign 立刻 return，整组停在原生位。
+//   兜底：无独立 2D 钮时，把 CachedRight（右下控件）**顶边**对齐到车机钮顶边；
+//   两者首行都是 44 高 ⇒ 2D 与车机同高，胶囊底边落在 695.6，仍在底栏（768）之上。
+//   守卫（缺一不动，宁可不动也不挪错）：
+//     · 必须能在子树里找到一个 2 字符且以 'D' 结尾的 UILabel（即「2D」/「3D」）
+//       —— 用来区分「2D/导航组」与「定位/路线胶囊」，两者几何完全一样
+//     · 宽度 40~48、高度 76~100、右列（midX ≥ 72% 屏宽）、无动画在跑
+static BOOL GCRightGroupIs2D(UIView *grp) {
+    NSMutableArray<UIView *> *st = [NSMutableArray arrayWithObject:grp];
+    int budget = 24;
+    while (st.count && budget--) {
+        UIView *v = [st lastObject]; [st removeLastObject];
+        [st addObjectsFromArray:v.subviews];
+        if ([v isKindOfClass:UILabel.class]) {
+            NSString *t = ((UILabel *)v).text;
+            if (t.length == 2 && [t hasSuffix:@"D"]) return YES;   // 「2D」/「3D」
+        }
+    }
+    return NO;
+}
+
+static void GCStyleAlignRightGroupToCar(UIWindow *win) {
+    UIView *grp = CachedRight, *car = CachedCar;
+    if (!grp || !grp.window || !car || !car.window) return;
+    if (grp.hidden || grp.alpha < 0.05f) return;
+    CGRect gr = GCModelWinRect(grp, win);
+    if (gr.size.width  < 40.0f || gr.size.width  > 48.0f) return;
+    if (gr.size.height < 76.0f || gr.size.height > 100.0f) return;
+    if (CGRectGetMidX(gr) < win.bounds.size.width * 0.72) return;
+    BOOL is2D = GCRightGroupIs2D(grp);
+#ifdef GAODECLEAN_PROBE
+    { static CGFloat lastY = -1; static int lastFlag = -1;
+      if (fabs(gr.origin.y - lastY) > 0.4f || is2D != lastFlag) {
+          lastY = gr.origin.y; lastFlag = is2D;
+          P25Append([NSString stringWithFormat:
+                     @"t=%.2f GRP %s y=%.1f h=%.1f is2D=%d car y=%.1f\n",
+                     P7Now(), class_getName(object_getClass(grp)),
+                     (double)gr.origin.y, (double)gr.size.height, is2D,
+                     (double)GCModelWinRect(car, win).origin.y]);
+      } }
+#endif
+    if (!is2D) return;                                     // 认不出「2D」⇒ 绝不挪
+    CGRect cr = GCModelWinRect(car, win);
+    if (cr.size.height < 30.0f || cr.size.height > 60.0f) return;
+    CGFloat dy = cr.origin.y - gr.origin.y;                // 顶边对齐
+    if (fabs(dy) < 1.0f) return;                           // 幂等
+    if (grp.layer.animationKeys.count > 0) return;         // 动画在跑不插手
+    CGRect f = grp.frame;
+    f.origin.y += dy;
+    [CATransaction begin]; [CATransaction setDisableActions:YES];
+    grp.frame = f;
+#ifdef GAODECLEAN_PROBE
+    P25Append([NSString stringWithFormat:@"t=%.2f GRP-MOVE y %.1f→%.1f (dy=%.1f)\n",
+               P7Now(), (double)gr.origin.y, (double)cr.origin.y, (double)dy]);
+#endif
+    [CATransaction commit];
+}
+
 static void GCStyleMapTypeAlign(UIWindow *win) {
     if (!win) return;
     UIView *mt = CachedMapType;
-    if (!mt || !mt.window) return;
+    if (!mt || !mt.window) { GCStyleAlignRightGroupToCar(win); return; }   // probe43(A2)：无独立 2D 钮 ⇒ 兜底对齐整组
     if (mt.hidden || mt.alpha < 0.05f) return;   // probe28(A5)：隐形时不钉，避免与 App 隐藏态打架
     UIView *cap = (CachedLiteGroup && CachedLiteGroup.window) ? (UIView *)CachedLiteGroup : (UIView *)CachedRight;
     if (!cap || !cap.window) return;                       // 无胶囊 ⇒ 无参照，不动
