@@ -65,6 +65,13 @@ jobs:
       - name: Obfuscation round-trip self-test (${{ matrix.scheme }})
         run: |
           set -e
+          # 明文清单（scripts/obf_strings.txt）自 0.9.98 起不再入库（仓库转公开，
+          # 该文件含高德内部类名/页面路径，等同反编译成果）。文件不在时跳过本步；
+          # 本机仍保留该文件，make check 会跑完整回环（295/295 + FNV）。
+          if [ ! -f scripts/obf_strings.txt ]; then
+            echo "::notice::scripts/obf_strings.txt 不在仓库中（公开仓库不携带明文清单），跳过混淆回环自测"
+            exit 0
+          fi
           # 用与运行时完全同一份解码数学（src/GCObfMath.h）在 CI 上把全部混淆串
           # 解回明文，逐条与 scripts/obf_strings.txt 比对并校验头内 FNV 摘要。
           clang -O2 -Wall -Wextra -I src -o /tmp/obf_selftest scripts/obf_selftest.c

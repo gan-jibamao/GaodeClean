@@ -9,3 +9,6 @@ distdiag/
 # python 缓存
 __pycache__/
 *.pyc
+
+# 混淆明文清单：含高德内部类名/页面路径，刻意不入公开仓库（仅本机自测用）
+scripts/obf_strings.txt
