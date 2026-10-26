@@ -3276,7 +3276,10 @@ static void GCCapTrace(UIWindow *win) {
             @"t=0.00 CAP-T0 锚点（P7Now=%.2f）—— 之后所有 CAP-* 都相对此刻\n", t0]);
     }
     UIView *cap = CachedRight;
-    if (!cap || !cap.window) return;
+    // ★probe50：不能要求 cap.window 非空 —— 启动期这颗胶囊会先在别的容器里
+    //   （t=0.7s DISC 拿到 0x13465ead0 @ y=340，尚未挂到主 window），
+    //   probe49 就是被这句挡掉、一条 CAP-* 都没打出来。
+    if (!cap) return;
 
     if (cap != lastInst) {
         lastInst = cap; lastHid = -1;
@@ -3284,7 +3287,7 @@ static void GCCapTrace(UIWindow *win) {
             P25Append([NSString stringWithFormat:
                 @"t=%.2f CAP-INST#%d cls=%@ win=%@ sub=%lu hid=%d\n",
                 P7Now() - t0, nInst, @(class_getName(object_getClass(cap))),
-                NSStringFromCGRect(GCModelWinRect(cap, win)),
+                NSStringFromCGRect(cap.window ? GCModelWinRect(cap, win) : cap.frame),
                 (unsigned long)cap.subviews.count, cap.hidden ? 1 : 0]);
         }
     }
@@ -3307,6 +3310,10 @@ static void GCCapTrace(UIWindow *win) {
         }
     }
 }
+#endif
+
+#ifdef GAODECLEAN_PROBE
+static void GCCapTrace(UIWindow *win);            // probe50：前置声明（5Hz 用）
 #endif
 
 static void GCStyleMapTypeAlign(UIWindow *win) {
@@ -3334,6 +3341,9 @@ static void GCStyleMapTypeAlign(UIWindow *win) {
 static void GCStyleAlignMapType(UIWindow *win) {           // 5Hz 入口：发现 + 对齐
     GCStyleMapTypeDiscover(win);
     GCStyleMapTypeAlign(win);
+#ifdef GAODECLEAN_PROBE
+    GCCapTrace(win);                                       // probe50：5Hz 也采一次，抓启动早期
+#endif
 }
 
 static BOOL GCStylePinOneBusy = NO;
