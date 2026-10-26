@@ -113,6 +113,10 @@ static void GCStylePinWidgets(UIWindow *win);        // trial25(A2)：重入守�
 static void GCStylePinTabItems(UIWindow *win);       // trial42(A3)：首页/我的 帧级钉位前置声明
 static void GCStylePinCapsuleFill(void);             // trial54(A2)：搜索胶囊白底 60fps 前置声明
 static void GCTabItemPinX(UIView *bar, UIView *item, int index);   // probe40(A4)：底栏两钮 x 钉位前置声明
+static void GCTabSubClamp(UIView *v);                              // probe41(A1)：底栏内容子项「同事务钉位」前置声明
+static void GCTabSubHookOnce(UIView *sub);                         // probe41(A3)：按运行时类挂同事务后置钩子前置声明
+static void HookClsSetFrame(Class cls, void (^after)(id));         // probe41(A2)：CGRect 版
+static void HookClsSetCenter(Class cls, void (^after)(id));        // probe41(A2)：CGPoint 版
 static NSMutableSet<NSString *> *GCStyleLayerHookedClasses(void);   // trial26：定义在后，P8 dump 段先用
 static BOOL IsRightBottomWidget(UIView *v);            // trial11：前置声明（discover 用）
 static BOOL GCCIsLiteGroupCapsule(UIView *v);          // trial11：前置声明（discover 用）
@@ -3209,10 +3213,15 @@ static void GCStyleMapTypeAlign(UIWindow *win) {
     CGFloat targetBottom = cr.origin.y - 13.3;             // 0.9.29：GCGapMapType
     CGFloat dy = targetBottom - CGRectGetMaxY(mr);
     if (fabs(dy) < 1.0) return;                            // 幂等：已达标不写
+    // ★probe41(B1)：App 正在做显隐动画时不纠位，且不再 removeAllAnimations。
+    //   铁证：日志 32 条「PIN 2D钮 y 584.0→653.7」全部集中在 WINPermanentCompassView
+    //   的 alpha 1.00→0.00 / 0.00→1.00 时刻（17.89 / 23.10 / 56.57 / 58.01 / 87.56 …）
+    //   —— 原来我们在这里杀掉 App 的淡入淡出动画，并把它的过渡位（540）硬拖回 609.7，
+    //   造成 2D 钮在过渡中单帧跳位。原生过渡不该被我们打断。
+    if (mt.layer.animationKeys.count > 0) return;
     CGRect f = mt.frame;
     f.origin.y += dy;                                      // 只改 y，不碰尺寸/透明度
     [CATransaction begin]; [CATransaction setDisableActions:YES];
-    [mt.layer removeAllAnimations];
     mt.frame = f;
 #ifdef GAODECLEAN_PROBE
     P25Append([NSString stringWithFormat:@"t=%.2f PIN 2D钮 y %.1f→%.1f a=%.2f hid=%d\n",
@@ -3832,8 +3841,11 @@ static void GCStylePinTabItems(UIWindow *win) {
 
         // ★probe23(A2)：内容子项水平居中 —— 实测 SubItem 54 宽贴在 x=0，
         //   图标中心 27 而 item 中心 42，右边空 30pt，视觉重心失衡。
+        //   probe41：本循环保留（常规纠偏），并发起「同事务钉位」与钩子安装。
         for (UIView *sub in it.subviews) {
             if (sub.isHidden) continue;
+            GCTabSubClamp(sub);        // probe41(A1)：App 写 x=0 的同一调用内纠回
+            GCTabSubHookOnce(sub);     // probe41(A3)：首个实例挂 setFrame:/setCenter: 后置钩子
             CGFloat wantX = (iw - sub.frame.size.width) * 0.5;
             if (fabs(sub.frame.origin.x - wantX) > 0.5) {
                 CGRect f = sub.frame; f.origin.x = wantX; sub.frame = f;
@@ -5485,6 +5497,94 @@ static void InstallTabBarGuideLottieBlock(void) {
 
 // 0.9.4：删除 ConfineLegacyChrome（审计确认零引用）。
 
+// ─────────────────────────────────────────────────────────────────────
+// probe41(A1/A2/A3)：底栏内容子项「同事务钉位」 —— 治「点 2D 切换时首页/我的闪一下」
+//   铁证（视频 104s 全片扫描 + 日志 CLR 1:1 对齐，偏移恒 2.22s）：
+//     视频 20.10 / 60.59 / 100.26 三帧：首页 cx 306.8→273.6（-33.2px）、
+//     我的 577.4→543.7（-33.7px），搜索钮纹丝不动，仅 1 帧，下一帧复位；
+//     对应日志 CLR 17.88 / 58.36 / 98.05 —— 都是 App 把 WINPermanentCompassView
+//     淡出（alpha 1.00→0.00）那一帧触发的窗口级重排。
+//   根因：下方 probe23(A2) 把 SubItem 强推到 item 内 x=15，而 App 在这一帧
+//     把它写回原生 x=0；这一写落在我们 60fps 补帧**之后** ⇒ 渲染树露出 x=0 ⇒ 漏屏 1 帧。
+//     数值对账：x=15 → 图标中心 136.5pt = 306.8px（实测常态）；
+//               x=0  → 图标中心 121.5pt = 273.9px（实测闪帧 274.3px）。
+//   修法：把纠正从「下一帧」提前到「App 写 x 的同一调用内」。
+//     钩子只挂 WINTabBarItem 子类（白名单，绝不碰 UIKit 共享类）；
+//     选择器用 @selector 编译期常量 ⇒ 零新增明文字符串。
+// ─────────────────────────────────────────────────────────────────────
+static BOOL GCSubClampBusy = NO;
+#ifdef GAODECLEAN_PROBE
+static int  GCSubClampN[2] = {0, 0};
+#endif
+
+static void GCTabSubClamp(UIView *v) {
+    if (GCSubClampBusy || !v) return;
+    UIView *item = v.superview;
+    int idx = (item == CachedTabItemA) ? 0 : ((item == CachedTabItemB) ? 1 : -1);
+    if (idx < 0 || item.bounds.size.width < 40.0f || v.frame.size.width < 10.0f) return;
+    CGFloat wantX = (item.bounds.size.width - v.frame.size.width) * 0.5f;
+    if (fabs(v.frame.origin.x - wantX) <= 0.5f) return;      // 幂等：达标不写
+    CGRect f = v.frame;
+#ifdef GAODECLEAN_PROBE
+    { static CGFloat last0 = -1, last1 = -1; CGFloat *last = idx ? &last1 : &last0;
+      if (fabs(*last - f.origin.x) > 0.01f) {
+          *last = f.origin.x;
+          P25Append([NSString stringWithFormat:@"t=%.2f CLAMP[%d] x %.2f -> %.2f (第%d次)\n",
+                     P7Now(), idx, (double)f.origin.x, (double)wantX, ++GCSubClampN[idx]]); } }
+#endif
+    f.origin.x = wantX;
+    GCSubClampBusy = YES;
+    [CATransaction begin]; [CATransaction setDisableActions:YES];
+    v.frame = f;
+    [CATransaction commit];
+    GCSubClampBusy = NO;
+}
+
+// probe41(A2)：按运行时类挂「后置钩子」（先跑原实现，再跑 after）。
+//   与 HookVoid 的区别：不吃类名字符串（SubItem 类名不在混淆表），
+//   且用真实结构体签名，避免 HookVoid 的签名守卫静默跳过（0.9.8 A4 的教训）。
+static void HookClsSetFrame(Class cls, void (^after)(id)) {
+    Method m = class_getInstanceMethod(cls, @selector(setFrame:));
+    if (!m) return;
+    IMP o = method_getImplementation(m);
+    const char *t = method_getTypeEncoding(m);
+    if (!t || t[0] != 'v') return;
+    Replace(cls, @selector(setFrame:), imp_implementationWithBlock(^(id s, CGRect r) {
+        ((void (*)(id, SEL, CGRect))o)(s, @selector(setFrame:), r);
+        after(s);
+    }), t);
+}
+static void HookClsSetCenter(Class cls, void (^after)(id)) {
+    Method m = class_getInstanceMethod(cls, @selector(setCenter:));
+    if (!m) return;
+    IMP o = method_getImplementation(m);
+    const char *t = method_getTypeEncoding(m);
+    if (!t || t[0] != 'v') return;
+    Replace(cls, @selector(setCenter:), imp_implementationWithBlock(^(id s, CGPoint p) {
+        ((void (*)(id, SEL, CGPoint))o)(s, @selector(setCenter:), p);
+        after(s);
+    }), t);
+}
+
+// probe41(A3)：首次遇到内容子项时挂钩。白名单＝ WINTabBarItem（GCStrAt(149)）家族。
+static Class GCSubHooked[8];
+static int   GCSubHookedN = 0;
+static void GCTabSubHookOnce(UIView *sub) {
+    if (!sub) return;
+    Class c = object_getClass(sub);
+    Class base = NSClassFromString(GCStrAt(149));        // WINTabBarItem
+    if (!base || ![c isSubclassOfClass:base]) return;    // 不在白名单 ⇒ 绝不挂钩
+    for (int i = 0; i < GCSubHookedN; i++) if (GCSubHooked[i] == c) return;
+    if (GCSubHookedN >= 8) return;
+    GCSubHooked[GCSubHookedN++] = c;
+#ifdef GAODECLEAN_PROBE
+    P25Append([NSString stringWithFormat:@"t=%.2f SUBhook %s w=%.1f\n",
+               P7Now(), class_getName(c), (double)sub.frame.size.width]);
+#endif
+    HookClsSetFrame(c,  ^(id s) { GCTabSubClamp((UIView *)s); });
+    HookClsSetCenter(c, ^(id s) { GCTabSubClamp((UIView *)s); });
+}
+
 // probe40(A2)：底栏两钮 x 的帧级钉位（复用 CenterTabButtons 的官方公式）。
 //   铁证（probe39 视频 3025 帧逐帧质心）：2D/3D 切换那一帧，首页 cx 306.8→274.3（-14.4pt）、
 //   我的 577.4→543.3（-15.1pt），搜索钮纹丝不动，下一帧复位 —— 只有 1 帧；
@@ -5983,6 +6083,14 @@ static void InstallMinimalHome(void) {
         // probe40(A3)：同一次布局内立刻钉一次 x（不等下一帧，保证渲染前生效）
         GCTabItemPinX(bar, CachedTabItemA, 0);
         GCTabItemPinX(bar, CachedTabItemB, 1);
+        // probe41(A4)：底栏重排后同帧兜底 + 装钩子（防 App 绕过 setFrame: 走自身布局通道）
+        if (CachedTabItemA) for (UIView *s in CachedTabItemA.subviews) { GCTabSubClamp(s); GCTabSubHookOnce(s); }
+        if (CachedTabItemB) for (UIView *s in CachedTabItemB.subviews) { GCTabSubClamp(s); GCTabSubHookOnce(s); }
+    });
+    // probe41(A4)：WINTabBarItem 自身布局后同帧兜底（只对底栏那两个实例生效）
+    HookVoid(GCStrAt(149), GCStrAt(91), ^(UIView *item) {
+        if (item != CachedTabItemA && item != CachedTabItemB) return;
+        for (UIView *s in item.subviews) { GCTabSubClamp(s); GCTabSubHookOnce(s); }
     });
     InstallTabBarHintHooks();
     // 0.9.1：「上拉发现」引导 Lottie 拦截（17.01.1 GuideLottie 机制）
