@@ -3270,12 +3270,12 @@ static void GCStyleAlignRightGroupToCar(UIWindow *win) {
     if (cr.size.height < 30.0f || cr.size.height > 60.0f) return;
     CGFloat dy = cr.origin.y - gr.origin.y;                // 顶边对齐
     if (fabs(dy) < 1.0f) return;                           // 幂等
-    // probe45：不能用 animationKeys.count 当闸门 —— App 给这个容器挂了一个**常驻**动画键
-    //   （dump 里 key=1 恒为 1），导致永远不挪。只认「真的在飞行中」：表现层与模型层不一致。
-    //   实测 m=(339,667) v=(339,667) ⇒ 静止，可以安全改写。
-    { CALayer *pl = grp.layer.presentationLayer;
-      if (pl) { CGPoint mp = grp.layer.position, pp = pl.position;
-          if (fabs(pp.x - mp.x) > 0.6f || fabs(pp.y - mp.y) > 0.6f) return; } }
+    // probe46：这道兜底**不设动画守卫**。
+    //   probe44 日志：GRPCHK 全部 hid=0 / h=88 / carY=608，守卫都过，仍 GRP-MOVE=0
+    //   ⇒ 唯一能拦的就是「飞行态」判定；而该容器挂着常驻动画键（key=1 恒为 1），
+    //     表现层与模型层长期不一致 ⇒ 永久放行 ⇒ 一次都没挪成。
+    //   写模型层不会打断 App 的动画（probe41 已实证），且本函数幂等（差 <1pt 不写），
+    //   所以这里直接判 dy 即可，动画交给 App。
     CGRect f = grp.frame;
     f.origin.y += dy;
     [CATransaction begin]; [CATransaction setDisableActions:YES];
