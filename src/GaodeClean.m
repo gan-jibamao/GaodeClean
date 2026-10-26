@@ -3248,25 +3248,25 @@ static BOOL GCRightGroupIs2D(UIView *grp) {
 static void GCStyleAlignRightGroupToCar(UIWindow *win) {
     UIView *grp = CachedRight, *car = CachedCar;
     if (!grp || !grp.window || !car || !car.window) return;
-    if (grp.hidden || grp.alpha < 0.05f) return;
-    CGRect gr = GCModelWinRect(grp, win);
+    CGRect gr = GCModelWinRect(grp, win);          // probe44：隐藏态也要先记账，否则看不到原因
     if (gr.size.width  < 40.0f || gr.size.width  > 48.0f) return;
     if (gr.size.height < 76.0f || gr.size.height > 100.0f) return;
     if (CGRectGetMidX(gr) < win.bounds.size.width * 0.72) return;
-    BOOL is2D = GCRightGroupIs2D(grp);
+    BOOL is2D = GCRightGroupIs2D(grp);                     // probe44：只作诊断，不再当闸门
+    CGRect cr = GCModelWinRect(car, win);
 #ifdef GAODECLEAN_PROBE
-    { static CGFloat lastY = -1; static int lastFlag = -1;
-      if (fabs(gr.origin.y - lastY) > 0.4f || is2D != lastFlag) {
-          lastY = gr.origin.y; lastFlag = is2D;
-          P25Append([NSString stringWithFormat:
-                     @"t=%.2f GRP %s y=%.1f h=%.1f is2D=%d car y=%.1f\n",
-                     P7Now(), class_getName(object_getClass(grp)),
-                     (double)gr.origin.y, (double)gr.size.height, is2D,
-                     (double)GCModelWinRect(car, win).origin.y]);
+    // probe44：把判定写进 p7 dump（用户贴的就是它），不再只埋在 P25 日志里
+    { static int lh = -1, l2 = -1; static CGFloat ly = -1;
+      int hid = grp.hidden ? 1 : 0;
+      if (hid != lh || is2D != l2 || fabs(gr.origin.y - ly) > 0.4f) {
+          lh = hid; l2 = is2D; ly = gr.origin.y;
+          P7Note(@"GRPCHK hid=%d y=%.0f h=%.0f is2D=%d carY=%.0f %@",
+                 hid, gr.origin.y, gr.size.height, is2D, cr.origin.y,
+                 class_getName(object_getClass(grp)) ? @(class_getName(object_getClass(grp))) : @"?");
       } }
 #endif
-    if (!is2D) return;                                     // 认不出「2D」⇒ 绝不挪
-    CGRect cr = GCModelWinRect(car, win);
+    (void)is2D;                                            // 正式包不诊断，避免未使用告警
+    if (grp.hidden || grp.alpha < 0.05f) return;           // 隐藏态不挪（挪了也看不见）
     if (cr.size.height < 30.0f || cr.size.height > 60.0f) return;
     CGFloat dy = cr.origin.y - gr.origin.y;                // 顶边对齐
     if (fabs(dy) < 1.0f) return;                           // 幂等
