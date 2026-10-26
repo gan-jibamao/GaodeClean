@@ -112,6 +112,7 @@ static void GCStyleDiscoverWidgets(UIWindow *win);   // trial11：实例发现�
 static void GCStylePinWidgets(UIWindow *win);        // trial25(A2)：重入守卫包装前置声明（容器钩子/驱动器用）
 static void GCStylePinTabItems(UIWindow *win);       // trial42(A3)：首页/我的 帧级钉位前置声明
 static void GCStylePinCapsuleFill(void);             // trial54(A2)：搜索胶囊白底 60fps 前置声明
+static void GCTabItemPinX(UIView *bar, UIView *item, int index);   // probe40(A4)：底栏两钮 x 钉位前置声明
 static NSMutableSet<NSString *> *GCStyleLayerHookedClasses(void);   // trial26：定义在后，P8 dump 段先用
 static BOOL IsRightBottomWidget(UIView *v);            // trial11：前置声明（discover 用）
 static BOOL GCCIsLiteGroupCapsule(UIView *v);          // trial11：前置声明（discover 用）
@@ -3745,10 +3746,16 @@ static void GCStylePinTabItems(UIWindow *win) {
             it.transform = CGAffineTransformIdentity;
             [CATransaction commit];
         }
-        // ★probe22(A2)：不再写 x。
+        // ★probe40(A1)：帧级把 item 的 center.x 钉回 **App 自己的公式值**。
+        //   铁证：2D/3D 切换那一帧首页 cx 306.8→274.3、我的 577.4→543.3（搜索钮不动），
+        //   下一帧复位 —— 只有 1 帧，7 次事件与 CLR 7 次严格 1:1（偏移恒 2.75s）。
+        GCTabItemPinX(CachedTabBar, it, i);
+
+        // ★probe22(A2)：不再写「固定 ±72」的 x。
         //   probe21 实测：App 的窄栏布局是 ±60（中心 136.5/256.5），我们强制 ±72，
         //   5Hz + 60fps 两个通道同时施压，对拉结果就是老大看到的"偶尔在动"
-        //   （93 秒 11 次、每次 ±12pt、dy 恒 0）。位置交还 App。
+        //   （93 秒 11 次、每次 ±12pt、dy 恒 0）。
+        //   probe40(A1) 改回写 x，但写的是 App 自己的 midX ± separation/2（幂等、无对拉）。
 
         // ★probe23(A1)：视觉收圆，不碰 item 的 frame（避免与 App 布局对拉）。
         //   实测 App 原生 item = 84x54 corner=27 ⇒ 跑道形胶囊；用 54x54 圆形 mask 收成正圆。
@@ -5478,6 +5485,32 @@ static void InstallTabBarGuideLottieBlock(void) {
 
 // 0.9.4：删除 ConfineLegacyChrome（审计确认零引用）。
 
+// probe40(A2)：底栏两钮 x 的帧级钉位（复用 CenterTabButtons 的官方公式）。
+//   铁证（probe39 视频 3025 帧逐帧质心）：2D/3D 切换那一帧，首页 cx 306.8→274.3（-14.4pt）、
+//   我的 577.4→543.3（-15.1pt），搜索钮纹丝不动，下一帧复位 —— 只有 1 帧；
+//   7 次事件与日志 CLR 7 次严格 1:1（偏移恒 2.75s）。
+//   probe22(A2) 当年禁写 x 是因为我们写 ±72、App 要 ±60，两边对拉；
+//   这里写的就是 App 自己的 midX ± separation/2，幂等、零对拉。
+static void GCTabItemPinX(UIView *bar, UIView *item, int index) {
+    if (!bar || !item || !item.superview) return;
+    CGFloat compactWidth = MIN(252, bar.bounds.size.width - 32);
+    CGFloat separation = MAX(0, compactWidth - 48 - 84);
+    CGPoint inBar = [item.superview convertPoint:item.center toView:bar];
+    CGFloat wantX = CGRectGetMidX(bar.bounds) + (index == 0 ? -0.5 : 0.5) * separation;
+    if (fabs(inBar.x - wantX) < 1.0) return;      // 幂等：达标就不动
+#ifdef GAODECLEAN_PROBE
+    { static int pin[2];
+      P25Append([NSString stringWithFormat:@"t=%.2f IPIN[%d] cx %.1f -> %.1f (dx=%+.1f, 第%d次)\n",
+                 P7Now(), index, inBar.x, wantX, inBar.x - wantX, ++pin[index]]); }
+#endif
+    inBar.x = wantX;
+    CGPoint c = [bar convertPoint:inBar toView:item.superview];
+    [CATransaction begin]; [CATransaction setDisableActions:YES];
+    [item.layer removeAllAnimations];
+    item.center = c;
+    [CATransaction commit];
+}
+
 static void CenterTabButtons(UIView *bar) {
     // 0.7.0：能承载底栏的窗口就是 App 主窗口 —— 后面屏蔽开屏广告时，
     // 这个窗口永远不在可隐藏名单里，避免误伤。
@@ -5947,6 +5980,9 @@ static void InstallMinimalHome(void) {
     InstallSplashAdGuard();
     HookVoid(GCStrAt(88), GCStrAt(91), ^(UIView *bar) { CachedTabBar = bar; CenterTabButtons(bar); SweepTabBarHints(bar);
         GCNarrowApply(bar, NO);   // 0.9.28 缩窄：底栏重排后立即夹回
+        // probe40(A3)：同一次布局内立刻钉一次 x（不等下一帧，保证渲染前生效）
+        GCTabItemPinX(bar, CachedTabItemA, 0);
+        GCTabItemPinX(bar, CachedTabItemB, 1);
     });
     InstallTabBarHintHooks();
     // 0.9.1：「上拉发现」引导 Lottie 拦截（17.01.1 GuideLottie 机制）
