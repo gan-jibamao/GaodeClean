@@ -14,6 +14,15 @@ on:
       - '**/*.md'
       - 'tools/**'
   workflow_dispatch:
+    inputs:
+      probe:
+        description: '出探针包（-DGAODECLEAN_PROBE=1）'
+        type: boolean
+        default: false
+      version:
+        description: '覆盖版本号，如 0.9.99+probe43（留空则用 control 里的）'
+        required: false
+        default: ''
 
 permissions:
   contents: write
@@ -52,12 +61,22 @@ jobs:
           brew install ldid dpkg
           echo "THEOS=$THEOS" >> $GITHUB_ENV
 
+      - name: Apply version override (dispatch)
+        if: ${{ inputs.version != '' }}
+        run: |
+          set -e
+          echo "override → ${{ inputs.version }}"
+          sed -i.bak "s/^Version:.*/Version: ${{ inputs.version }}/" control
+          sed -i.bak "s/kGCVersion     = @\"[^\"]*\"/kGCVersion     = @\"${{ inputs.version }}\"/" src/GaodeClean.m
+          grep -E '^(Version|Architecture):' control
+          grep -o 'kGCVersion     = @"[^"]*"' src/GaodeClean.m
+
       - name: Build (${{ matrix.scheme }})
         run: |
           set -e
           export THEOS=$HOME/theos
           make clean >/dev/null 2>&1 || true
-          make package FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=${{ matrix.scheme }}
+          make package FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=${{ matrix.scheme }} GC_PROBE=${{ inputs.probe && '1' || '0' }}
           mkdir -p out
           find packages -name '*.deb' -exec cp {} out/ \;
           ls -l out/

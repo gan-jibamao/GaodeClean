@@ -35,4 +35,10 @@ ifeq ($(FINALPACKAGE),1)
 GaodeClean_CFLAGS += -DGAODECLEAN_STRIP_LOGS=1
 endif
 
+# 0.9.99：GitHub CI 也能出探针包（本地用 Makefile.local 的 EXTRA=... 即可）
+#   用法：make package FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=rootless GC_PROBE=1
+ifeq ($(GC_PROBE),1)
+GaodeClean_CFLAGS += -DGAODECLEAN_PROBE=1
+endif
+
 include $(THEOS_MAKE_PATH)/tweak.mk
