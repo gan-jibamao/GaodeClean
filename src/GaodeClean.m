@@ -106,6 +106,7 @@ static char AlignedKey;
 static dispatch_source_t ScheduleTimer;
 static __weak UIView *BarParent;
 static __weak UIView *CachedCar, *CachedRight, *CachedRoute;
+static NSMutableString *GCProbeBuf6;     // probe53：探针总缓冲（dump 真正带出去的通道）
 #ifdef GAODECLEAN_PROBE
 static int GCCapEntered;                 // probe52：GCCapTrace 进入计数（dump 可读）
 #endif
@@ -690,7 +691,10 @@ static void P36Who(void) {
     NSMutableString *s = [NSMutableString string];
     NSUInteger lim = cs.count < 16 ? cs.count : 16;
     for (NSUInteger i = 0; i < lim; i++) [s appendFormat:@"\n    %@", cs[i]];
-    P25Append([NSString stringWithFormat:@"t=%.2f WHO 调用栈=%@\n", now, s]);
+#ifdef GAODECLEAN_PROBE
+    if (!GCProbeBuf6) GCProbeBuf6 = [NSMutableString string];
+    [GCProbeBuf6 appendString:[NSString stringWithFormat:@"\nt=%.2f WHO 调用栈=%@\n", now, s]];
+#endif
 }
 
 // probe37(A2)：记录动画期间底栏表现层的实际 y 范围。
@@ -2504,7 +2508,6 @@ static void GCStyleTab(UIView *anchor) {
     }
 }
 // ══ probe6（仅 -DGAODECLEAN_PROBE=1 编译）：底栏/搜索栏全参数取证 ══
-static NSMutableString *GCProbeBuf6;
 static BOOL GCProbeBusy6;
 static NSString *GCProbeColor6(CGColorRef cg) {
     if (!cg) return @"nil";
@@ -3272,6 +3275,11 @@ static void GCStyleMapTypeDiscover(UIWindow *win) {        // 5Hz：只做树遍
 #ifdef GAODECLEAN_PROBE
 static void GCCapTrace(UIWindow *win) {
     GCCapEntered++;                                // 无条件自增，证明函数被调用
+    // ★probe53：前三版探针全沉默的真因 —— 它们用 P25Append 写的是
+    //   GaodeClean-changes.txt，而 dump（GCProbeDump7）只拼 GCProbeBuf6 + o，
+    //   从不读取那个文件。所以改用 GCProbeBuf6 这个真正会被带出去的通道。
+    #define CAPLOG(...) do { if (!GCProbeBuf6) GCProbeBuf6 = [NSMutableString string]; \
+        [GCProbeBuf6 appendString:[NSString stringWithFormat:__VA_ARGS__]]; } while (0)
     if (!win) return;
     static __weak UIView *lastInst;
     static int lastHid = -1;
@@ -3279,8 +3287,7 @@ static void GCCapTrace(UIWindow *win) {
     static int nInst, nHid;
     if (t0 <= 0) {                                  // A4：起点锚，日志与视频对齐用
         t0 = P7Now();
-        P25Append([NSString stringWithFormat:
-            @"t=0.00 CAP-T0 锚点（P7Now=%.2f）—— 之后所有 CAP-* 都相对此刻\n", t0]);
+        CAPLOG(@"\nt=0.00 CAP-T0 锚点 P7Now=%.2f\n", t0);
     }
     // ★probe51：CachedRight 是 __weak，启动期 App 反复建/毁同一控件 ⇒ 缓存常年 nil，
     //   probe49/50 两版都被「拿不到对象」挡死（CAP-* 一条没有）。
@@ -3309,19 +3316,18 @@ static void GCCapTrace(UIWindow *win) {
     if (!cap) {
         static BOOL saidNil;
         if (!saidNil) { saidNil = YES;
-            P25Append([NSString stringWithFormat:@"t=%.2f CAP-NIL 扫树没找到 WINAJXCombinedWidgetView（CachedRight=%s）\n",
-                       P7Now() - t0, CachedRight ? "非nil" : "nil"]); }
+            CAPLOG(@"t=%.2f CAP-NIL 扫树没找到（CachedRight=%s）\n",
+                   P7Now() - t0, CachedRight ? "非nil" : "nil"); }
         return;
     }
 
     if (cap != lastInst) {
         lastInst = cap; lastHid = -1;
         if (nInst < 6) { nInst++;
-            P25Append([NSString stringWithFormat:
-                @"t=%.2f CAP-INST#%d 共%d个 cls=%@ win=%@ sub=%lu hid=%d\n",
+            CAPLOG(@"t=%.2f CAP-INST#%d 共%d个 cls=%@ win=%@ sub=%lu hid=%d\n",
                 P7Now() - t0, nInst, nFound, @(class_getName(object_getClass(cap))),
                 NSStringFromCGRect(cap.window ? GCModelWinRect(cap, win) : cap.frame),
-                (unsigned long)cap.subviews.count, cap.hidden ? 1 : 0]);
+                (unsigned long)cap.subviews.count, cap.hidden ? 1 : 0);
         }
     }
     if ((int)cap.hidden != lastHid) {
@@ -3335,10 +3341,9 @@ static void GCCapTrace(UIWindow *win) {
                  i, @(class_getName(object_getClass(p))), p.hidden ? 1 : 0,
                  p.alpha, p.layer.opacity];
             }
-            P25Append([NSString stringWithFormat:
-                @"t=%.2f CAP-HID %d→%d a=%.2f op=%.2f anims=%lu%@\n",
+            CAPLOG(@"t=%.2f CAP-HID %d→%d a=%.2f op=%.2f anims=%lu%@\n",
                 P7Now() - t0, was, (int)cap.hidden, cap.alpha, cap.layer.opacity,
-                (unsigned long)cap.layer.animationKeys.count, chain]);
+                (unsigned long)cap.layer.animationKeys.count, chain);
             if (!cap.hidden) P36Who();      // 首次变可见：抓调用栈定责
         }
     }
