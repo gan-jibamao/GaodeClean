@@ -115,6 +115,7 @@ static __weak UIView *SearchBarView;   // 0.5.58   // 0.5.55：用于判断当�
 static void UpdateMask(UIView *page);
 static void Schedule(void);
 static void LayoutMinimalHome(id handler);
+static void InstallMinimalHome(void);                // 0.9.98（D）：定义已后移到 7 段 helper 之后，此处前置声明
 static void AlignCornerWidgets(UIView *bar);
 static void GCStyleDiscoverWidgets(UIWindow *win);   // trial11：实例发现独立成函数（pin 自给自足）
 static void GCStylePinWidgets(UIWindow *win);        // trial25(A2)：重入守卫包装前置声明（容器钩子/驱动器用）
@@ -6104,7 +6105,14 @@ static void InstallSplashAdGuard(void) {
     }
 }
 
-static void InstallMinimalHome(void) {
+// ── 0.9.98（D）：原 592 行单函数 InstallMinimalHome 按语义拆 7 段 ──────────────
+//   纯搬运：语句顺序、守卫、注释与原文件逐条一致；拆分边界全部落在顶层语句起点。
+//   函数内原本只有 3 个局部变量 cls/sel/method，分别落在所属段内
+//   （第 6 段自带声明，第 7 段不使用），无跨段引用 ⇒ 语义与拆分前等价。
+//   新加功能优先找对应段落插入，不要退回成单函数。
+// ─────────────────────────────────────────────────────────────────────
+
+static void InstallLaunchAndTabHooks(void) {
     // 0.7.0：开屏广告移除
     InstallSplashAdGuard();
     HookVoid(GCStrAt(88), GCStrAt(91), ^(UIView *bar) { CachedTabBar = bar; CenterTabButtons(bar); SweepTabBarHints(bar);
@@ -6136,6 +6144,9 @@ static void InstallMinimalHome(void) {
     // 0.5.32：移除「上拉发现」——把 sheet 的手势/交互彻底关掉，
     // 上拉不再弹出发现面板（面板本身也被 sheet.hidden 挡着）。
     SealBlurOverlay();
+}
+
+static void InstallSearchWeatherHooks(void) {
     // 0.5.47：MapWidgetContainerView 被 app 在滑动时淡到 0（实测 a=0.00，弹簧过冲到 -2.33）
     // → 控件整片消失。这里把它的 alpha 恒定为 1（不动 setHidden:，避免按死搜索栏）。
     {
@@ -6207,6 +6218,9 @@ static void InstallMinimalHome(void) {
         v.hidden = YES;
         v.userInteractionEnabled = NO;
     });
+}
+
+static void InstallImmersiveStateHooks(void) {
     // 0.5.45：压白雾的最小组合 —— 只断「上拉」这条路。
     // 绝不碰 setHidden:（那是按死搜索页的元凶：高德搜索页本身就是这个面板）。
     {
@@ -6270,6 +6284,9 @@ static void InstallMinimalHome(void) {
             ((void (*)(id, SEL, id, id, id, id, BOOL))original)(self, sel, @"", nil, nil, nil, NO);
         }), method_getTypeEncoding(method));
     }
+}
+
+static void InstallBarGeometryHooks(void) {
     HookVoid(GCStrAt(269), GCStrAt(91), ^(id bar) {
         UIView *text = ObjectGetter(bar, GCStrAt(271));
         if ([text isKindOfClass:UIView.class]) text.hidden = YES;
@@ -6351,6 +6368,9 @@ static void InstallMinimalHome(void) {
             }), method_getTypeEncoding(cm));
         }
     }
+}
+
+static void InstallBarContentHooks(void) {
     // 0.4.50：hook didMoveToSuperview——app 重挂搜索栏时同步触发，父视图一被换立刻挂回 BarParent
     // 0.5.56：真正的机制查清了 —— app 切页时是把搜索栏 **removeFromSuperview**（不是 hidden，
     //         所以 0.5.54/0.5.55 的 layoutSubviews 强制可见 与 setHidden: 拦截全部无效）。
@@ -6420,10 +6440,13 @@ static void InstallMinimalHome(void) {
             }
         }
     }
+}
+
+static void InstallPromoAndWidgetHooks(void) {
     HookVoid(GCStrAt(275), GCStrAt(91), ^(id view) { if (IsHiddenMapPromo(view)) [view setHidden:YES]; });
-    cls = NSClassFromString(GCStrAt(275));
-    sel = @selector(setHidden:);
-    method = class_getInstanceMethod(cls, sel);
+    Class cls = NSClassFromString(GCStrAt(275));
+    SEL sel = @selector(setHidden:);
+    Method method = class_getInstanceMethod(cls, sel);
     if (method) {
         IMP original = method_getImplementation(method);
         Replace(cls, sel, imp_implementationWithBlock(^(UIView *self, BOOL hidden) {
@@ -6519,6 +6542,9 @@ static void InstallMinimalHome(void) {
             ((void (*)(id, SEL, BOOL))original)(self, sel, hidden || IsHiddenMapPromo(self));
         }), method_getTypeEncoding(method));
     }
+}
+
+static void InstallRegistryHooks(void) {
     // 0.5.3：彻底去掉「重复点击首页」的所有触发链。
     // app 有两个注册入口（GDMapHomeTabBarControl / WINAmapHomeVAppService），
     // 两条都换成空 block（非 nil）；再把 item 自带的重复点击开关关掉，
@@ -6696,4 +6722,14 @@ __attribute__((constructor)) static void Initialize(void) {
         });
 
     }
+}
+
+static void InstallMinimalHome(void) {
+    InstallLaunchAndTabHooks();
+    InstallSearchWeatherHooks();
+    InstallImmersiveStateHooks();
+    InstallBarGeometryHooks();
+    InstallBarContentHooks();
+    InstallPromoAndWidgetHooks();
+    InstallRegistryHooks();
 }
