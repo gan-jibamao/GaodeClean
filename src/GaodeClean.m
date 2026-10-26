@@ -131,6 +131,28 @@ static void GCTabSubHookOnce(UIView *sub);                         // probe41(A3
 static void HookClsSetFrame(Class cls, void (^after)(id));         // probe41(A2)：CGRect 版
 static void HookClsSetCenter(Class cls, void (^after)(id));        // probe41(A2)：CGPoint 版
 static NSMutableSet<NSString *> *GCStyleLayerHookedClasses(void);   // trial26：定义在后，P8 dump 段先用
+// ════════════════════════════════════════════════════════════════════
+//  0.9.100：深色模式适配 —— 统一填充色
+//  根因：底栏胶囊/页签/搜索胶囊共 5 处硬编码 colorWithWhite:0.96 与 whiteColor，
+//        项目此前零深色支持 ⇒ 深色主题下全成刺眼白圆（老大 2026-10-27 截图定罪）。
+//  口径：亮色保持原值（观感零变化）；深色用 white:0.16（≈RGB 41）配 alpha 0.92，
+//        与高德深色底栏的灰阶一致。
+//  ref 用来取 traitCollection；传 nil 时退回当前 trait。
+// ════════════════════════════════════════════════════════════════════
+static UIColor *GCStyleFillColor(UIView *ref) {
+    static UIColor *sLight, *sDark;
+    if (!sLight) {
+        sLight = [UIColor colorWithWhite:0.96 alpha:0.92];
+        sDark  = [UIColor colorWithWhite:0.16 alpha:0.92];
+    }
+    if (@available(iOS 13.0, *)) {
+        UITraitCollection *tc = ref.traitCollection;
+        if (!tc) tc = UITraitCollection.currentTraitCollection;
+        if (tc.userInterfaceStyle == UIUserInterfaceStyleDark) return sDark;
+    }
+    return sLight;
+}
+
 static BOOL IsRightBottomWidget(UIView *v);            // trial11：前置声明（discover 用）
 static BOOL GCCIsLiteGroupCapsule(UIView *v);          // trial11：前置声明（discover 用）
 static BOOL FixingHintText;
@@ -2408,7 +2430,7 @@ static void GCStyleSearch(UIView *anchor) {
             UIVisualEffectView *ev = (UIVisualEffectView *)cap;
             if (ev.effect != nil) ev.effect = nil;
         }
-        cap.backgroundColor = [UIColor colorWithWhite:0.96 alpha:0.92];
+        cap.backgroundColor = GCStyleFillColor(cap);   // 0.9.100：深色自适应
         cap.layer.masksToBounds = YES;
         GCStyleCenterIcon(cap, d, 24.0, 0);   // 放大镜居中（保持不变）
     }
@@ -2480,7 +2502,7 @@ static void GCStyleTab(UIView *anchor) {
         // ★trial42(A1)：撤掉 trial41 的「关自动约束」。该标志语义是「用 autoresizingMask 生成约束」，
         //   置 YES 不会移除 App 既有 NSLayoutConstraint，而是额外造一套去撞它们（引擎每 pass 随机破
         //   一条）⇒ 同一控件在两个位置间跳。正解是不碰约束标志，靠 A2 的同事务钳位取胜。
-        it.backgroundColor = [UIColor colorWithWhite:0.96 alpha:0.92];
+        it.backgroundColor = GCStyleFillColor(it);     // 0.9.100：深色自适应
         if (it.alpha < 0.999f) { it.alpha = 1.0f;
 #ifdef GAODECLEAN_PROBE
             P25Append([NSString stringWithFormat:@"t=%.2f PIN-TAB alpha→1\n", P7Now()]);
@@ -3443,15 +3465,10 @@ static void GCStylePinOne(UIView *v) {
                     P7Solid++;
 #endif
                 }
-                CGFloat ba30 = v.backgroundColor ? CGColorGetAlpha(v.backgroundColor.CGColor) : 0;
-                if (ba30 < 0.9f) {
-                    [CATransaction begin]; [CATransaction setDisableActions:YES];
-                    v.backgroundColor = [UIColor whiteColor];
-                    [CATransaction commit];
-#ifdef GAODECLEAN_PROBE
-                    P7Solid++;
-#endif
-                }
+                // 0.9.100：原「2D 钮补白底」整段删除 ——
+                //   该钮已被 probe48 判定为「老大要移除的那颗」并常驻隐藏，
+                //   再给它补 whiteColor 只会在深色模式下刷出一块白。
+                (void)0;
             }
             // ★trial40：父容器被 App 隐藏时**边沿触发**拉回（0.3s 冷却），不再每帧对拉。
             //   dump 铁证：WINAJXCombinedWidgetView h=1 时子钮 a=1.00 也画不出来 = 老大看到的「透明」。
@@ -3813,8 +3830,8 @@ static void GCStylePinCapsuleFill(void) {
     if (!anchor || !anchor.window) return;
     UIView *cap = GCStyleCapsule(anchor);
     if (!cap) return;
-    static UIColor *kCapFill;
-    if (!kCapFill) kCapFill = [UIColor colorWithWhite:0.96 alpha:0.92];
+    // 0.9.100：改为按当前主题取色（深色下为 white:0.16），不再静态缓存亮色
+    UIColor *kCapFill = GCStyleFillColor(cap);
     CGColorRef want = kCapFill.CGColor;
     if (!cap.layer.backgroundColor || !CGColorEqualToColor(cap.layer.backgroundColor, want)) {
         [CATransaction begin]; [CATransaction setDisableActions:YES];
@@ -3935,8 +3952,8 @@ static void GCStylePinTabItems(UIWindow *win) {
         //   当时只改了判据（无条件写），没改频率（仍 5Hz）= 等于没修。这次连频率一起改。
         //   值相同时 CALayer 不触发重绘，幂等。
         {
-            static UIColor *kTabFill;
-            if (!kTabFill) kTabFill = [UIColor colorWithWhite:0.96 alpha:0.92];
+            // 0.9.100：按当前主题取色（深色下为 white:0.16）
+            UIColor *kTabFill = GCStyleFillColor(it);
             CGColorRef want = kTabFill.CGColor;
             if (!it.layer.backgroundColor || !CGColorEqualToColor(it.layer.backgroundColor, want)) {
                 it.backgroundColor = kTabFill;
