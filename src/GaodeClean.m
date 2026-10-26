@@ -113,7 +113,7 @@ static void GCStylePinWidgets(UIWindow *win);        // trial25(A2)：重入守�
 static void GCStylePinTabItems(UIWindow *win);       // trial42(A3)：首页/我的 帧级钉位前置声明
 static void GCStylePinCapsuleFill(void);             // trial54(A2)：搜索胶囊白底 60fps 前置声明
 static void GCTabItemPinX(UIView *bar, UIView *item, int index);   // probe40(A4)：底栏两钮 x 钉位前置声明
-static void GCTabSubClamp(UIView *v);                              // probe41(A1)：底栏内容子项「同事务钉位」前置声明
+static void GCTabSubClamp(UIView *v, int fromHook);                              // probe41(A1)：底栏内容子项「同事务钉位」前置声明
 static void GCTabSubHookOnce(UIView *sub);                         // probe41(A3)：按运行时类挂同事务后置钩子前置声明
 static void HookClsSetFrame(Class cls, void (^after)(id));         // probe41(A2)：CGRect 版
 static void HookClsSetCenter(Class cls, void (^after)(id));        // probe41(A2)：CGPoint 版
@@ -3844,7 +3844,7 @@ static void GCStylePinTabItems(UIWindow *win) {
         //   probe41：本循环保留（常规纠偏），并发起「同事务钉位」与钩子安装。
         for (UIView *sub in it.subviews) {
             if (sub.isHidden) continue;
-            GCTabSubClamp(sub);        // probe41(A1)：App 写 x=0 的同一调用内纠回
+            GCTabSubClamp(sub, 0);        // probe41(A1)：App 写 x=0 的同一调用内纠回
             GCTabSubHookOnce(sub);     // probe41(A3)：首个实例挂 setFrame:/setCenter: 后置钩子
             CGFloat wantX = (iw - sub.frame.size.width) * 0.5;
             if (fabs(sub.frame.origin.x - wantX) > 0.5) {
@@ -5509,7 +5509,7 @@ static void InstallTabBarGuideLottieBlock(void) {
 //     数值对账：x=15 → 图标中心 136.5pt = 306.8px（实测常态）；
 //               x=0  → 图标中心 121.5pt = 273.9px（实测闪帧 274.3px）。
 //   修法：把纠正从「下一帧」提前到「App 写 x 的同一调用内」。
-//     钩子只挂 WINTabBarItem 子类（白名单，绝不碰 UIKit 共享类）；
+//     钩子按运行时类捕获（probe42 修正：WINTabBarSubItem 并非 WINTabBarItem 子类）；
 //     选择器用 @selector 编译期常量 ⇒ 零新增明文字符串。
 // ─────────────────────────────────────────────────────────────────────
 static BOOL GCSubClampBusy = NO;
@@ -5517,7 +5517,9 @@ static BOOL GCSubClampBusy = NO;
 static int  GCSubClampN[2] = {0, 0};
 #endif
 
-static void GCTabSubClamp(UIView *v) {
+// probe42(A2)：加 fromHook 参数（0=布局兜底 1=setter 钩子），探针改为「无条件限次」
+//   —— probe41 的去重逻辑只记「不同的 x 值」，同一 x 被反复写回时一条不打 ⇒ 观测失真。
+static void GCTabSubClamp(UIView *v, int fromHook) {
     if (GCSubClampBusy || !v) return;
     UIView *item = v.superview;
     int idx = (item == CachedTabItemA) ? 0 : ((item == CachedTabItemB) ? 1 : -1);
@@ -5526,11 +5528,10 @@ static void GCTabSubClamp(UIView *v) {
     if (fabs(v.frame.origin.x - wantX) <= 0.5f) return;      // 幂等：达标不写
     CGRect f = v.frame;
 #ifdef GAODECLEAN_PROBE
-    { static CGFloat last0 = -1, last1 = -1; CGFloat *last = idx ? &last1 : &last0;
-      if (fabs(*last - f.origin.x) > 0.01f) {
-          *last = f.origin.x;
-          P25Append([NSString stringWithFormat:@"t=%.2f CLAMP[%d] x %.2f -> %.2f (第%d次)\n",
-                     P7Now(), idx, (double)f.origin.x, (double)wantX, ++GCSubClampN[idx]]); } }
+    if (GCSubClampN[idx] < 40)
+        P25Append([NSString stringWithFormat:@"t=%.2f CLAMP[%d]%s x %.2f -> %.2f w=%.1f (第%d次)\n",
+                   P7Now(), idx, fromHook ? "H" : "L", (double)f.origin.x, (double)wantX,
+                   (double)v.frame.size.width, ++GCSubClampN[idx]]);
 #endif
     f.origin.x = wantX;
     GCSubClampBusy = YES;
@@ -5567,22 +5568,32 @@ static void HookClsSetCenter(Class cls, void (^after)(id)) {
 }
 
 // probe41(A3)：首次遇到内容子项时挂钩。白名单＝ WINTabBarItem（GCStrAt(149)）家族。
-static Class GCSubHooked[8];
-static int   GCSubHookedN = 0;
+// probe42(A1)：按 item 分组捕获子视图类（零新增字符串），每组至多 4 个类。
+//   probe41 用 isSubclassOfClass:NSClassFromString(GCStrAt(149)) 过滤 ⇒ 白名单判错
+//   （实际类是 WINTabBarSubItem，不是 WINTabBarItem 的子类，日志 SUBhook=0）。
+//   probe42 直接拿运行时 object_getClass(sub) 挂钩，只排除 [UIView class]（基类）。
+static Class GCSubCls[2][4];   // per-item (0=itemA, 1=itemB) class arrays
+static int   GCSubClsN[2];
 static void GCTabSubHookOnce(UIView *sub) {
-    if (!sub) return;
+    UIView *item = sub.superview;
+    int idx = (item == CachedTabItemA) ? 0 : ((item == CachedTabItemB) ? 1 : -1);
+    if (idx < 0 || sub.frame.size.width < 10.0f) return;
     Class c = object_getClass(sub);
-    Class base = NSClassFromString(GCStrAt(149));        // WINTabBarItem
-    if (!base || ![c isSubclassOfClass:base]) return;    // 不在白名单 ⇒ 绝不挂钩
-    for (int i = 0; i < GCSubHookedN; i++) if (GCSubHooked[i] == c) return;
-    if (GCSubHookedN >= 8) return;
-    GCSubHooked[GCSubHookedN++] = c;
+    if (c == [UIView class]) return;                     // 绝不钩 UIKit 基类
+    for (int i = 0; i < GCSubClsN[idx]; i++) if (GCSubCls[idx][i] == c) return;
+    if (GCSubClsN[idx] >= 4) return;
+    GCSubCls[idx][GCSubClsN[idx]++] = c;
 #ifdef GAODECLEAN_PROBE
-    P25Append([NSString stringWithFormat:@"t=%.2f SUBhook %s w=%.1f\n",
-               P7Now(), class_getName(c), (double)sub.frame.size.width]);
+    P25Append([NSString stringWithFormat:@"t=%.2f SUBhook[%d] %s x=%.1f w=%.1f h=%.1f\n",
+               P7Now(), idx, class_getName(c), (double)sub.frame.origin.x,
+               (double)sub.frame.size.width, (double)sub.frame.size.height]);
 #endif
-    HookClsSetFrame(c,  ^(id s) { GCTabSubClamp((UIView *)s); });
-    HookClsSetCenter(c, ^(id s) { GCTabSubClamp((UIView *)s); });
+    for (int j = 0; j < 2; j++) {                        // 同类已在另一组挂过 ⇒ 只记录不重复挂钩
+        if (j == idx) continue;
+        for (int i = 0; i < GCSubClsN[j]; i++) if (GCSubCls[j][i] == c) return;
+    }
+    HookClsSetFrame(c,  ^(id s) { GCTabSubClamp((UIView *)s, 1); });
+    HookClsSetCenter(c, ^(id s) { GCTabSubClamp((UIView *)s, 1); });
 }
 
 // probe40(A2)：底栏两钮 x 的帧级钉位（复用 CenterTabButtons 的官方公式）。
@@ -6084,13 +6095,13 @@ static void InstallMinimalHome(void) {
         GCTabItemPinX(bar, CachedTabItemA, 0);
         GCTabItemPinX(bar, CachedTabItemB, 1);
         // probe41(A4)：底栏重排后同帧兜底 + 装钩子（防 App 绕过 setFrame: 走自身布局通道）
-        if (CachedTabItemA) for (UIView *s in CachedTabItemA.subviews) { GCTabSubClamp(s); GCTabSubHookOnce(s); }
-        if (CachedTabItemB) for (UIView *s in CachedTabItemB.subviews) { GCTabSubClamp(s); GCTabSubHookOnce(s); }
+        if (CachedTabItemA) for (UIView *s in CachedTabItemA.subviews) { GCTabSubClamp(s, 0); GCTabSubHookOnce(s); }
+        if (CachedTabItemB) for (UIView *s in CachedTabItemB.subviews) { GCTabSubClamp(s, 0); GCTabSubHookOnce(s); }
     });
     // probe41(A4)：WINTabBarItem 自身布局后同帧兜底（只对底栏那两个实例生效）
     HookVoid(GCStrAt(149), GCStrAt(91), ^(UIView *item) {
         if (item != CachedTabItemA && item != CachedTabItemB) return;
-        for (UIView *s in item.subviews) { GCTabSubClamp(s); GCTabSubHookOnce(s); }
+        for (UIView *s in item.subviews) { GCTabSubClamp(s, 0); GCTabSubHookOnce(s); }
     });
     InstallTabBarHintHooks();
     // 0.9.1：「上拉发现」引导 Lottie 拦截（17.01.1 GuideLottie 机制）
