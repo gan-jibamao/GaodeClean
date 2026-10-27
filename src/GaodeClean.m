@@ -139,17 +139,86 @@ static NSMutableSet<NSString *> *GCStyleLayerHookedClasses(void);   // trial26�
 //        与高德深色底栏的灰阶一致。
 //  ref 用来取 traitCollection；传 nil 时退回当前 trait。
 // ════════════════════════════════════════════════════════════════════
+// ════════════════════════════════════════════════════════════════════
+//  0.9.102（probe55 铁证驱动）：高德**不跟随系统 trait**
+//  实测 TRAIT#1 style=1 dark=0 winStyle=1 override=1
+//    —— 画面明明是深色地图，但 userInterfaceStyle 报 Light。
+//    高德用自定义深色主题，不通过系统 trait ⇒ GCStyleFillColor 永远判亮色，
+//    0.9.100/0.9.101 两版因此全部空转（DARK 命中 0 条）。
+//  改用**屏幕亮度采样**判定外观：深色截图中部地图区均值 65.9（0~255），
+//    亮色地图通常 200+，阈值取 140 安全。
+//  成本：只读 8×8 像素、5Hz 级调用（每 1s 更新一次缓存），可忽略。
+// ════════════════════════════════════════════════════════════════════
+static BOOL GCIsDarkAppearance(UIWindow *win) {
+    static BOOL cached; static double lastT;
+    double now = CACurrentMediaTime();
+    if (now - lastT < 1.0 && now > lastT) return cached;   // 1 秒缓存
+    lastT = now;
+    BOOL dark = NO;
+    // ① 先问 trait（若某些机型/版本确实跟随系统，这条最准）
+    if (@available(iOS 13.0, *)) {
+        if (win.traitCollection.userInterfaceStyle == UIUserInterfaceStyleDark) dark = YES;
+    }
+    // ② trait 说亮色 → 再按屏幕实际亮度复核（高德自定义深色的情况）
+    if (!dark && win) {
+        @try {
+            CGSize sz = win.bounds.size;
+            if (sz.width > 40 && sz.height > 40) {
+                // 采样地图中部空白带：x 5%~35%、y 30%~45%
+                CGFloat sx = sz.width * 0.05f, sy = sz.height * 0.30f;
+                CGFloat sw2 = sz.width * 0.30f, sh2 = sz.height * 0.15f;
+                CGSize small = CGSizeMake(4, 4);
+                UIGraphicsImageRenderer *ren = [[UIGraphicsImageRenderer alloc] initWithSize:small];
+                UIImage *img = [ren imageWithActions:^(UIGraphicsImageRendererContext *ctx) {
+                    [win drawViewHierarchyInRect:CGRectMake(-sx, -sy, sz.width, sz.height)
+                               afterScreenUpdates:NO];
+                }];
+                CGImageRef cg = img.CGImage;
+                if (cg) {
+                    unsigned char px[4 * 4 * 4] = {0};
+                    CGColorSpaceRef cs = CGColorSpaceCreateDeviceRGB();
+                    CGContextRef c2 = CGBitmapContextCreate(px, 4, 4, 8, 4 * 4, cs,
+                                                            kCGImageAlphaPremultipliedLast);
+                    CGColorSpaceRelease(cs);
+                    if (c2) {
+                        CGContextDrawImage(c2, CGRectMake(0, 0, 4, 4), cg);
+                        CGContextRelease(c2);
+                        int sum = 0;
+                        for (int k = 0; k < 16; k++)
+                            sum += (px[k*4]*30 + px[k*4+1]*59 + px[k*4+2]*11) / 100;
+                        int mean = sum / 16;
+                        if (mean < 140) dark = YES;
+                        #ifdef GAODECLEAN_PROBE
+                        if (!GCProbeBuf6) GCProbeBuf6 = [NSMutableString string];
+                        [GCProbeBuf6 appendString:[NSString stringWithFormat:
+                            @"\nLUMA mean=%d => dark=%d\n", mean, dark ? 1 : 0]];
+                        #endif
+                    }
+                }
+                (void)sw2; (void)sh2;
+            }
+        } @catch (__unused NSException *e) {}
+    }
+    cached = dark;
+    return dark;
+}
+
 static UIColor *GCStyleFillColor(UIView *ref) {
     static UIColor *sLight, *sDark;
     if (!sLight) {
         sLight = [UIColor colorWithWhite:0.96 alpha:0.92];
         sDark  = [UIColor colorWithWhite:0.16 alpha:0.92];
     }
-    if (@available(iOS 13.0, *)) {
-        UITraitCollection *tc = ref.traitCollection;
-        if (!tc) tc = UITraitCollection.currentTraitCollection;
-        if (tc.userInterfaceStyle == UIUserInterfaceStyleDark) return sDark;
-    }
+    // 0.9.102：改用 GCIsDarkAppearance（trait 不可信，见上方说明）
+    UIWindow *w = ref.window ?: ({
+        UIWindow *found = nil;
+        for (UIScene *sc in UIApplication.sharedApplication.connectedScenes)
+            if ([sc isKindOfClass:UIWindowScene.class])
+                for (UIWindow *x in ((UIWindowScene *)sc).windows)
+                    if (x.isKeyWindow) { found = x; break; }
+        found;
+    });
+    if (w && GCIsDarkAppearance(w)) return sDark;
     return sLight;
 }
 
@@ -3391,12 +3460,7 @@ static void GCCapTrace(UIWindow *win);            // probe50：前置声明（5H
 // ════════════════════════════════════════════════════════════════════
 static void GCStyleDarkenRoundWidgets(UIWindow *win) {
     if (!win) return;
-    BOOL dark = NO;
-    if (@available(iOS 13.0, *)) {
-        UITraitCollection *tc = win.traitCollection;
-        if (tc.userInterfaceStyle == UIUserInterfaceStyleDark) dark = YES;
-    }
-    if (!dark) return;                       // 亮色主题：一律不碰
+    if (!GCIsDarkAppearance(win)) return;    // 0.9.102：亮度判据（trait 不可信）
     static int busy;
     if (busy) return;
     busy = 1;
