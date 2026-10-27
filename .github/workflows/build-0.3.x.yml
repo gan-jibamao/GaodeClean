@@ -1,0 +1,130 @@
+name: Build 0.3.x
+
+# GaodeClean 0.3.x 专属构建（与 main 的 0.9.x 工作流完全隔离）
+#   macOS-14 + theos + 官方工具链（Apple ld64）
+#   → arm64 / arm64e 双架构均为 LC_DYLD_CHAINED_FIXUPS（链式绑定）
+#   这点是本工作流存在的唯一理由：本机 iSH 的 ld64.lld 不支持 arm64e 的
+#   -fixup_chains，只能出经典绑定，装到 arm64e 设备上会 dyld 拒绝。
+
+on:
+  push:
+    branches: [ 'gc03/**' ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-14
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install theos + SDK + ldid/dpkg
+        run: |
+          set -e
+          export THEOS=$HOME/theos
+          git clone --recursive --depth 1 https://github.com/roothide/theos.git $THEOS
+          rm -rf $THEOS/sdks
+          git clone --depth 1 https://github.com/theos/sdks.git $THEOS/sdks
+          brew install ldid dpkg 2>/dev/null || true
+          echo "THEOS=$THEOS" >> $GITHUB_ENV
+          echo "--- SDK 列表 ---"
+          ls $THEOS/sdks | head
+
+      - name: Show target
+        run: |
+          echo "control Version: $(grep -m1 '^Version:' control | awk '{print $2}')"
+          grep -n 'CFBundleShortVersionString' src/GaodeClean.m | head -3 || true
+
+      - name: Build (rootless arm64)
+        run: |
+          set -e
+          export THEOS=$HOME/theos
+          make clean >/dev/null 2>&1 || true
+          make package FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=rootless ARCHS=arm64 2>&1 | tail -30
+          mkdir -p out
+          find packages -name '*arm64.deb' ! -name '*arm64e*' -exec cp {} out/ \;
+          ls -l out/
+
+      - name: Build (roothide arm64e)
+        run: |
+          set -e
+          export THEOS=$HOME/theos
+          make clean >/dev/null 2>&1 || true
+          make package FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=roothide ARCHS=arm64e 2>&1 | tail -30
+          find packages -name '*arm64e.deb' -exec cp {} out/ \;
+          ls -l out/
+
+      - name: Inspect payload
+        run: |
+          set -e
+          for d in out/*.deb; do
+            echo "== $d"
+            dpkg-deb -f "$d" Package Version Architecture
+            dpkg-deb -c "$d"
+          done
+
+      - name: Verify binding mode (关键门禁)
+        run: |
+          set -e
+          rm -rf /tmp/x && mkdir -p /tmp/x
+          for d in out/*.deb; do
+            echo "===== $d"
+            rm -rf /tmp/x && mkdir -p /tmp/x
+            dpkg-deb -x "$d" /tmp/x
+            DYL=$(find /tmp/x -name GaodeClean.dylib)
+            echo "dylib: $DYL ($(stat -f%z "$DYL") B)"
+            python3 - "$DYL" <<'PY'
+import struct, sys
+p = sys.argv[1]
+d = open(p, 'rb').read()
+ncmds = struct.unpack('<I', d[16:20])[0]
+o = 32
+chained = classic = False
+cputype = cpusub = None
+for _ in range(ncmds):
+    c, s = struct.unpack('<II', d[o:o+8])
+    if c == 0x80000034: chained = True
+    if c == 0x80000022: classic = True
+    if c == 0x32:
+        plat, minos, sdk, _ = struct.unpack('<IIII', d[o+8:o+24])
+        print(f'  LC_BUILD_VERSION sdk={sdk>>16}.{(sdk>>8)&0xff}.{sdk&0xff}')
+    o += s
+cputype, cpusub = struct.unpack('<ii', d[4:12])
+print(f'  cputype=0x{cputype:x} cpusubtype={cpusub}')
+print(f'  CHAINED={chained}  CLASSIC={classic}')
+if not chained:
+    print('::error::产物不是链式绑定，arm64e 会 dyld 拒绝')
+    sys.exit(1)
+print('::notice::链式绑定 OK')
+PY
+            echo "--- 版本串 ---"
+            strings -a "$DYL" | grep -E 'no version limit|unsupported app version' || true
+            echo "--- 过滤器 ---"
+            cat "$(dirname "$DYL")/GaodeClean.plist" | tr -d ' \n' | grep -o 'com.autonavi.amap'
+          done
+
+      - name: Collect dylib + deb
+        run: |
+          set -e
+          VER=$(grep -m1 '^Version:' control | awk '{print $2}')
+          rm -rf /tmp/x && mkdir -p /tmp/x
+          for d in out/*.deb; do
+            rm -rf /tmp/y && mkdir -p /tmp/y
+            dpkg-deb -x "$d" /tmp/y
+            DYL=$(find /tmp/y -name GaodeClean.dylib)
+            case "$d" in
+              *arm64e*) cp "$DYL" "out/GaodeClean-${VER}-arm64e.dylib" ;;
+              *)        cp "$DYL" "out/GaodeClean-${VER}-arm64.dylib" ;;
+            esac
+          done
+          ls -l out/
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: GaodeClean-0.3.x
+          path: out/*
+          if-no-files-found: error
