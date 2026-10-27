@@ -382,7 +382,7 @@ static void CleanPage(UIView *page) {
                 NSData *data = [NSData dataWithContentsOfFile:[dir stringByAppendingPathComponent:@"GaodeClean-diagnostics.json"]];
                 NSDictionary *report = data ? [NSJSONSerialization JSONObjectWithData:data options:0 error:nil] : nil;
                 NSDictionary *mine = report[@"pages"][@"3"];
-                if ([@[@"0.3.0", @"0.3.1", @"0.3.3"] containsObject:report[@"version"] ?: @""] && [mine[@"matched"] boolValue]) {
+                if ([@[@"0.3.0", @"0.3.1", @"0.3.4"] containsObject:report[@"version"] ?: @""] && [mine[@"matched"] boolValue]) {
                     CGRect blank = CGRectFromString(mine[@"blankAreaFrame"] ?: @"");
                     if (blank.origin.y > 100) cached = @{@"width":@(blank.size.width), @"bottom":@(blank.origin.y)};
                 }
@@ -753,36 +753,106 @@ static void GCHideBarPlatter(UIView *bar) {
     }
 }
 
-// 把搜索框收成圆钮：只留放大镜
+// 把搜索框收成圆钮：只留放大镜（v2 —— 不缩放内部视图，只平移 + 裁剪）
+// 原生结构（p4 探针实测）：
+//   bar {0,9,393,54}
+//   ├ UIVisualEffectView {8,0,377,54}          胶囊（圆角27）
+//   │   └ _UIVisualEffectContentView
+//   │       └ UIImageView {0,0,377,54}          容器
+//   │           ├ UIImageView {16,15,24,24}     放大镜
+//   │           └ WINVerticalScrollText hid=1   滚动文字
+//   ├ LTMVUIEmojiView {341,11,32,32}            语音（隐藏）
+//   └ UIButton {293,3,48,48}                    相机（隐藏）
+// 做法：胶囊只平移 (-16,-1) → 盖满 52×52 圆；容器平移到放大镜居中；
+//       垫一层不透明白圆底防胶囊圆角透出；手势不动，缺原生 tap 时加兜底转发。
+static UIView *GCLiveSearchBar;
+@interface GCTapRouter : NSObject
+- (void)gcRoute:(UIGestureRecognizer *)gr;
+@end
+@implementation GCTapRouter
+- (void)gcRoute:(__unused UIGestureRecognizer *)gr {
+    UIView *bar = GCLiveSearchBar;
+    if (!bar) return;
+    for (UIGestureRecognizer *g in bar.gestureRecognizers) {
+        if (![g isKindOfClass:[UITapGestureRecognizer class]] || g == gr || !g.enabled) continue;
+        id target = nil;
+        SEL action = NULL;
+        // target/action 是 UIGestureRecognizer 的只读私有属性，走 KVC
+        @try {
+            target = [g valueForKey:@"target"];
+            action = NSSelectorFromString([g valueForKey:@"action"] ?: @"");
+        } @catch (NSException *e) { target = nil; }
+        if (target && action) {
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+            [target performSelector:action withObject:g];
+#pragma clang diagnostic pop
+            return;
+        }
+    }
+}
+@end
+static GCTapRouter *GCTapRouterShared;
+
 static void GCShrinkSearchBar(UIView *bar) {
     if (![bar isKindOfClass:UIView.class]) return;
     bar.layer.cornerRadius = GC_DOT / 2.0;
     bar.layer.masksToBounds = YES;
+
+    UIView *capsule = nil;
     for (UIView *v in bar.subviews) {
-        // 语音钮 / 相机钮：不是胶囊的那个
         if ([v isKindOfClass:[UIButton class]]) { v.hidden = YES; continue; }
         if ([NSStringFromClass(v.class) containsString:@"EmojiView"]) { v.hidden = YES; continue; }
-        // 胶囊本体：撑满整个圆
-        if ([v isKindOfClass:[UIVisualEffectView class]]) {
-            v.frame = CGRectMake(0, 0, GC_DOT, GC_DOT);
-            v.layer.cornerRadius = GC_DOT / 2.0;
-            v.layer.masksToBounds = YES;
-            for (UIView *c in v.subviews) {
-                if ([c isKindOfClass:[UIView class]] && fabs(c.frame.size.width - 377) < 2) {
-                    c.frame = CGRectMake(0, 0, GC_DOT, GC_DOT);
-                }
-                for (UIView *g in c.subviews) {
-                    if ([g isKindOfClass:[UIImageView class]] && fabs(g.frame.size.width - 377) < 2) {
-                        g.frame = CGRectMake(0, 0, GC_DOT, GC_DOT);
+        if ([v isKindOfClass:[UIVisualEffectView class]]) capsule = v;
+    }
+    // 胶囊平移到盖满圆：原生 x=8 → -8（重复调用安全：x<0 就不再移）
+    if (capsule && capsule.frame.origin.x > 0) {
+        capsule.frame = CGRectOffset(capsule.frame, -16, -1);
+    }
+    // 容器平移使放大镜居中：放大镜原生在容器内 (16,15)+(12,12) 中心=(28,27)
+    // 目标：effectView.x(-8) + container.x + 28 = 26 → container.x = 6
+    if (capsule) {
+        for (UIView *c in capsule.subviews) {
+            for (UIView *g in c.subviews) {
+                if ([g isKindOfClass:[UIImageView class]] && g.frame.size.width > 300) {
+                    if (g.frame.origin.x < 300 && fabs(g.frame.origin.x) < 2) {
+                        CGRect f = g.frame; f.origin.x = 6; f.origin.y = 0; g.frame = f;
                     }
-                    // 放大镜：24x24 居中
-                    if ([g isKindOfClass:UIImageView.class] && fabs(g.frame.size.width - 24) < 2) {
-                        g.frame = CGRectMake((GC_DOT - 24) / 2, (GC_DOT - 24) / 2, 24, 24);
-                    }
-                    // 滚动文字：隐藏
-                    if ([NSStringFromClass(g.class) containsString:@"VerticalScrollText"]) g.hidden = YES;
                 }
+                if ([NSStringFromClass(g.class) containsString:@"VerticalScrollText"]) g.hidden = YES;
             }
+        }
+    }
+    // 白圆底：防胶囊自身圆角在圆内透出地图色
+    UIView *back = nil;
+    for (UIView *v in bar.subviews)
+        if ([v.accessibilityIdentifier isEqualToString:@"GCSearchDotBack"]) back = v;
+    if (!back) {
+        back = [[UIView alloc] initWithFrame:CGRectMake(0, 0, GC_DOT, GC_DOT)];
+        back.accessibilityIdentifier = @"GCSearchDotBack";
+        back.layer.cornerRadius = GC_DOT / 2.0;
+        back.layer.masksToBounds = YES;
+        back.backgroundColor = [UIColor colorWithWhite:0.97 alpha:1.0];
+        back.userInteractionEnabled = NO;
+        [bar insertSubview:back atIndex:0];
+    } else {
+        back.frame = CGRectMake(0, 0, GC_DOT, GC_DOT);
+    }
+    // 点击兜底：bar 和胶囊都没有原生 tap 时，加转发手势
+    GCLiveSearchBar = bar;
+    if (!GCTapRouterShared) GCTapRouterShared = [GCTapRouter new];
+    BOOL hasNativeTap = NO;
+    NSArray *check = capsule ? @[bar, capsule] : @[bar];
+    for (UIView *cv in check)
+        for (UIGestureRecognizer *g in cv.gestureRecognizers)
+            if ([g isKindOfClass:[UITapGestureRecognizer class]]) hasNativeTap = YES;
+    if (!hasNativeTap) {
+        for (UIGestureRecognizer *g in bar.gestureRecognizers)
+            if ([g isKindOfClass:[UITapGestureRecognizer class]] && [[g valueForKey:@"target"] isEqual:GCTapRouterShared]) hasNativeTap = YES;
+        if (!hasNativeTap) {
+            UITapGestureRecognizer *tr = [[UITapGestureRecognizer alloc] initWithTarget:GCTapRouterShared
+                                                                                action:@selector(gcRoute:)];
+            [bar addGestureRecognizer:tr];
         }
     }
 }
@@ -966,6 +1036,6 @@ __attribute__((constructor)) static void Initialize(void) {
         dispatch_async(dispatch_get_main_queue(), ^{
             [NSTimer scheduledTimerWithTimeInterval:0.5 repeats:YES block:^(__unused NSTimer *timer) { Schedule(); }];
         });
-        NSLog(@"[GaodeClean] loaded 0.3.3 (no version limit; appVer=%@)", appVersion);
+        NSLog(@"[GaodeClean] loaded 0.3.4 (no version limit; appVer=%@)", appVersion);
     }
 }
