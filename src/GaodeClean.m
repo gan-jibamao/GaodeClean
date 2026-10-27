@@ -150,9 +150,17 @@ static NSMutableSet<NSString *> *GCStyleLayerHookedClasses(void);   // trial26�
 //  成本：只读 8×8 像素、5Hz 级调用（每 1s 更新一次缓存），可忽略。
 // ════════════════════════════════════════════════════════════════════
 static BOOL GCIsDarkAppearance(UIWindow *win) {
-    static BOOL cached; static double lastT;
+    // ★0.9.105（冷启动白钮 1.5 秒的铁证驱动）：
+    //   probe58 视频逐帧实测：t=1.07s~2.53s 按钮亮度恒 237~239（纯白），t=2.57 才落到 54。
+    //   两个原因叠加：
+    //     ① 首次采样在窗口画好前执行，drawViewHierarchyInRect 返回全黑 ⇒ mean=0，
+    //        旧代码把这个「失败」当成结论写进 cached 并锁 1 秒 ⇒ 启动期判定不可靠。
+    //     ② 压白只在 60fps 通道跑，要等 CachedTabBar 出现才开始。
+    //   本版：失败不写缓存（保留 hasValid 标记）；有效值只缓存 0.5s；
+    //         从未采到有效值前「保守按深色」—— 深色下早压是对的，亮色下也只是先暗后亮一瞬。
+    static BOOL cached; static double lastT; static BOOL hasValid;
     double now = CACurrentMediaTime();
-    if (now - lastT < 1.0 && now > lastT) return cached;   // 1 秒缓存
+    if (hasValid && now - lastT < 0.5 && now > lastT) return cached;
     lastT = now;
     BOOL dark = NO;
     // ① 先问 trait（若某些机型/版本确实跟随系统，这条最准）
@@ -190,7 +198,7 @@ static BOOL GCIsDarkAppearance(UIWindow *win) {
                         // ★0.9.103：mean==0 表示 drawViewHierarchyInRect 渲染失败（返回全黑），
                         //   不是「屏幕很暗」。probe56 日志首条 LUMA mean=0 就是这种情况。
                         //   若把失败当成深色，亮色模式下会误压白 ⇒ 必须排除。
-                        if (mean > 0 && mean < 140) dark = YES;
+                        if (mean > 0) { hasValid = YES; dark = (mean < 140); }
                         #ifdef GAODECLEAN_PROBE
                         if (!GCProbeBuf6) GCProbeBuf6 = [NSMutableString string];
                         [GCProbeBuf6 appendString:[NSString stringWithFormat:
@@ -203,6 +211,7 @@ static BOOL GCIsDarkAppearance(UIWindow *win) {
             }
         } @catch (__unused NSException *e) {}
     }
+    if (!hasValid) return YES;    // 从未采到有效亮度 ⇒ 保守按深色（宁可早暗，不要白闪）
     cached = dark;
     return dark;
 }
@@ -3488,8 +3497,13 @@ static void GCStyleDarkenRoundWidgets(UIWindow *win) {
         if (v.hidden || v.alpha < 0.05f) continue;
         if (v.subviews.count < 60) [stack addObjectsFromArray:v.subviews];
         CGRect r = [v convertRect:v.bounds toView:win];
-        if (r.size.width < 42 || r.size.width > 62) continue;
-        if (fabs(r.size.width - r.size.height) > 6) continue;    // 近圆形
+        // ★0.9.105(A3)：宽度上限 62 → 100。
+        //   BTN57 实测底栏 WINTabBarItem = **84×54**（圆角 27，靠 54×54 mask 才呈圆形），
+        //   旧上限 62 把它整类跳过 ⇒ 冷启动那 1.5 秒白钮没人管。
+        //   高度仍卡 42~62（真圆钮/胶囊高度都在这区间），避免误伤别的控件。
+        if (r.size.width < 42 || r.size.width > 100) continue;
+        if (r.size.height < 42 || r.size.height > 62) continue;
+        if (fabs(r.size.width - r.size.height) > 46) continue;   // 84×54 ⇒ 差 30，放行
         if (CGRectGetMidY(r) < sh * 0.85) continue;              // 只认底部 15%（底栏区）
         if (CGRectGetMidX(r) < 0) continue;
         UIColor *bg = v.backgroundColor;
@@ -3558,6 +3572,9 @@ static void GCStyleMapTypeAlign(UIWindow *win) {
 static void GCStyleAlignMapType(UIWindow *win) {           // 5Hz 入口：发现 + 对齐
     GCStyleMapTypeDiscover(win);
     GCStyleMapTypeAlign(win);
+    // ★0.9.105(A2)：5Hz 入口也压白 —— 60fps 通道要等 CachedTabBar 出现才跑，
+    //   启动早期那 1.5 秒白钮就是这段空窗。5Hz tick 起得更早，能补上。
+    GCStyleDarkenRoundWidgets(win);
 #ifdef GAODECLEAN_PROBE
     GCCapTrace(win);                                       // probe50：5Hz 也采一次，抓启动早期
     GCBtnTrace(win);                                       // probe57：底部三钮图层树
