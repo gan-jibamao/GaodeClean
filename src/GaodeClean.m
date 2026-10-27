@@ -159,7 +159,7 @@ static BOOL GCIsDarkAppearance(UIWindow *win) {
     //   本版：失败不写缓存（保留 hasValid 标记）；有效值只缓存 0.5s；
     //         从未采到有效值前「保守按深色」—— 深色下早压是对的，亮色下也只是先暗后亮一瞬。
     static BOOL cached; static double lastT; static BOOL hasValid;
-    static BOOL wasMapReady;
+    static BOOL wasMapReady; static double lastMapScan;
     double now = CACurrentMediaTime();
     if (hasValid && now - lastT < 0.15 && now > lastT) return cached;   // 0.9.106：0.5→0.15，快跟随
     lastT = now;
@@ -173,23 +173,37 @@ static BOOL GCIsDarkAppearance(UIWindow *win) {
     //     mean=196 并被判成「亮色」，缓存又覆盖到地图刚出来那 0.4 秒
     //     （视频实测 t=2.83~3.23 地图已深色68、按钮却 218）。
     //     改为：**只有地图容器真的在窗口里时才采样**，启动页一律不更新结论。
-    BOOL mapReady = NO;
-    if (win) {
+    // 0.9.108：mapReady 一旦为真就不再复扫（地图容器启动后不会消失）；
+    //   为假时按 0.25 秒节流复扫，避免 60fps 每帧走 300 节点树遍历。
+    static BOOL mapReadyDone;
+    BOOL mapReady = mapReadyDone;
+    if (mapReady) { /* 已知就绪，跳过扫描 */ }
+    else if (win && now - lastMapScan < 0.25 && lastMapScan > 0) { mapReady = NO; }
+    else {
+        lastMapScan = now;
         static Class mapCls;
         static BOOL looked;
         if (!looked) { looked = YES; mapCls = NSClassFromString(@"MapWidgetContainerView"); }
         if (mapCls) {
-            for (UIView *v in win.subviews) {
-                if ([v isKindOfClass:mapCls]) { mapReady = YES; break; }
-            }
-            if (!mapReady) {
-                NSMutableArray<UIView *> *q = [NSMutableArray arrayWithObject:win];
-                NSUInteger bud = 200;
-                for (NSUInteger i = 0; i < q.count && bud--; i++) {
-                    UIView *v = q[i];
-                    if ([v isKindOfClass:mapCls]) { mapReady = YES; break; }
-                    [q addObjectsFromArray:v.subviews];
+            // ★0.9.108：判据从「存在」收紧为「真的可见」。
+            //   铁证：probe61 日志 FILL#6~8 => LIGHT，对应 LUMA mean=196（启动页白屏）。
+            //   说明启动页阶段 MapWidgetContainerView 已经在窗口里（只是被启动页盖着），
+            //   旧判据因此放行采样，采到的却是启动页白底。
+            //   现在要求：自身 hid=0、alpha>0.1，且向上 6 层祖先也都可见。
+            NSMutableArray<UIView *> *q = [NSMutableArray arrayWithObject:win];
+            NSUInteger bud = 300;
+            for (NSUInteger i = 0; i < q.count && bud--; i++) {
+                UIView *v = q[i];
+                if ([v isKindOfClass:mapCls]) {
+                    BOOL vis = (v.hidden == NO && v.alpha > 0.1f);
+                    UIView *pp = v.superview;
+                    for (int d = 0; vis && d < 6 && pp; d++, pp = pp.superview) {
+                        if (pp.hidden || pp.alpha <= 0.1f) vis = NO;
+                        if (pp == win) break;
+                    }
+                    if (vis) { mapReady = YES; mapReadyDone = YES; break; }
                 }
+                [q addObjectsFromArray:v.subviews];
             }
         }
     }
