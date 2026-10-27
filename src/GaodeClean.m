@@ -4540,6 +4540,7 @@ static void GCStylePinWidgets(UIWindow *win) {
     GCStylePinBusy = YES;
     GCStylePinWidgetsInner(win);
     GCStyleDarkenRoundWidgets(win);   // 0.9.101：深色下统一压白（底栏圆钮等，无条件执行）
+    GCStyleMinePageTick(win);         // 0.9.113：60fps 也压页面大白底（App 会把它改回白）
 #ifdef GAODECLEAN_PROBE
     P33Watch(CachedCar, 0);
     P33Watch((UIView *)(CachedLiteGroup && CachedLiteGroup.window ? CachedLiteGroup : CachedRight), 1);
