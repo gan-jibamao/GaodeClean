@@ -159,6 +159,7 @@ static BOOL GCIsDarkAppearance(UIWindow *win) {
     //   本版：失败不写缓存（保留 hasValid 标记）；有效值只缓存 0.5s；
     //         从未采到有效值前「保守按深色」—— 深色下早压是对的，亮色下也只是先暗后亮一瞬。
     static BOOL cached; static double lastT; static BOOL hasValid;
+    static BOOL wasMapReady;
     double now = CACurrentMediaTime();
     if (hasValid && now - lastT < 0.15 && now > lastT) return cached;   // 0.9.106：0.5→0.15，快跟随
     lastT = now;
@@ -192,6 +193,11 @@ static BOOL GCIsDarkAppearance(UIWindow *win) {
             }
         }
     }
+    // ★0.9.107：地图容器「刚就绪」的那一刻，把启动页采到的结论作废。
+    //   铁证：probe60 日志 mean=196 => dark=0（启动页白屏）之后 hasValid=1、cached=NO，
+    //   而地图已经变深(64) —— 那 0.18 秒底栏白钮就是这条陈旧缓存造成的。
+    if (mapReady && !wasMapReady) { hasValid = NO; }
+    wasMapReady = mapReady;
     if (!dark && win && mapReady) {
         @try {
             CGSize sz = win.bounds.size;
@@ -255,7 +261,23 @@ static UIColor *GCStyleFillColor(UIView *ref) {
                     if (x.isKeyWindow) { found = x; break; }
         found;
     });
-    if (w && GCIsDarkAppearance(w)) return sDark;
+    BOOL isDark = (w && GCIsDarkAppearance(w));
+#ifdef GAODECLEAN_PROBE
+    // probe61：每次取色都记 —— 回答「底栏两钮为什么还是白」
+    {
+        static int n, nDark;
+        n++;
+        if (isDark) nDark++;
+        if (n <= 8 || (n % 120 == 0)) {
+            if (!GCProbeBuf6) GCProbeBuf6 = [NSMutableString string];
+            [GCProbeBuf6 appendString:[NSString stringWithFormat:
+                @"\nFILL#%d ref=%@ w=%s => %s (累计dark=%d/%d)\n",
+                n, ref ? @(class_getName(object_getClass(ref))) : @"nil",
+                w ? "有" : "nil", isDark ? "DARK" : "LIGHT", nDark, n]];
+        }
+    }
+#endif
+    if (isDark) return sDark;
     return sLight;
 }
 
@@ -2614,7 +2636,22 @@ static void GCStyleTab(UIView *anchor) {
         // ★trial42(A1)：撤掉 trial41 的「关自动约束」。该标志语义是「用 autoresizingMask 生成约束」，
         //   置 YES 不会移除 App 既有 NSLayoutConstraint，而是额外造一套去撞它们（引擎每 pass 随机破
         //   一条）⇒ 同一控件在两个位置间跳。正解是不碰约束标志，靠 A2 的同事务钳位取胜。
-        it.backgroundColor = GCStyleFillColor(it);     // 0.9.100：深色自适应
+        // ★0.9.107（BTN57 双读数不一致定罪）：
+        //   同一时刻 v.backgroundColor = 白(0.92)，而 v.layer.backgroundColor = w(0.16,0.92)，
+        //   两者对不上 ⇒ 渲染以 layer 为准，view 属性却还是白。
+        //   启动早期 App 会直接写 view.backgroundColor（不经过 layer），把我们的深色盖掉。
+        //   修法：两边都写，且每帧对齐（幂等，值相同不触发重绘）。
+        {
+            UIColor *fillTab = GCStyleFillColor(it);
+            if (!CGColorEqualToColor(it.layer.backgroundColor, fillTab.CGColor)) {
+                [CATransaction begin]; [CATransaction setDisableActions:YES];
+                it.layer.backgroundColor = fillTab.CGColor;
+                it.backgroundColor = fillTab;
+                [CATransaction commit];
+            } else if (it.backgroundColor != fillTab) {
+                it.backgroundColor = fillTab;
+            }
+        }
         if (it.alpha < 0.999f) { it.alpha = 1.0f;
 #ifdef GAODECLEAN_PROBE
             P25Append([NSString stringWithFormat:@"t=%.2f PIN-TAB alpha→1\n", P7Now()]);
@@ -3541,8 +3578,11 @@ static void GCStyleDarkenRoundWidgets(UIWindow *win) {
             w0 = 0.299f * rr + 0.587f * gg + 0.114f * bb;        // 感知亮度
         }
         if (w0 < 0.80f) continue;                                // 只压亮底
-        if (!CGColorEqualToColor(v.backgroundColor.CGColor, fill.CGColor)) {
+        // 0.9.107：view 与 layer 双写（BTN57 实测两者会不一致，渲染以 layer 为准）
+        BOOL layerDiff = !CGColorEqualToColor(v.layer.backgroundColor, fill.CGColor);
+        if (layerDiff || !CGColorEqualToColor(v.backgroundColor.CGColor, fill.CGColor)) {
             [CATransaction begin]; [CATransaction setDisableActions:YES];
+            v.layer.backgroundColor = fill.CGColor;
             v.backgroundColor = fill;
             [CATransaction commit];
 #ifdef GAODECLEAN_PROBE
