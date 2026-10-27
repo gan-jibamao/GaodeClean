@@ -4227,6 +4227,7 @@ static void GCTabItemDarkenNow(UIView *it) {
 //        UILabel / UIImageView / UIControl 一律跳过（只改容器底板）。
 // ════════════════════════════════════════════════════════════════════
 static void GCStyleDarkenMinePage(UIView *rootView);   // 0.9.111：前置声明
+static void GCMineCoverSync(UIView *target, UIWindow *win);   // 0.9.117：遮罩同步
 
 // 0.9.111：检测「我的」页是否在窗口里，在就压深。
 //   只在 5Hz 通道调用（页面切换不是高频事件），扫到一次就缓存，页面消失再清。
@@ -4289,6 +4290,64 @@ static void GCStyleMinePageTick(UIWindow *win) {
 }
 
 
+// ════════════════════════════════════════════════════════════════════
+//  0.9.117：遮罩方案 —— 不再跟 App 抢那个 UIImageView 的 hidden。
+//  铁证链（probe65→70 五轮）：
+//    · 那片白是 UIImageView win=(0,692,393x126) img=1，bg=w(-1) 没有背景色
+//      ⇒ 改 backgroundColor 永远无效（probe65/66/67 白费）
+//    · 改 hidden=YES 有效（MINE-IMG-HIDE 命中），但 App 随即改回 hid=0
+//      ⇒ 加 hotList 每帧压制（probe70）仍然输，说明 App 是在**渲染前**重置的，
+//        我们永远慢一步。
+//  正解：在它**上面**盖一层我们自己的深色视图。App 只认它自己那个对象，
+//        不会去动别人的 subview，所以遮罩一旦挂上就没人能改。
+//  同步：遮罩每帧对齐目标图的 window 坐标与尺寸；目标消失就一并移除。
+// ════════════════════════════════════════════════════════════════════
+static void GCMineCoverSync(UIView *target, UIWindow *win) {
+    static UIView *cover;             // 强引用：我们自己持有，App 无法释放
+    static __weak UIView *boundTarget;
+    if (!target || !win || !target.window) {
+        if (cover) { [cover removeFromSuperview]; cover = nil; boundTarget = nil; }
+        return;
+    }
+    CGRect r = [target convertRect:target.bounds toView:win];
+    if (r.size.width < 10 || r.size.height < 10) {
+        if (cover) { [cover removeFromSuperview]; cover = nil; boundTarget = nil; }
+        return;
+    }
+    UIView *host = target.superview ?: win;
+    if (!cover || boundTarget != target || cover.superview != host) {
+        [cover removeFromSuperview];
+        // ★0.9.117：插到**目标图的父视图**里、紧贴目标图之上。
+        //   加在 win 最上层会压住底栏（底栏 y=768，目标图 692..818 有重叠）；
+        //   放到同一父视图可以只盖住目标图这一层，不影响兄弟节点。
+        CGRect lr = [target convertRect:target.bounds toView:host];
+        cover = [[UIView alloc] initWithFrame:lr];
+        cover.userInteractionEnabled = NO;          // 不拦触摸
+        cover.backgroundColor = [UIColor colorWithWhite:0.11 alpha:1.0];
+        cover.hidden = NO;
+        NSUInteger idx = [host.subviews indexOfObject:target];
+        if (idx != NSNotFound && idx + 1 <= host.subviews.count) {
+            [host insertSubview:cover atIndex:idx + 1];
+        } else {
+            [host addSubview:cover];
+        }
+        boundTarget = target;
+        cover.tag = 0x6D696E65;                     // 'mine'，便于识别
+#ifdef GAODECLEAN_PROBE
+        if (!GCProbeBuf6) GCProbeBuf6 = [NSMutableString string];
+        [GCProbeBuf6 appendString:[NSString stringWithFormat:
+            @"\nMINE-COVER 新建 (%.0f,%.0f,%.0fx%.0f)\n",
+            r.origin.x, r.origin.y, r.size.width, r.size.height]];
+#endif
+        return;
+    }
+    // 已存在 ⇒ 只同步几何（幂等）
+    if (cover.hidden) cover.hidden = NO;
+    UIView *h2 = target.superview ?: win;
+    CGRect lr2 = [target convertRect:target.bounds toView:h2];
+    if (!CGRectEqualToRect(cover.frame, lr2)) cover.frame = lr2;
+}
+
 static void GCStyleDarkenMinePage(UIView *rootView) {
     if (!rootView) return;
     UIWindow *win = ([rootView isKindOfClass:UIWindow.class] ? (UIWindow *)rootView : rootView.window);
@@ -4345,17 +4404,8 @@ static void GCStyleDarkenMinePage(UIView *rootView) {
         if ([v isKindOfClass:UIImageView.class] && v.layer.contents) {
             CGRect ir = [v convertRect:v.bounds toView:win];
             if (ir.size.width >= sz.width * 0.90f && ir.size.height >= 60.0f) {
-                if (!v.hidden) {
-                    v.hidden = YES;
-                    if (!hotList) hotList = [NSMutableArray array];
-                    if (![hotList containsObject:v]) [hotList addObject:v];
-                    hotWin = win;
-#ifdef GAODECLEAN_PROBE
-                    if (GCProbeBuf6) [GCProbeBuf6 appendString:[NSString stringWithFormat:
-                        @"\nMINE-IMG-HIDE win=(%.0f,%.0f,%.0fx%.0f)\n",
-                        ir.origin.x, ir.origin.y, ir.size.width, ir.size.height]];
-#endif
-                }
+                // ★0.9.117：不再跟 App 抢 hidden（probe65~70 五轮全输），改盖自己的遮罩。
+                GCMineCoverSync(v, win);
                 continue;
             }
         }
