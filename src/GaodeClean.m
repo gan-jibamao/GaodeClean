@@ -187,11 +187,15 @@ static BOOL GCIsDarkAppearance(UIWindow *win) {
                         for (int k = 0; k < 16; k++)
                             sum += (px[k*4]*30 + px[k*4+1]*59 + px[k*4+2]*11) / 100;
                         int mean = sum / 16;
-                        if (mean < 140) dark = YES;
+                        // ★0.9.103：mean==0 表示 drawViewHierarchyInRect 渲染失败（返回全黑），
+                        //   不是「屏幕很暗」。probe56 日志首条 LUMA mean=0 就是这种情况。
+                        //   若把失败当成深色，亮色模式下会误压白 ⇒ 必须排除。
+                        if (mean > 0 && mean < 140) dark = YES;
                         #ifdef GAODECLEAN_PROBE
                         if (!GCProbeBuf6) GCProbeBuf6 = [NSMutableString string];
                         [GCProbeBuf6 appendString:[NSString stringWithFormat:
-                            @"\nLUMA mean=%d => dark=%d\n", mean, dark ? 1 : 0]];
+                            @"\nLUMA mean=%d%s => dark=%d\n", mean,
+                            mean == 0 ? "(渲染失败,忽略)" : "", dark ? 1 : 0]];
                         #endif
                     }
                 }
@@ -3443,6 +3447,9 @@ static void GCCapTrace(UIWindow *win) {
 
 #ifdef GAODECLEAN_PROBE
 static void GCCapTrace(UIWindow *win);            // probe50：前置声明（5Hz 用）
+#ifdef GAODECLEAN_PROBE
+static void GCBtnTrace(UIWindow *win);             // probe57：前置声明
+#endif
 #endif
 
 // ════════════════════════════════════════════════════════════════════
@@ -3547,6 +3554,7 @@ static void GCStyleAlignMapType(UIWindow *win) {           // 5Hz 入口：发�
     GCStyleMapTypeAlign(win);
 #ifdef GAODECLEAN_PROBE
     GCCapTrace(win);                                       // probe50：5Hz 也采一次，抓启动早期
+    GCBtnTrace(win);                                       // probe57：底部三钮图层树
 #endif
 }
 
@@ -3997,6 +4005,61 @@ static void GCStylePinCapsuleFill(void) {
 //   证据：这两个 WINTabBarItem 只有 GCStyleTab 在写，而 GCStyleTab 来自 GCNarrowApply
 //   （5Hz tick + layoutSubviews）⇒ App 一搬动，最慢 200ms 才纠回 = 肉眼看到的「左右移动」。
 static __weak UIView *CachedTabItemA, *CachedTabItemB;
+// ── probe57：底部三钮图层树全量取证（只读）────────────────────────────
+//   现象：深色下三钮变深灰后，左钮与中钮之间糊成一片，每个钮外还有一圈深色晕。
+//   疑点：GCStyleSearch 里 anchor.layer.mask 把满宽 anchor 遮成 54×54 圆，
+//         而胶囊被下移到 771 行 ⇒ mask 与胶囊错位，多出的形状就是那圈。
+//   本探针把 anchor / 三个钮 / 各自 sublayer 的 frame、圆角、底色、opacity 全打出来。
+#ifdef GAODECLEAN_PROBE
+static void GCBtnTrace(UIWindow *win) {
+    static int n = 0;
+    if (n >= 2 || !win) return;
+    n++;
+    if (!GCProbeBuf6) GCProbeBuf6 = [NSMutableString string];
+    [GCProbeBuf6 appendString:@"\n=== BTN57 底部三钮图层树 ===\n"];
+    UIView *tb = CachedTabBar;
+    UIView *sb = SearchBarView;
+    UIView *anchors[2] = { tb, sb };
+    const char *names[2] = { "底栏anchor", "搜索anchor" };
+    for (int a = 0; a < 2; a++) {
+        UIView *an = anchors[a];
+        if (!an) { [GCProbeBuf6 appendString:[NSString stringWithFormat:@"%s = nil\n", names[a]]]; continue; }
+        CALayer *L = an.layer;
+        [GCProbeBuf6 appendString:[NSString stringWithFormat:
+            @"%s %@ frame=%@ corner=%.1f mask=%s masked=%d bgA=%.2f\n",
+            names[a], @(class_getName(object_getClass(an))), NSStringFromCGRect(an.frame),
+            L.cornerRadius, L.mask ? class_getName(object_getClass(L.mask)) : "nil",
+            (int)L.masksToBounds,
+            an.backgroundColor ? CGColorGetAlpha(an.backgroundColor.CGColor) : 0.0]];
+        if (L.mask) {
+            [GCProbeBuf6 appendString:[NSString stringWithFormat:
+                @"    MASK frame=%@ corner=%.1f bg=%s\n",
+                NSStringFromCGRect(L.mask.frame), L.mask.cornerRadius,
+                L.mask.backgroundColor ? "有" : "nil"]];
+        }
+        for (UIView *v in an.subviews) {
+            CGRect f = v.frame;
+            if (f.size.width < 30 || f.size.height < 30) continue;
+            [GCProbeBuf6 appendString:[NSString stringWithFormat:
+                @"    SUB %@ f=(%.0f,%.0f,%.0fx%.0f) corner=%.1f bgA=%.2f op=%.2f hid=%d\n",
+                @(class_getName(object_getClass(v))), f.origin.x, f.origin.y,
+                f.size.width, f.size.height, v.layer.cornerRadius,
+                v.backgroundColor ? CGColorGetAlpha(v.backgroundColor.CGColor) : 0.0,
+                v.layer.opacity, v.hidden ? 1 : 0]];
+        }
+        for (CALayer *la in L.sublayers) {
+            CGRect f = la.frame;
+            if (f.size.width < 30 || f.size.height < 30) continue;
+            [GCProbeBuf6 appendString:[NSString stringWithFormat:
+                @"    LAYER f=(%.0f,%.0f,%.0fx%.0f) corner=%.1f bgA=%.2f op=%.2f hid=%d bg=%s\n",
+                f.origin.x, f.origin.y, f.size.width, f.size.height, la.cornerRadius,
+                la.backgroundColor ? CGColorGetAlpha(la.backgroundColor) : 0.0,
+                la.opacity, la.hidden ? 1 : 0, la.backgroundColor ? "有" : "nil"]];
+        }
+    }
+}
+#endif
+
 static void GCStylePinTabItems(UIWindow *win) {
     if (!win || !CachedTabBar || !CachedTabBar.window) {
 #ifdef GAODECLEAN_PROBE
