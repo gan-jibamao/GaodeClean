@@ -2657,13 +2657,24 @@ static void GCStyleTab(UIView *anchor) {
         //   修法：两边都写，且每帧对齐（幂等，值相同不触发重绘）。
         {
             UIColor *fillTab = GCStyleFillColor(it);
-            if (!CGColorEqualToColor(it.layer.backgroundColor, fillTab.CGColor)) {
+            // 0.9.109：view 与 layer 双写；新实例首次进来时两者都还没写过 ⇒ 一并落地。
+            BOOL viewDiff  = !it.backgroundColor ||
+                             !CGColorEqualToColor(it.backgroundColor.CGColor, fillTab.CGColor);
+            BOOL layerDiff = !it.layer.backgroundColor ||
+                             !CGColorEqualToColor(it.layer.backgroundColor, fillTab.CGColor);
+            if (viewDiff || layerDiff) {
                 [CATransaction begin]; [CATransaction setDisableActions:YES];
                 it.layer.backgroundColor = fillTab.CGColor;
                 it.backgroundColor = fillTab;
                 [CATransaction commit];
-            } else if (it.backgroundColor != fillTab) {
-                it.backgroundColor = fillTab;
+#ifdef GAODECLEAN_PROBE
+                { static int nTabFill;
+                  if (++nTabFill <= 6 && GCProbeBuf6) {
+                      [GCProbeBuf6 appendString:[NSString stringWithFormat:
+                          @"\nTABFILL#%d %@ view=%d layer=%d\n", nTabFill,
+                          @(class_getName(object_getClass(it))), (int)viewDiff, (int)layerDiff]];
+                  } }
+#endif
             }
         }
         if (it.alpha < 0.999f) { it.alpha = 1.0f;
@@ -4170,6 +4181,24 @@ static void GCStylePinTabItems(UIWindow *win) {
                        nn, CachedTabBar ? 1 : 0, (CachedTabBar && CachedTabBar.window) ? 1 : 0]); }
 #endif
         return;
+    }
+    // ★0.9.109：底栏实例变化检测。
+    //   铁证：老大反馈「冷启动启动页消失的一瞬间首页/我的白过」，
+    //   日志 DISC 路线/Lite→新实例 在 0.0s 与 1.7s 各一次 ⇒ App 在启动末尾**重建了底栏**。
+    //   旧逻辑只看 CachedTabItemA/B 的 .window：新 item 入窗、旧 item 尚未离窗时，
+    //   两个条件都不成立 ⇒ 缓存里的旧 item 一直被写色，新 item 从未被碰过 ⇒ 白。
+    //   现在每帧比对「底栏里实际的 WINTabBarItem 列表」与缓存，不一致就立即重建。
+    {
+        NSMutableArray<UIView *> *cur = [NSMutableArray array];
+        for (UIView *v in CachedTabBar.subviews)
+            if ([NSStringFromClass(v.class) isEqualToString:GCStrAt(149)]) [cur addObject:v];
+        BOOL changed = (cur.count != 2);
+        if (!changed) {
+            BOOL hasA = ([cur containsObject:CachedTabItemA] || !CachedTabItemA);
+            BOOL hasB = ([cur containsObject:CachedTabItemB] || !CachedTabItemB);
+            changed = !(hasA && hasB);
+        }
+        if (changed) { CachedTabItemA = nil; CachedTabItemB = nil; }
     }
     if (!CachedTabItemA || !CachedTabItemB
         || !CachedTabItemA.window || !CachedTabItemB.window) {   // probe30(A3)：脱离窗口也算失效
