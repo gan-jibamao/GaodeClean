@@ -3546,14 +3546,11 @@ static void GCCapTrace(UIWindow *win) {
 }
 #endif
 
-static void GCStyleMinePageTick(UIWindow *win);     // 0.9.111：5Hz 调用点在这之前（无条件）
-#ifdef GAODECLEAN_PROBE
-static void GCMinePageDump(UIWindow *win);          // probe68：前置声明
-#endif
-
 #ifdef GAODECLEAN_PROBE
 static void GCCapTrace(UIWindow *win);            // probe50：前置声明（5Hz 用）
+#ifdef GAODECLEAN_PROBE
 static void GCBtnTrace(UIWindow *win);             // probe57：前置声明
+#endif
 #endif
 
 // ════════════════════════════════════════════════════════════════════
@@ -3667,10 +3664,6 @@ static void GCStyleAlignMapType(UIWindow *win) {           // 5Hz 入口：发�
     // ★0.9.105(A2)：5Hz 入口也压白 —— 60fps 通道要等 CachedTabBar 出现才跑，
     //   启动早期那 1.5 秒白钮就是这段空窗。5Hz tick 起得更早，能补上。
     GCStyleDarkenRoundWidgets(win);
-    GCStyleMinePageTick(win);      // 0.9.111：「我的」页整片白底 → 深色（含页面容器）
-#ifdef GAODECLEAN_PROBE
-    GCMinePageDump(win);           // probe68：白色层真身取证（只读）
-#endif
 #ifdef GAODECLEAN_PROBE
     GCCapTrace(win);                                       // probe50：5Hz 也采一次，抓启动早期
     GCBtnTrace(win);                                       // probe57：底部三钮图层树
@@ -4211,252 +4204,6 @@ static void GCTabItemDarkenNow(UIView *it) {
 #endif
     }
 }
-// ════════════════════════════════════════════════════════════════════
-//  0.9.111：修「我的」页面下半整片纯白（老大 2026-10-27 截图）
-//  现象：用户信息卡与地球卡是深色，从卡片下沿到屏幕底部**整片纯白**，
-//        深色主题下极其刺眼。
-//  根因：那片白是页面容器（WINMineViewControl 的 view）的背景色，
-//        App 给它留的是亮色底；我们的色板只覆盖了底栏 5 处，从未碰过页面背景。
-//  判据：只在「App 处于深色外观」时动手。深色判定沿用 GCIsDarkAppearance，
-//        但**本页没有地图**，采样取不到有效亮度时会返回「保守深色」——
-//        这对本页恰好是对的：进来时底栏已经是深灰，说明主题就是深色。
-//  做法：从「我的」页的 view 向下扫，把**大面积、近白、不透明**的背景色
-//        换成深色底（white 0.11 / alpha 1.0，与高德深色页一致）。
-//  守卫：宽 ≥ 60% 屏宽 或 高 ≥ 25% 屏高（只认整块底板）；
-//        亮度 > 0.85 才动；alpha ≥ 0.9 才动（半透明遮罩不碰）；
-//        UILabel / UIImageView / UIControl 一律跳过（只改容器底板）。
-// ════════════════════════════════════════════════════════════════════
-static void GCStyleDarkenMinePage(UIView *rootView);   // 0.9.111：前置声明
-static void GCMineCoverSync(UIView *target, UIWindow *win);   // 0.9.117：遮罩同步
-
-// 0.9.111：检测「我的」页是否在窗口里，在就压深。
-//   只在 5Hz 通道调用（页面切换不是高频事件），扫到一次就缓存，页面消失再清。
-// ── probe68：「我的」页白色真身深度取证（只读）─────────────────────────
-//   probe67 铁证：AMCommonContentBackgroundView 压深成功(命中=1)，但页面仍白，
-//   之后扫全窗命中=0 ⇒ 那片白不是 backgroundColor，而是别的东西。
-//   本探针把窗口下半部所有「看起来白」的层全打出来，含 layer.contents（位图）。
-#ifdef GAODECLEAN_PROBE
-static void GCMinePageDump(UIWindow *win) {
-    if (!win) return;
-    static int n;
-    if (n >= 2) return;
-    n++;
-    if (!GCProbeBuf6) GCProbeBuf6 = [NSMutableString string];
-    [GCProbeBuf6 appendString:@"\n=== MINE68 白色层取证 ===\n"];
-    CGFloat sh = win.bounds.size.height;
-    NSMutableArray<UIView *> *q = [NSMutableArray arrayWithObject:win];
-    NSUInteger bud = 900;
-    int printed = 0;
-    while (q.count && bud-- && printed < 40) {
-        UIView *v = q[0]; [q removeObjectAtIndex:0];
-        [q addObjectsFromArray:v.subviews];
-        CGRect r = [v convertRect:v.bounds toView:win];
-        if (r.size.width < 40 || r.size.height < 40) continue;
-        if (CGRectGetMinY(r) < sh * 0.30) continue;          // 只看下半部
-        if (v.hidden || v.alpha < 0.05f) continue;
-        CGFloat a = 0, w0 = -1;
-        if (v.backgroundColor) {
-            a = CGColorGetAlpha(v.backgroundColor.CGColor);
-            CGFloat al = 0;
-            if (![v.backgroundColor getWhite:&w0 alpha:&al]) {
-                CGFloat rr=0,gg=0,bb=0;
-                if ([v.backgroundColor getRed:&rr green:&gg blue:&bb alpha:&al])
-                    w0 = 0.299f*rr + 0.587f*gg + 0.114f*bb;
-                else w0 = -1;
-            }
-        }
-        BOOL hasImg = (v.layer.contents != NULL);
-        BOOL whiteish = (w0 > 0.85f && a > 0.5f);
-        if (!whiteish && !hasImg) continue;
-        printed++;
-        [GCProbeBuf6 appendString:[NSString stringWithFormat:
-            @"  %@ cls=%@ win=(%.0f,%.0f,%.0fx%.0f) bg(w=%.2f a=%.2f) img=%d op=%.2f hid=%d sub=%lu\n",
-            whiteish ? @"★白" : @"·图", @(class_getName(object_getClass(v))),
-            r.origin.x, r.origin.y, r.size.width, r.size.height,
-            w0, a, hasImg ? 1 : 0, v.layer.opacity, v.hidden ? 1 : 0,
-            (unsigned long)v.subviews.count]];
-    }
-    [GCProbeBuf6 appendString:[NSString stringWithFormat:@"  (共 %d 条)\n", printed]];
-}
-#endif
-
-static void GCStyleMinePageTick(UIWindow *win) {
-    if (!win) return;
-    // ★0.9.112：probe65 铁证 —— MINE-DARK 命中 0，dump 里连 "mine" 字样都没有，
-    //   说明「按类名找页面」这条路根本走不通（类名可能是别的，或页面不在 VC 树里）。
-    //   改为**不认页面，直接扫整个窗口**：凡是大面积、近白、不透明的底板一律压深。
-    //   这条对「我的」页、设置页、任何亮底页面都成立，且不依赖任何类名。
-    GCStyleDarkenMinePage(win);
-}
-
-
-// ════════════════════════════════════════════════════════════════════
-//  0.9.117：遮罩方案 —— 不再跟 App 抢那个 UIImageView 的 hidden。
-//  铁证链（probe65→70 五轮）：
-//    · 那片白是 UIImageView win=(0,692,393x126) img=1，bg=w(-1) 没有背景色
-//      ⇒ 改 backgroundColor 永远无效（probe65/66/67 白费）
-//    · 改 hidden=YES 有效（MINE-IMG-HIDE 命中），但 App 随即改回 hid=0
-//      ⇒ 加 hotList 每帧压制（probe70）仍然输，说明 App 是在**渲染前**重置的，
-//        我们永远慢一步。
-//  正解：在它**上面**盖一层我们自己的深色视图。App 只认它自己那个对象，
-//        不会去动别人的 subview，所以遮罩一旦挂上就没人能改。
-//  同步：遮罩每帧对齐目标图的 window 坐标与尺寸；目标消失就一并移除。
-// ════════════════════════════════════════════════════════════════════
-static void GCMineCoverSync(UIView *target, UIWindow *win) {
-    static UIView *cover;             // 强引用：我们自己持有，App 无法释放
-    static __weak UIView *boundTarget;
-    if (!target || !win || !target.window) {
-        if (cover) { [cover removeFromSuperview]; cover = nil; boundTarget = nil; }
-        return;
-    }
-    CGRect r = [target convertRect:target.bounds toView:win];
-    if (r.size.width < 10 || r.size.height < 10) {
-        if (cover) { [cover removeFromSuperview]; cover = nil; boundTarget = nil; }
-        return;
-    }
-    UIView *host = target.superview ?: win;
-    if (!cover || boundTarget != target || cover.superview != host) {
-        [cover removeFromSuperview];
-        // ★0.9.117：插到**目标图的父视图**里、紧贴目标图之上。
-        //   加在 win 最上层会压住底栏（底栏 y=768，目标图 692..818 有重叠）；
-        //   放到同一父视图可以只盖住目标图这一层，不影响兄弟节点。
-        CGRect lr = [target convertRect:target.bounds toView:host];
-        cover = [[UIView alloc] initWithFrame:lr];
-        cover.userInteractionEnabled = NO;          // 不拦触摸
-        cover.backgroundColor = [UIColor colorWithWhite:0.11 alpha:1.0];
-        cover.hidden = NO;
-        NSUInteger idx = [host.subviews indexOfObject:target];
-        if (idx != NSNotFound && idx + 1 <= host.subviews.count) {
-            [host insertSubview:cover atIndex:idx + 1];
-        } else {
-            [host addSubview:cover];
-        }
-        boundTarget = target;
-        cover.tag = 0x6D696E65;                     // 'mine'，便于识别
-#ifdef GAODECLEAN_PROBE
-        if (!GCProbeBuf6) GCProbeBuf6 = [NSMutableString string];
-        [GCProbeBuf6 appendString:[NSString stringWithFormat:
-            @"\nMINE-COVER 新建 (%.0f,%.0f,%.0fx%.0f)\n",
-            r.origin.x, r.origin.y, r.size.width, r.size.height]];
-#endif
-        return;
-    }
-    // 已存在 ⇒ 只同步几何（幂等）
-    if (cover.hidden) cover.hidden = NO;
-    UIView *h2 = target.superview ?: win;
-    CGRect lr2 = [target convertRect:target.bounds toView:h2];
-    if (!CGRectEqualToRect(cover.frame, lr2)) cover.frame = lr2;
-}
-
-static void GCStyleDarkenMinePage(UIView *rootView) {
-    if (!rootView) return;
-    UIWindow *win = ([rootView isKindOfClass:UIWindow.class] ? (UIWindow *)rootView : rootView.window);
-    if (!win) return;
-    // ★0.9.116：probe69 铁证 —— MINE-IMG-HIDE 命中 1 次，但 dump 里那张图仍是 hid=0，
-    //   说明 App 立刻把它改回显示（页面复用时重置）。而且后续 MINE-SCAN 命中 0，
-    //   是因为本函数的 busy 锁 + 遍历开销让它没法每帧跑。
-    //   改为：**记住已经处理过的那几个对象**，每帧只对它们做一次幂等压制，O(1)。
-    static __weak NSMutableArray *hotList;
-    static __weak UIWindow *hotWin;
-    if (hotList && hotWin == win) {
-        for (id o in hotList) {
-            if ([o isKindOfClass:UIImageView.class]) {
-                UIImageView *iv = (UIImageView *)o;
-                if (iv.window && !iv.hidden) iv.hidden = YES;
-            }
-        }
-        // 热对象都失效则重建
-        BOOL alive = NO;
-        for (id o in hotList) { if ([o isKindOfClass:UIView.class] && ((UIView *)o).window) { alive = YES; break; } }
-        if (alive) return;
-        hotList = nil;
-    }
-    // ★0.9.112：深色判定改为「本次为深色 **或** 历史曾判定为深色」。
-    //   「我的」页没有地图，亮度采样拿不到有效值；而用户一旦在深色主题下用过地图，
-    //   之前就已经判定过深色 —— 那一刻记下的结论对整机主题同样成立。
-    static BOOL everDark;
-    BOOL nowDark = GCIsDarkAppearance(win);
-    if (nowDark) everDark = YES;
-    if (!nowDark && !everDark) return;
-    static int busy;
-    if (busy) return;
-    busy = 1;
-    CGSize sz = win.bounds.size;
-    UIColor *pageDark = [UIColor colorWithWhite:0.11 alpha:1.0];
-#ifdef GAODECLEAN_PROBE
-    int scanned = 0, hits = 0;
-#endif
-    NSMutableArray<UIView *> *q = [NSMutableArray arrayWithObject:rootView];
-    NSUInteger budget = 500;
-    while (q.count && budget--) {
-        UIView *v = [q lastObject]; [q removeLastObject];
-        if (v.hidden || v.alpha < 0.05f) continue;
-        if (v.subviews.count < 40) [q addObjectsFromArray:v.subviews];
-#ifdef GAODECLEAN_PROBE
-        scanned++;
-#endif
-        // ★0.9.115（MINE68 实测定罪）：那片白是**满宽 UIImageView 的位图**，不是背景色。
-        //   实测：·图 cls=UIImageView win=(0,692,393x126) bg(w=-1.00 a=0.00) img=1
-        //   bg(w=-1) 表示根本没有 backgroundColor ⇒ 改色对它完全无效，
-        //   所以 probe67 才会「压深成功但页面仍白」。
-        //   判据：宽度 ≥ 90% 屏宽、高度 ≥ 60pt、layer.contents 非空
-        //        ⇒ 认定为页面底板位图，直接隐藏（下面的深色背景露出）。
-        if ([v isKindOfClass:UIImageView.class] && v.layer.contents) {
-            CGRect ir = [v convertRect:v.bounds toView:win];
-            if (ir.size.width >= sz.width * 0.90f && ir.size.height >= 60.0f) {
-                // ★0.9.117：不再跟 App 抢 hidden（probe65~70 五轮全输），改盖自己的遮罩。
-                GCMineCoverSync(v, win);
-                continue;
-            }
-        }
-        if ([v isKindOfClass:UILabel.class] || [v isKindOfClass:UIImageView.class] ||
-            [v isKindOfClass:UIControl.class] || [v isKindOfClass:UIVisualEffectView.class]) continue;
-        UIColor *bg = v.backgroundColor;
-        if (!bg) continue;
-        CGFloat a = CGColorGetAlpha(bg.CGColor);
-        if (a < 0.9f) continue;                       // 半透明遮罩不碰
-        CGFloat w0 = 0, al = 0;
-        if (![bg getWhite:&w0 alpha:&al]) {
-            CGFloat rr = 0, gg = 0, bb = 0;
-            if (![bg getRed:&rr green:&gg blue:&bb alpha:&al]) continue;
-            w0 = 0.299f * rr + 0.587f * gg + 0.114f * bb;
-        }
-        if (w0 < 0.85f) continue;                     // 已经是深色
-        CGRect r = [v convertRect:v.bounds toView:win];
-        // 0.9.112：原判据 60%宽/25%高 太严 —— 页面里可能是多个中等块拼成一片白。
-        //   放宽到 30%宽 且 8%高，仍足以排除按钮/图标/文字这些小控件。
-        BOOL big = (r.size.width >= sz.width * 0.30f) && (r.size.height >= sz.height * 0.08f);
-        if (!big) continue;
-        CGRect vis = CGRectIntersection(r, win.bounds);
-        if (CGRectIsNull(vis) || vis.size.width < sz.width * 0.25f
-            || vis.size.height < sz.height * 0.06f) continue;
-        [CATransaction begin]; [CATransaction setDisableActions:YES];
-        v.layer.backgroundColor = pageDark.CGColor;
-        v.backgroundColor = pageDark;
-        [CATransaction commit];
-#ifdef GAODECLEAN_PROBE
-        hits++;
-#endif
-#ifdef GAODECLEAN_PROBE
-        if (GCProbeBuf6) [GCProbeBuf6 appendString:[NSString stringWithFormat:
-            @"\nMINE-DARK %@ win=(%.0f,%.0f,%.0fx%.0f) w0=%.2f\n",
-            @(class_getName(object_getClass(v))), r.origin.x, r.origin.y,
-            r.size.width, r.size.height, w0]];
-#endif
-    }
-    busy = 0;
-#ifdef GAODECLEAN_PROBE
-    { static int n;
-      if ((hits || ++n % 20 == 0) && n < 400) {
-          if (!GCProbeBuf6) GCProbeBuf6 = [NSMutableString string];
-          [GCProbeBuf6 appendString:[NSString stringWithFormat:
-              @"\nMINE-SCAN 扫=%d 命中=%d win=%@\n", scanned, hits,
-              NSStringFromCGRect(win.bounds)]];
-      } }
-#endif
-}
-
-
 static void GCTabItemDarkHookOnce(void);   // 0.9.110：前置声明
 static void GCTabItemDarkHookOnce(void) {
     if (GCTabItemDarkHooked) return;
@@ -4687,7 +4434,6 @@ static void GCStylePinWidgets(UIWindow *win) {
     GCStylePinBusy = YES;
     GCStylePinWidgetsInner(win);
     GCStyleDarkenRoundWidgets(win);   // 0.9.101：深色下统一压白（底栏圆钮等，无条件执行）
-    GCStyleMinePageTick(win);         // 0.9.113：60fps 也压页面大白底（App 会把它改回白）
 #ifdef GAODECLEAN_PROBE
     P33Watch(CachedCar, 0);
     P33Watch((UIView *)(CachedLiteGroup && CachedLiteGroup.window ? CachedLiteGroup : CachedRight), 1);
