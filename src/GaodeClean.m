@@ -304,7 +304,7 @@ static void SaveDiagnostics(UIView *page, GCCState *state, NSArray<UIView *> *no
         @"matched": @(state.matched), @"scrollContainers": @(state.scrolls.count),
         @"opaqueBlankArea": @(state.blankArea != nil && state.blankArea.superview == page),
         @"blankAreaFrame": NSStringFromCGRect(state.blankArea.frame), @"tree": tree};
-    NSData *data = [NSJSONSerialization dataWithJSONObject:@{@"version": @"0.3.2+p1", @"pages": records} options:NSJSONWritingPrettyPrinted error:nil];
+    NSData *data = [NSJSONSerialization dataWithJSONObject:@{@"version": @"0.3.2+p2", @"pages": records} options:NSJSONWritingPrettyPrinted error:nil];
     NSURL *documents = [NSFileManager.defaultManager URLsForDirectory:NSDocumentDirectory inDomains:NSUserDomainMask].firstObject;
     if (data && documents) [data writeToURL:[documents URLByAppendingPathComponent:@"GaodeClean-diagnostics.json"] options:NSDataWritingAtomic error:nil];
 }
@@ -324,6 +324,18 @@ static void CleanPage(UIView *page) {
         state.attempts = 0;
     }
     NSInteger kind = Kind(page);
+    // PROBE: 打印所有页面路径（去重，只打前 40 个），定位 17.02.1 的真实 pagePath
+    {
+        static NSMutableSet *seenPaths;
+        if (!seenPaths) seenPaths = [NSMutableSet set];
+        if (path.length && ![seenPaths containsObject:path] && seenPaths.count < 40) {
+            [seenPaths addObject:path];
+            P(@"PAGE path=%@ kind=%ld", path, (long)kind);
+        } else if (!path.length && seenPaths.count < 40 && ![seenPaths containsObject:@"<empty>"]) {
+            [seenPaths addObject:@"<empty>"];
+            P(@"PAGE path=<empty> class=%@", NSStringFromClass(page.class));
+        }
+    }
     if (!kind) { Restore(state); return; }
     if (!page.window) return;
     if (kind == 1) {
@@ -385,7 +397,7 @@ static void CleanPage(UIView *page) {
                 NSData *data = [NSData dataWithContentsOfFile:[dir stringByAppendingPathComponent:@"GaodeClean-diagnostics.json"]];
                 NSDictionary *report = data ? [NSJSONSerialization JSONObjectWithData:data options:0 error:nil] : nil;
                 NSDictionary *mine = report[@"pages"][@"3"];
-                if ([@[@"0.3.0", @"0.3.1", @"0.3.2+p1"] containsObject:report[@"version"] ?: @""] && [mine[@"matched"] boolValue]) {
+                if ([@[@"0.3.0", @"0.3.1", @"0.3.2+p2"] containsObject:report[@"version"] ?: @""] && [mine[@"matched"] boolValue]) {
                     CGRect blank = CGRectFromString(mine[@"blankAreaFrame"] ?: @"");
                     if (blank.origin.y > 100) cached = @{@"width":@(blank.size.width), @"bottom":@(blank.origin.y)};
                 }
@@ -906,7 +918,20 @@ __attribute__((constructor)) static void Initialize(void) {
         HookVoid(@"AJXBaseElement", @"reloadView", ^(id e) { Capture(e); });
         HookVoid(@"AJXBaseElement", @"layoutSubViews", ^(id e) { Capture(e); });
         HookVoid(@"AJXBaseElement", @"updateVoiceOverIDAndLabel", ^(id e) { Capture(e); });
-        HookVoid(@"AJX3View", @"layoutSubviews", ^(id page) { [Pages addObject:page]; if (!Cleaning) { Cleaning = YES; CleanPage(page); Cleaning = NO; } Schedule(); });
+        HookVoid(@"AJX3View", @"layoutSubviews", ^(id page) {
+            [Pages addObject:page];
+            {
+                static NSMutableSet *seen2;
+                if (!seen2) seen2 = [NSMutableSet set];
+                NSString *pp = PagePath(page);
+                NSString *key = pp.length ? pp : @"<empty>";
+                if (![seen2 containsObject:key] && seen2.count < 40) {
+                    [seen2 addObject:key];
+                    P(@"AJX3VIEW path=%@", key);
+                }
+            }
+            if (!Cleaning) { Cleaning = YES; CleanPage(page); Cleaning = NO; } Schedule();
+        });
         HookVoid(@"AJX3View", @"didMoveToWindow", ^(id page) { [Pages addObject:page]; CleanPage(page); Schedule(); });
         HookVoid(@"AJXWINNearbyViewControl", @"viewDidLoad", ^(id controller) { [NearbyControllers addObject:controller]; Schedule(); });
         HookVoid(@"WINTabBarControl", @"viewDidLoad", ^(id tabs) { [TabControllers addObject:tabs]; Schedule(); });
