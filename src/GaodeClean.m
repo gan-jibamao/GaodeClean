@@ -2548,8 +2548,11 @@ static void GCStyleTab(UIView *anchor) {
         // trial5（probe6 定罪）：选中底衬被 App 改成 70×54 且切页回显 —— 旧宽窗 [90,110] 漏配 = 重影圆真凶。
         //   改判据：背景α∈(0.01,0.2) + 宽[40,120] + 高(40,60]（圆钮α0.92 天然排除）；每 tick 重隐。
         CGFloat ba = v.backgroundColor ? CGColorGetAlpha(v.backgroundColor.CGColor) : 0;
+        // ★0.9.104（BTN57 实测定罪）：选中态底衬 bgA=0.40，旧区间 0.01~0.2 漏掉它，
+        //   于是 100×54 corner=27 的圆角矩形一直显示 = 老大看到的那圈「方形光晕」。
+        //   上限放宽到 0.75（按钮本体 bgA=0.92 仍排除在外）。
         if (f.size.height > 40 && f.size.height <= 60 && f.size.width >= 40 && f.size.width <= 120
-            && ba > 0.01 && ba < 0.2 && !v.hidden && ![v isKindOfClass:UIControl.class]) v.hidden = YES;
+            && ba > 0.01 && ba < 0.75 && !v.hidden && ![v isKindOfClass:UIControl.class]) v.hidden = YES;
         // trial5：渐变环境容器（满宽普通 UIView，trial6 逻辑随旧体退役）回补隐藏，防地球视图硬边白带
         if (f.size.width >= sw - 8 && f.size.height >= 60 && f.size.height <= 160
             && v.alpha > 0.01 && ![v isKindOfClass:UIControl.class]
@@ -2565,6 +2568,9 @@ static void GCStyleTab(UIView *anchor) {
         UIView *it = items[i];
         // ★probe22(A1)：不再强写 x —— probe21 实测 App 的窄栏布局是 ±60（中心 136.5/256.5），
         //   我们强制 ±72，两边对拉就是"偶尔在动"。位置交还 App，只保留圆角/裁切。
+        // ★0.9.104 撤回「写 frame 收窄宽度」：probe23(A1) 早已实测
+        //   「直接写 item.frame 会与 App 布局对拉」，正解是 54×54 圆形 CAShapeLayer mask
+        //   （本函数后半段的 mk 逻辑，dia = MIN(54, ih)），那里已经是正圆。
         it.layer.cornerRadius = d * 0.5;
         it.layer.masksToBounds = YES;
         it.layer.shadowOpacity = 0; it.layer.shadowPath = nil;   // trial14：杀 App 遗留阴影（首页左侧灰影真凶）
