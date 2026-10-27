@@ -4293,6 +4293,25 @@ static void GCStyleDarkenMinePage(UIView *rootView) {
     if (!rootView) return;
     UIWindow *win = ([rootView isKindOfClass:UIWindow.class] ? (UIWindow *)rootView : rootView.window);
     if (!win) return;
+    // ★0.9.116：probe69 铁证 —— MINE-IMG-HIDE 命中 1 次，但 dump 里那张图仍是 hid=0，
+    //   说明 App 立刻把它改回显示（页面复用时重置）。而且后续 MINE-SCAN 命中 0，
+    //   是因为本函数的 busy 锁 + 遍历开销让它没法每帧跑。
+    //   改为：**记住已经处理过的那几个对象**，每帧只对它们做一次幂等压制，O(1)。
+    static __weak NSMutableArray *hotList;
+    static __weak UIWindow *hotWin;
+    if (hotList && hotWin == win) {
+        for (id o in hotList) {
+            if ([o isKindOfClass:UIImageView.class]) {
+                UIImageView *iv = (UIImageView *)o;
+                if (iv.window && !iv.hidden) iv.hidden = YES;
+            }
+        }
+        // 热对象都失效则重建
+        BOOL alive = NO;
+        for (id o in hotList) { if ([o isKindOfClass:UIView.class] && ((UIView *)o).window) { alive = YES; break; } }
+        if (alive) return;
+        hotList = nil;
+    }
     // ★0.9.112：深色判定改为「本次为深色 **或** 历史曾判定为深色」。
     //   「我的」页没有地图，亮度采样拿不到有效值；而用户一旦在深色主题下用过地图，
     //   之前就已经判定过深色 —— 那一刻记下的结论对整机主题同样成立。
@@ -4328,6 +4347,9 @@ static void GCStyleDarkenMinePage(UIView *rootView) {
             if (ir.size.width >= sz.width * 0.90f && ir.size.height >= 60.0f) {
                 if (!v.hidden) {
                     v.hidden = YES;
+                    if (!hotList) hotList = [NSMutableArray array];
+                    if (![hotList containsObject:v]) [hotList addObject:v];
+                    hotWin = win;
 #ifdef GAODECLEAN_PROBE
                     if (GCProbeBuf6) [GCProbeBuf6 appendString:[NSString stringWithFormat:
                         @"\nMINE-IMG-HIDE win=(%.0f,%.0f,%.0fx%.0f)\n",
