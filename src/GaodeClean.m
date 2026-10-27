@@ -3547,6 +3547,9 @@ static void GCCapTrace(UIWindow *win) {
 #endif
 
 static void GCStyleMinePageTick(UIWindow *win);     // 0.9.111：5Hz 调用点在这之前（无条件）
+#ifdef GAODECLEAN_PROBE
+static void GCMinePageDump(UIWindow *win);          // probe68：前置声明
+#endif
 
 #ifdef GAODECLEAN_PROBE
 static void GCCapTrace(UIWindow *win);            // probe50：前置声明（5Hz 用）
@@ -3665,6 +3668,9 @@ static void GCStyleAlignMapType(UIWindow *win) {           // 5Hz 入口：发�
     //   启动早期那 1.5 秒白钮就是这段空窗。5Hz tick 起得更早，能补上。
     GCStyleDarkenRoundWidgets(win);
     GCStyleMinePageTick(win);      // 0.9.111：「我的」页整片白底 → 深色（含页面容器）
+#ifdef GAODECLEAN_PROBE
+    GCMinePageDump(win);           // probe68：白色层真身取证（只读）
+#endif
 #ifdef GAODECLEAN_PROBE
     GCCapTrace(win);                                       // probe50：5Hz 也采一次，抓启动早期
     GCBtnTrace(win);                                       // probe57：底部三钮图层树
@@ -4224,6 +4230,55 @@ static void GCStyleDarkenMinePage(UIView *rootView);   // 0.9.111：前置声明
 
 // 0.9.111：检测「我的」页是否在窗口里，在就压深。
 //   只在 5Hz 通道调用（页面切换不是高频事件），扫到一次就缓存，页面消失再清。
+// ── probe68：「我的」页白色真身深度取证（只读）─────────────────────────
+//   probe67 铁证：AMCommonContentBackgroundView 压深成功(命中=1)，但页面仍白，
+//   之后扫全窗命中=0 ⇒ 那片白不是 backgroundColor，而是别的东西。
+//   本探针把窗口下半部所有「看起来白」的层全打出来，含 layer.contents（位图）。
+#ifdef GAODECLEAN_PROBE
+static void GCMinePageDump(UIWindow *win) {
+    if (!win) return;
+    static int n;
+    if (n >= 2) return;
+    n++;
+    if (!GCProbeBuf6) GCProbeBuf6 = [NSMutableString string];
+    [GCProbeBuf6 appendString:@"\n=== MINE68 白色层取证 ===\n"];
+    CGFloat sh = win.bounds.size.height;
+    NSMutableArray<UIView *> *q = [NSMutableArray arrayWithObject:win];
+    NSUInteger bud = 900;
+    int printed = 0;
+    while (q.count && bud-- && printed < 40) {
+        UIView *v = q[0]; [q removeObjectAtIndex:0];
+        [q addObjectsFromArray:v.subviews];
+        CGRect r = [v convertRect:v.bounds toView:win];
+        if (r.size.width < 40 || r.size.height < 40) continue;
+        if (CGRectGetMinY(r) < sh * 0.30) continue;          // 只看下半部
+        if (v.hidden || v.alpha < 0.05f) continue;
+        CGFloat a = 0, w0 = -1;
+        if (v.backgroundColor) {
+            a = CGColorGetAlpha(v.backgroundColor.CGColor);
+            CGFloat al = 0;
+            if (![v.backgroundColor getWhite:&w0 alpha:&al]) {
+                CGFloat rr=0,gg=0,bb=0;
+                if ([v.backgroundColor getRed:&rr green:&gg blue:&bb alpha:&al])
+                    w0 = 0.299f*rr + 0.587f*gg + 0.114f*bb;
+                else w0 = -1;
+            }
+        }
+        BOOL hasImg = (v.layer.contents != NULL);
+        BOOL whiteish = (w0 > 0.85f && a > 0.5f);
+        if (!whiteish && !hasImg) continue;
+        printed++;
+        [GCProbeBuf6 appendString:[NSString stringWithFormat:
+            @"  %@ cls=%@ win=(%.0f,%.0f,%.0fx%.0f) bg(w=%.2f a=%.2f) img=%d op=%.2f hid=%d sub=%lu\n",
+            whiteish ? @"★白" : @"·图", @(class_getName(object_getClass(v))),
+            r.origin.x, r.origin.y, r.size.width, r.size.height,
+            w0, a, hasImg ? 1 : 0, v.layer.opacity, v.hidden ? 1 : 0,
+            (unsigned long)v.subviews.count]];
+    }
+    [GCProbeBuf6 appendString:[NSString stringWithFormat:@"  (共 %d 条)\n", printed]];
+}
+#endif
+
 static void GCStyleMinePageTick(UIWindow *win) {
     if (!win) return;
     // ★0.9.112：probe65 铁证 —— MINE-DARK 命中 0，dump 里连 "mine" 字样都没有，
