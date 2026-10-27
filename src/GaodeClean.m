@@ -3546,11 +3546,11 @@ static void GCCapTrace(UIWindow *win) {
 }
 #endif
 
+static void GCStyleMinePageTick(UIWindow *win);     // 0.9.111：5Hz 调用点在这之前（无条件）
+
 #ifdef GAODECLEAN_PROBE
 static void GCCapTrace(UIWindow *win);            // probe50：前置声明（5Hz 用）
-#ifdef GAODECLEAN_PROBE
 static void GCBtnTrace(UIWindow *win);             // probe57：前置声明
-#endif
 #endif
 
 // ════════════════════════════════════════════════════════════════════
@@ -3664,6 +3664,7 @@ static void GCStyleAlignMapType(UIWindow *win) {           // 5Hz 入口：发�
     // ★0.9.105(A2)：5Hz 入口也压白 —— 60fps 通道要等 CachedTabBar 出现才跑，
     //   启动早期那 1.5 秒白钮就是这段空窗。5Hz tick 起得更早，能补上。
     GCStyleDarkenRoundWidgets(win);
+    GCStyleMinePageTick(win);      // 0.9.111：「我的」页整片白底 → 深色（含页面容器）
 #ifdef GAODECLEAN_PROBE
     GCCapTrace(win);                                       // probe50：5Hz 也采一次，抓启动早期
     GCBtnTrace(win);                                       // probe57：底部三钮图层树
@@ -4204,6 +4205,112 @@ static void GCTabItemDarkenNow(UIView *it) {
 #endif
     }
 }
+// ════════════════════════════════════════════════════════════════════
+//  0.9.111：修「我的」页面下半整片纯白（老大 2026-10-27 截图）
+//  现象：用户信息卡与地球卡是深色，从卡片下沿到屏幕底部**整片纯白**，
+//        深色主题下极其刺眼。
+//  根因：那片白是页面容器（WINMineViewControl 的 view）的背景色，
+//        App 给它留的是亮色底；我们的色板只覆盖了底栏 5 处，从未碰过页面背景。
+//  判据：只在「App 处于深色外观」时动手。深色判定沿用 GCIsDarkAppearance，
+//        但**本页没有地图**，采样取不到有效亮度时会返回「保守深色」——
+//        这对本页恰好是对的：进来时底栏已经是深灰，说明主题就是深色。
+//  做法：从「我的」页的 view 向下扫，把**大面积、近白、不透明**的背景色
+//        换成深色底（white 0.11 / alpha 1.0，与高德深色页一致）。
+//  守卫：宽 ≥ 60% 屏宽 或 高 ≥ 25% 屏高（只认整块底板）；
+//        亮度 > 0.85 才动；alpha ≥ 0.9 才动（半透明遮罩不碰）；
+//        UILabel / UIImageView / UIControl 一律跳过（只改容器底板）。
+// ════════════════════════════════════════════════════════════════════
+static void GCStyleDarkenMinePage(UIView *rootView);   // 0.9.111：前置声明
+
+// 0.9.111：检测「我的」页是否在窗口里，在就压深。
+//   只在 5Hz 通道调用（页面切换不是高频事件），扫到一次就缓存，页面消失再清。
+static void GCStyleMinePageTick(UIWindow *win) {
+    if (!win) return;
+    static __weak UIView *cachedPage;
+    static Class mineCls;
+    static BOOL looked;
+    if (!looked) { looked = YES; mineCls = NSClassFromString(@"WINMineViewControl"); }
+    if (cachedPage && cachedPage.window) {
+        GCStyleDarkenMinePage(cachedPage);
+        return;
+    }
+    cachedPage = nil;
+    if (!mineCls) return;
+    // 找 VC：从 window.rootViewController 逐层找 WINMineViewControl 实例
+    NSMutableArray<UIViewController *> *q = [NSMutableArray array];
+    UIViewController *root = win.rootViewController;
+    if (root) [q addObject:root];
+    NSUInteger bud = 60;
+    while (q.count && bud--) {
+        UIViewController *vc = q[0]; [q removeObjectAtIndex:0];
+        if ([vc isKindOfClass:mineCls]) {
+            UIView *pv = vc.viewIfLoaded;
+            if (pv && pv.window) { cachedPage = pv; GCStyleDarkenMinePage(pv); return; }
+        }
+        if (vc.presentedViewController) [q addObject:vc.presentedViewController];
+        [q addObjectsFromArray:vc.childViewControllers];
+    }
+    // 兜底：整个窗口树里找类名含 Mine 的视图
+    NSMutableArray<UIView *> *qs = [NSMutableArray arrayWithObject:win];
+    NSUInteger b2 = 300;
+    while (qs.count && b2--) {
+        UIView *v = qs[0]; [qs removeObjectAtIndex:0];
+        NSString *cn = NSStringFromClass(v.class);
+        if ([cn containsString:@"Mine"] && v.bounds.size.width > win.bounds.size.width * 0.9f) {
+            cachedPage = v; GCStyleDarkenMinePage(v); return;
+        }
+        [qs addObjectsFromArray:v.subviews];
+    }
+}
+
+static void GCStyleDarkenMinePage(UIView *rootView) {
+    if (!rootView) return;
+    UIWindow *win = rootView.window;
+    if (!win) return;
+    if (!GCIsDarkAppearance(win)) return;
+    static int busy;
+    if (busy) return;
+    busy = 1;
+    CGSize sz = win.bounds.size;
+    UIColor *pageDark = [UIColor colorWithWhite:0.11 alpha:1.0];
+    NSMutableArray<UIView *> *q = [NSMutableArray arrayWithObject:rootView];
+    NSUInteger budget = 500;
+    while (q.count && budget--) {
+        UIView *v = [q lastObject]; [q removeLastObject];
+        if (v.hidden || v.alpha < 0.05f) continue;
+        if (v.subviews.count < 40) [q addObjectsFromArray:v.subviews];
+        if ([v isKindOfClass:UILabel.class] || [v isKindOfClass:UIImageView.class] ||
+            [v isKindOfClass:UIControl.class] || [v isKindOfClass:UIVisualEffectView.class]) continue;
+        UIColor *bg = v.backgroundColor;
+        if (!bg) continue;
+        CGFloat a = CGColorGetAlpha(bg.CGColor);
+        if (a < 0.9f) continue;                       // 半透明遮罩不碰
+        CGFloat w0 = 0, al = 0;
+        if (![bg getWhite:&w0 alpha:&al]) {
+            CGFloat rr = 0, gg = 0, bb = 0;
+            if (![bg getRed:&rr green:&gg blue:&bb alpha:&al]) continue;
+            w0 = 0.299f * rr + 0.587f * gg + 0.114f * bb;
+        }
+        if (w0 < 0.85f) continue;                     // 已经是深色
+        CGRect r = [v convertRect:v.bounds toView:win];
+        BOOL big = (r.size.width >= sz.width * 0.6f) || (r.size.height >= sz.height * 0.25f);
+        if (!big) continue;                           // 只认整块底板
+        CGRect vis = CGRectIntersection(r, win.bounds);
+        if (CGRectIsNull(vis) || vis.size.height < sz.height * 0.10f) continue;
+        [CATransaction begin]; [CATransaction setDisableActions:YES];
+        v.layer.backgroundColor = pageDark.CGColor;
+        v.backgroundColor = pageDark;
+        [CATransaction commit];
+#ifdef GAODECLEAN_PROBE
+        if (GCProbeBuf6) [GCProbeBuf6 appendString:[NSString stringWithFormat:
+            @"\nMINE-DARK %@ win=(%.0f,%.0f,%.0fx%.0f) w0=%.2f\n",
+            @(class_getName(object_getClass(v))), r.origin.x, r.origin.y,
+            r.size.width, r.size.height, w0]];
+#endif
+    }
+    busy = 0;
+}
+
 static void GCTabItemDarkHookOnce(void);   // 0.9.110：前置声明
 static void GCTabItemDarkHookOnce(void) {
     if (GCTabItemDarkHooked) return;
