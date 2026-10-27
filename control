@@ -1,6 +1,6 @@
 Package: local.gaode.clean
 Name: Gaode Clean (Rootless)
-Version: 0.3.2+p3
+Version: 0.3.2+p4
 Architecture: iphoneos-arm64
 Description: Experimental UI-only cleanup for Amap; version-agnostic, device validation required.
 Maintainer: Local Developer

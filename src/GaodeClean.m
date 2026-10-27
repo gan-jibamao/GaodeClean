@@ -17,6 +17,7 @@ static void LayoutMinimalHome(id handler);
 // PROBE 前置声明（定义在 Initialize 之前）
 static void P(NSString *fmt, ...);
 static NSString *GCScanTerms(NSArray<UIView *> *nodes, NSArray<NSString *> *terms);
+static void GCDumpView(UIView *v, int depth);
 
 @class GCCState;
 @interface GCCLimit : NSObject
@@ -304,7 +305,7 @@ static void SaveDiagnostics(UIView *page, GCCState *state, NSArray<UIView *> *no
         @"matched": @(state.matched), @"scrollContainers": @(state.scrolls.count),
         @"opaqueBlankArea": @(state.blankArea != nil && state.blankArea.superview == page),
         @"blankAreaFrame": NSStringFromCGRect(state.blankArea.frame), @"tree": tree};
-    NSData *data = [NSJSONSerialization dataWithJSONObject:@{@"version": @"0.3.2+p3", @"pages": records} options:NSJSONWritingPrettyPrinted error:nil];
+    NSData *data = [NSJSONSerialization dataWithJSONObject:@{@"version": @"0.3.2+p4", @"pages": records} options:NSJSONWritingPrettyPrinted error:nil];
     NSURL *documents = [NSFileManager.defaultManager URLsForDirectory:NSDocumentDirectory inDomains:NSUserDomainMask].firstObject;
     if (data && documents) [data writeToURL:[documents URLByAppendingPathComponent:@"GaodeClean-diagnostics.json"] options:NSDataWritingAtomic error:nil];
 }
@@ -397,7 +398,7 @@ static void CleanPage(UIView *page) {
                 NSData *data = [NSData dataWithContentsOfFile:[dir stringByAppendingPathComponent:@"GaodeClean-diagnostics.json"]];
                 NSDictionary *report = data ? [NSJSONSerialization JSONObjectWithData:data options:0 error:nil] : nil;
                 NSDictionary *mine = report[@"pages"][@"3"];
-                if ([@[@"0.3.0", @"0.3.1", @"0.3.2+p3"] containsObject:report[@"version"] ?: @""] && [mine[@"matched"] boolValue]) {
+                if ([@[@"0.3.0", @"0.3.1", @"0.3.2+p4"] containsObject:report[@"version"] ?: @""] && [mine[@"matched"] boolValue]) {
                     CGRect blank = CGRectFromString(mine[@"blankAreaFrame"] ?: @"");
                     if (blank.origin.y > 100) cached = @{@"width":@(blank.size.width), @"bottom":@(blank.origin.y)};
                 }
@@ -437,11 +438,14 @@ static void CleanPage(UIView *page) {
         if (state.attempts == 10) SaveDiagnostics(page, state, nodes);
         return;
     }
-    {   // PROBE: 只在 boundary 变化时打，避免刷屏（上次 38 秒打了 5109 次）
+    {   // PROBE: 每页每 5 秒最多打一次（上次 38 秒打了 5109 次）
+        static NSTimeInterval lastT[4];
         static CGFloat lastB[4];
         static BOOL hasB[4];
-        if (kind >= 0 && kind < 4 && (!hasB[kind] || fabs(lastB[kind] - boundary) > 0.5)) {
-            lastB[kind] = boundary; hasB[kind] = YES;
+        NSTimeInterval now = [NSDate timeIntervalSinceReferenceDate];
+        if (kind >= 0 && kind < 4 &&
+            (now - lastT[kind] > 5.0 || !hasB[kind] || fabs(lastB[kind] - boundary) > 8.0)) {
+            lastT[kind] = now; lastB[kind] = boundary; hasB[kind] = YES;
             P(@"MATCH page=%ld anchor=%@ peer=%@ boundary=%.1f", (long)kind,
               NSStringFromClass(anchor.class), peer ? NSStringFromClass(peer.class) : @"nil", boundary);
         }
@@ -749,17 +753,10 @@ static void LayoutMinimalHome(id handler) {
             P(@"SEARCHBAR %@ frame=%@ inParent=%@", NSStringFromClass(bar.class),
               NSStringFromCGRect([bar convertRect:bar.bounds toView:parent]),
               NSStringFromCGRect(bar.frame));
-            for (NSUInteger j = 0; j < bar.subviews.count; j++) {
-                UIView *sv = bar.subviews[j];
-                P(@"  SB.sub[%lu] %@ frame=%@ hidden=%d alpha=%.2f",
-                  (unsigned long)j, NSStringFromClass(sv.class), NSStringFromCGRect(sv.frame), sv.hidden, sv.alpha);
-                for (NSUInteger k = 0; k < sv.subviews.count && k < 8; k++) {
-                    UIView *s2 = sv.subviews[k];
-                    P(@"    SB.sub[%lu].sub[%lu] %@ frame=%@ hidden=%d",
-                      (unsigned long)j, (unsigned long)k, NSStringFromClass(s2.class),
-                      NSStringFromCGRect(s2.frame), s2.hidden);
-                }
-            }
+            P(@"SEARCHBAR-DUMP start");
+            GCDumpView(bar, 0);
+            P(@"SEARCHBAR-DUMP end");
+
         }
     }
     CGRect tabFrame = [tabBar convertRect:tabBar.bounds toView:parent];
@@ -790,14 +787,19 @@ static void CenterTabButtons(UIView *bar) {
                   it.center.x, it.center.y, (unsigned long)it.subviews.count);
                 for (NSUInteger j = 0; j < it.subviews.count; j++) {
                     UIView *sv = it.subviews[j];
-                    P(@"  ITEM[%lu].sub[%lu] %@ frame=%@ hidden=%d alpha=%.2f",
+                    P(@"  ITEM[%lu].sub[%lu] %@ frame=%@ hid=%d a=%.2f",
                       (unsigned long)i, (unsigned long)j, NSStringFromClass(sv.class),
                       NSStringFromCGRect(sv.frame), sv.hidden, sv.alpha);
-                    for (NSUInteger k = 0; k < sv.subviews.count && k < 6; k++) {
+                    for (NSUInteger k = 0; k < sv.subviews.count && k < 8; k++) {
                         UIView *s2 = sv.subviews[k];
-                        P(@"    .sub[%lu].sub[%lu] %@ frame=%@ hidden=%d",
+                        NSMutableString *ex = [NSMutableString string];
+                        if ([s2 isKindOfClass:UIImageView.class])
+                            [ex appendFormat:@" image=%@", ((UIImageView*)s2).image ? @"YES" : @"nil"];
+                        if ([s2 isKindOfClass:UILabel.class])
+                            [ex appendFormat:@" text='%@'", ((UILabel*)s2).text ?: @""];
+                        P(@"    .sub[%lu].sub[%lu] %@ frame=%@ hid=%d%@",
                           (unsigned long)j, (unsigned long)k, NSStringFromClass(s2.class),
-                          NSStringFromCGRect(s2.frame), s2.hidden);
+                          NSStringFromCGRect(s2.frame), s2.hidden, ex);
                     }
                 }
             }
@@ -928,6 +930,27 @@ static NSString *GCScanTerms(NSArray<UIView *> *nodes, NSArray<NSString *> *term
         if (c) hit[t] = @(c);
     }
     return [hit description];
+}
+
+// 递归 dump 视图树（C 函数，避免 block 循环引用）
+static void GCDumpView(UIView *v, int depth) {
+    if (!v || depth > 5) return;
+    for (NSUInteger j = 0; j < v.subviews.count && j < 10; j++) {
+        UIView *sv = v.subviews[j];
+        NSMutableString *ind = [NSMutableString string];
+        for (int i = 0; i < depth; i++) [ind appendString:@"  "];
+        NSMutableString *ex = [NSMutableString string];
+        if ([sv isKindOfClass:UIImageView.class])
+            [ex appendFormat:@" image=%@", ((UIImageView *)sv).image ? @"YES" : @"nil"];
+        if ([sv isKindOfClass:UILabel.class])
+            [ex appendFormat:@" text='%@'", ((UILabel *)sv).text ?: @""];
+        if ([sv isKindOfClass:UIButton.class])
+            [ex appendFormat:@" btn='%@'", [((UIButton *)sv) titleForState:UIControlStateNormal] ?: @""];
+        P(@"DUMP %@[%lu] %@ frame=%@ hid=%d a=%.2f%@",
+          ind, (unsigned long)j, NSStringFromClass(sv.class),
+          NSStringFromCGRect(sv.frame), sv.hidden, sv.alpha, ex);
+        GCDumpView(sv, depth + 1);
+    }
 }
 // ==================== /PROBE ====================
 
