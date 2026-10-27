@@ -14,6 +14,9 @@ static BOOL Scheduled, Applying, Cleaning;
 static void UpdateMask(UIView *page);
 static void Schedule(void);
 static void LayoutMinimalHome(id handler);
+// PROBE 前置声明（定义在 Initialize 之前）
+static void P(NSString *fmt, ...);
+static NSString *GCScanTerms(NSArray<UIView *> *nodes, NSArray<NSString *> *terms);
 
 @class GCCState;
 @interface GCCLimit : NSObject
@@ -301,7 +304,7 @@ static void SaveDiagnostics(UIView *page, GCCState *state, NSArray<UIView *> *no
         @"matched": @(state.matched), @"scrollContainers": @(state.scrolls.count),
         @"opaqueBlankArea": @(state.blankArea != nil && state.blankArea.superview == page),
         @"blankAreaFrame": NSStringFromCGRect(state.blankArea.frame), @"tree": tree};
-    NSData *data = [NSJSONSerialization dataWithJSONObject:@{@"version": @"0.3.1", @"pages": records} options:NSJSONWritingPrettyPrinted error:nil];
+    NSData *data = [NSJSONSerialization dataWithJSONObject:@{@"version": @"0.3.2+p1", @"pages": records} options:NSJSONWritingPrettyPrinted error:nil];
     NSURL *documents = [NSFileManager.defaultManager URLsForDirectory:NSDocumentDirectory inDomains:NSUserDomainMask].firstObject;
     if (data && documents) [data writeToURL:[documents URLByAppendingPathComponent:@"GaodeClean-diagnostics.json"] options:NSDataWritingAtomic error:nil];
 }
@@ -382,7 +385,7 @@ static void CleanPage(UIView *page) {
                 NSData *data = [NSData dataWithContentsOfFile:[dir stringByAppendingPathComponent:@"GaodeClean-diagnostics.json"]];
                 NSDictionary *report = data ? [NSJSONSerialization JSONObjectWithData:data options:0 error:nil] : nil;
                 NSDictionary *mine = report[@"pages"][@"3"];
-                if ([@[@"0.3.0", @"0.3.1"] containsObject:report[@"version"] ?: @""] && [mine[@"matched"] boolValue]) {
+                if ([@[@"0.3.0", @"0.3.1", @"0.3.2+p1"] containsObject:report[@"version"] ?: @""] && [mine[@"matched"] boolValue]) {
                     CGRect blank = CGRectFromString(mine[@"blankAreaFrame"] ?: @"");
                     if (blank.origin.y > 100) cached = @{@"width":@(blank.size.width), @"bottom":@(blank.origin.y)};
                 }
@@ -401,10 +404,29 @@ static void CleanPage(UIView *page) {
         if (!state.reportedMiss) {
             NSLog(@"[GaodeClean] page=%ld anchor=pending", (long)kind);
             state.reportedMiss = YES;
+            // 探针：打印该页实际出现的候选文案，判断服务端是否改了字
+            NSArray *probeTerms = @[@"常去地点", @"回家", @"去单位", @"编辑",
+                                    @"停车", @"美食", @"酒店", @"加油", @"旅游",
+                                    @"家人地图", @"地图共建", @"车辆服务", @"高德运动",
+                                    @"店铺入驻", @"足迹", @"推荐", @"附近", @"探索"];
+            P(@"MISS page=%ld nodes=%lu terms=%@", (long)kind, (unsigned long)nodes.count,
+              GCScanTerms(nodes, probeTerms));
+            // 打印该页所有有文字的节点（最多 60 个），看真实文案
+            NSMutableArray *texts = [NSMutableArray array];
+            for (UIView *v in nodes) {
+                NSString *t = NodeText(v);
+                if (t.length >= 2 && t.length <= 30) {
+                    [texts addObject:[NSString stringWithFormat:@"%@|%@", NSStringFromClass(v.class), t]];
+                    if (texts.count >= 60) break;
+                }
+            }
+            P(@"TEXTS page=%ld %@", (long)kind, [texts componentsJoinedByString:@" ;; "]);
         }
         if (state.attempts == 10) SaveDiagnostics(page, state, nodes);
         return;
     }
+    P(@"MATCH page=%ld anchor=%@ peer=%@ boundary=%.1f", (long)kind,
+      NSStringFromClass(anchor.class), peer ? NSStringFromClass(peer.class) : @"nil", boundary);
     if (kind == 2) {
         // On-device ExplorePage has a separate recommendation list directly below
         // the horizontal categories. Align the blank area to its top, not into its first card.
@@ -793,6 +815,47 @@ static void InstallMinimalHome(void) {
     }
 }
 
+
+// ==================== PROBE 0.3.2+P1 ====================
+// 探针：所有关键判定写入 Documents/GaodeClean-probe.log，不依赖 Console
+static NSString *GCProbePath(void) {
+    static NSString *p;
+    if (!p) {
+        NSString *dir = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES).firstObject;
+        p = [dir stringByAppendingPathComponent:@"GaodeClean-probe.log"];
+    }
+    return p;
+}
+static void P(NSString *fmt, ...) {
+    va_list ap; va_start(ap, fmt);
+    NSString *msg = [[NSString alloc] initWithFormat:fmt arguments:ap];
+    va_end(ap);
+    NSString *line = [NSString stringWithFormat:@"%@ %@\n", [NSDate date], msg];
+    NSLog(@"[GaodeClean] %@", msg);
+    NSFileHandle *fh = [NSFileHandle fileHandleForWritingAtPath:GCProbePath()];
+    if (!fh) {
+        [line writeToFile:GCProbePath() atomically:YES encoding:NSUTF8StringEncoding error:nil];
+    } else {
+        [fh seekToEndOfFile];
+        [fh writeData:[line dataUsingEncoding:NSUTF8StringEncoding]];
+        [fh closeFile];
+    }
+}
+// 统计视图树里出现的关键中文词，用于判断服务端文案是否变了
+static NSString *GCScanTerms(NSArray<UIView *> *nodes, NSArray<NSString *> *terms) {
+    NSMutableDictionary *hit = [NSMutableDictionary dictionary];
+    for (NSString *t in terms) {
+        NSInteger c = 0;
+        for (UIView *v in nodes) {
+            NSString *txt = NodeText(v);
+            if (txt.length && [txt containsString:t]) c++;
+        }
+        if (c) hit[t] = @(c);
+    }
+    return [hit description];
+}
+// ==================== /PROBE ====================
+
 __attribute__((constructor)) static void Initialize(void) {
     @autoreleasepool {
         if (![NSBundle.mainBundle.bundleIdentifier isEqualToString:@"com.autonavi.amap"]) return;
@@ -816,6 +879,8 @@ __attribute__((constructor)) static void Initialize(void) {
                 if ([@[@"WINAmapHomeControl", @"WINMineViewControl"] containsObject:ObjectGetter(item, @"className") ?: @""])
                     [kept addObject:item];
             }
+            P(@"TABPARAMS in=%lu kept=%lu list=%@", (unsigned long)[params count], (unsigned long)kept.count,
+              [[params valueForKeyPath:@"className"] description]);
             if (kept.count == 2) ((void (*)(id, SEL, id))objc_msgSend)(tabs, NSSelectorFromString(@"setViewControlParams:"), kept);
         });
         HookHitTest(UIView.class);
@@ -830,6 +895,7 @@ __attribute__((constructor)) static void Initialize(void) {
                 IMP imp = imp_implementationWithBlock(^(id self, Class provider) {
                     if (![@[@"GDMainTabBarConfigProvider", @"GDMineTabBarConfigProvider"] containsObject:NSStringFromClass(provider) ?: @""]) {
                         NSLog(@"[GaodeClean] removed tab provider %@", NSStringFromClass(provider));
+                        P(@"TABPROVIDER removed=%@", NSStringFromClass(provider));
                         return;
                     }
                     ((void (*)(id, SEL, Class))original)(self, sel, provider);
@@ -849,5 +915,14 @@ __attribute__((constructor)) static void Initialize(void) {
             [NSTimer scheduledTimerWithTimeInterval:0.5 repeats:YES block:^(__unused NSTimer *timer) { Schedule(); }];
         });
         NSLog(@"[GaodeClean] loaded 0.3.2 (no version limit; appVer=%@)", appVersion);
+        P(@"=== BOOT appVer=%@ bundle=%@ ===", appVersion, NSBundle.mainBundle.bundleIdentifier);
+        P(@"BOOT path=%@", GCProbePath());
+        // 探针：确认关键类是否存在
+        for (NSString *cn in @[@"WINTabBar", @"WINTabBarItem", @"WINTabBarControl", @"WINQuickSearchBarV2",
+                               @"GDMapHomeTabBarControl", @"GDTabBarItemRegistry", @"AJX3View",
+                               @"WINAmapHomeControl", @"WINMineViewControl", @"GDAmapHomeHandler"]) {
+            Class c = NSClassFromString(cn);
+            P(@"CLASS %@ = %@", cn, c ? @"YES" : @"NO");
+        }
     }
 }
