@@ -14,10 +14,6 @@ static BOOL Scheduled, Applying, Cleaning;
 static void UpdateMask(UIView *page);
 static void Schedule(void);
 static void LayoutMinimalHome(id handler);
-// PROBE 前置声明（定义在 Initialize 之前）
-static void P(NSString *fmt, ...);
-static NSString *GCScanTerms(NSArray<UIView *> *nodes, NSArray<NSString *> *terms);
-static void GCDumpView(UIView *v, int depth);
 
 @class GCCState;
 @interface GCCLimit : NSObject
@@ -305,7 +301,7 @@ static void SaveDiagnostics(UIView *page, GCCState *state, NSArray<UIView *> *no
         @"matched": @(state.matched), @"scrollContainers": @(state.scrolls.count),
         @"opaqueBlankArea": @(state.blankArea != nil && state.blankArea.superview == page),
         @"blankAreaFrame": NSStringFromCGRect(state.blankArea.frame), @"tree": tree};
-    NSData *data = [NSJSONSerialization dataWithJSONObject:@{@"version": @"0.3.2+p4", @"pages": records} options:NSJSONWritingPrettyPrinted error:nil];
+    NSData *data = [NSJSONSerialization dataWithJSONObject:@{@"version": @"0.3.1", @"pages": records} options:NSJSONWritingPrettyPrinted error:nil];
     NSURL *documents = [NSFileManager.defaultManager URLsForDirectory:NSDocumentDirectory inDomains:NSUserDomainMask].firstObject;
     if (data && documents) [data writeToURL:[documents URLByAppendingPathComponent:@"GaodeClean-diagnostics.json"] options:NSDataWritingAtomic error:nil];
 }
@@ -325,18 +321,6 @@ static void CleanPage(UIView *page) {
         state.attempts = 0;
     }
     NSInteger kind = Kind(page);
-    // PROBE: 打印所有页面路径（去重，只打前 40 个），定位 17.02.1 的真实 pagePath
-    {
-        static NSMutableSet *seenPaths;
-        if (!seenPaths) seenPaths = [NSMutableSet set];
-        if (path.length && ![seenPaths containsObject:path] && seenPaths.count < 40) {
-            [seenPaths addObject:path];
-            P(@"PAGE path=%@ kind=%ld", path, (long)kind);
-        } else if (!path.length && seenPaths.count < 40 && ![seenPaths containsObject:@"<empty>"]) {
-            [seenPaths addObject:@"<empty>"];
-            P(@"PAGE path=<empty> class=%@", NSStringFromClass(page.class));
-        }
-    }
     if (!kind) { Restore(state); return; }
     if (!page.window) return;
     if (kind == 1) {
@@ -398,7 +382,7 @@ static void CleanPage(UIView *page) {
                 NSData *data = [NSData dataWithContentsOfFile:[dir stringByAppendingPathComponent:@"GaodeClean-diagnostics.json"]];
                 NSDictionary *report = data ? [NSJSONSerialization JSONObjectWithData:data options:0 error:nil] : nil;
                 NSDictionary *mine = report[@"pages"][@"3"];
-                if ([@[@"0.3.0", @"0.3.1", @"0.3.2+p4"] containsObject:report[@"version"] ?: @""] && [mine[@"matched"] boolValue]) {
+                if ([@[@"0.3.0", @"0.3.1", @"0.3.3"] containsObject:report[@"version"] ?: @""] && [mine[@"matched"] boolValue]) {
                     CGRect blank = CGRectFromString(mine[@"blankAreaFrame"] ?: @"");
                     if (blank.origin.y > 100) cached = @{@"width":@(blank.size.width), @"bottom":@(blank.origin.y)};
                 }
@@ -417,38 +401,9 @@ static void CleanPage(UIView *page) {
         if (!state.reportedMiss) {
             NSLog(@"[GaodeClean] page=%ld anchor=pending", (long)kind);
             state.reportedMiss = YES;
-            // 探针：打印该页实际出现的候选文案，判断服务端是否改了字
-            NSArray *probeTerms = @[@"常去地点", @"回家", @"去单位", @"编辑",
-                                    @"停车", @"美食", @"酒店", @"加油", @"旅游",
-                                    @"家人地图", @"地图共建", @"车辆服务", @"高德运动",
-                                    @"店铺入驻", @"足迹", @"推荐", @"附近", @"探索"];
-            P(@"MISS page=%ld nodes=%lu terms=%@", (long)kind, (unsigned long)nodes.count,
-              GCScanTerms(nodes, probeTerms));
-            // 打印该页所有有文字的节点（最多 60 个），看真实文案
-            NSMutableArray *texts = [NSMutableArray array];
-            for (UIView *v in nodes) {
-                NSString *t = NodeText(v);
-                if (t.length >= 2 && t.length <= 30) {
-                    [texts addObject:[NSString stringWithFormat:@"%@|%@", NSStringFromClass(v.class), t]];
-                    if (texts.count >= 60) break;
-                }
-            }
-            P(@"TEXTS page=%ld %@", (long)kind, [texts componentsJoinedByString:@" ;; "]);
         }
         if (state.attempts == 10) SaveDiagnostics(page, state, nodes);
         return;
-    }
-    {   // PROBE: 每页每 5 秒最多打一次（上次 38 秒打了 5109 次）
-        static NSTimeInterval lastT[4];
-        static CGFloat lastB[4];
-        static BOOL hasB[4];
-        NSTimeInterval now = [NSDate timeIntervalSinceReferenceDate];
-        if (kind >= 0 && kind < 4 &&
-            (now - lastT[kind] > 5.0 || !hasB[kind] || fabs(lastB[kind] - boundary) > 8.0)) {
-            lastT[kind] = now; lastB[kind] = boundary; hasB[kind] = YES;
-            P(@"MATCH page=%ld anchor=%@ peer=%@ boundary=%.1f", (long)kind,
-              NSStringFromClass(anchor.class), peer ? NSStringFromClass(peer.class) : @"nil", boundary);
-        }
     }
     if (kind == 2) {
         // On-device ExplorePage has a separate recommendation list directly below
@@ -727,6 +682,15 @@ static BOOL IsStreetRank(UIView *view) {
     return [ObjectGetter(view, @"getItemTag") isEqual:@"template_rank"] || [identity containsString:@"扫街榜"] || [lower containsString:@"saojie"] || [lower containsString:@"streetrank"];
 }
 
+// ============ 0.3.3 (A2): 三个圆钮 ============
+#define GC_DOT 52.0
+#define GC_GAP 8.0
+#define GC_BOTTOM_INSET 60.0
+
+static void GCHideBarPlatter(UIView *bar);
+static void GCShrinkSearchBar(UIView *bar);
+static BOOL GCDotDress(UIView *v, BOOL hideText);
+
 static void LayoutMinimalHome(id handler) {
     if (LayingOutHome) return;
     UIView *bar = ObjectGetter(handler, @"searchBar");
@@ -746,88 +710,143 @@ static void LayoutMinimalHome(id handler) {
     if ([mask isKindOfClass:UIView.class]) mask.hidden = YES;
     CALayer *bottomMask = ObjectGetter(handler, @"bottomMaskLayer");
     if ([bottomMask isKindOfClass:CALayer.class]) bottomMask.hidden = YES;
-    {
-        static BOOL sdumped;
-        if (!sdumped && bar.window) {
-            sdumped = YES;
-            P(@"SEARCHBAR %@ frame=%@ inParent=%@", NSStringFromClass(bar.class),
-              NSStringFromCGRect([bar convertRect:bar.bounds toView:parent]),
-              NSStringFromCGRect(bar.frame));
-            P(@"SEARCHBAR-DUMP start");
-            GCDumpView(bar, 0);
-            P(@"SEARCHBAR-DUMP end");
-
-        }
-    }
-    CGRect tabFrame = [tabBar convertRect:tabBar.bounds toView:parent];
-    CGFloat height = MAX(50, MIN(64, bar.bounds.size.height));
-    bar.frame = CGRectMake(0, MAX(0, tabFrame.origin.y - height - 12), parent.bounds.size.width, height);
+    // 0.3.3 (A2): 搜索框不再是底栏上方的长条，改成三个圆钮中间那个。
+    // 用窗口坐标算中心，再转回 parent 坐标，避免父子层级不同导致错位
+    UIWindow *win = parent.window;
+    CGFloat screenH = win ? win.bounds.size.height : parent.bounds.size.height;
+    CGFloat dotCY = screenH - GC_BOTTOM_INSET - 30;
+    CGFloat screenW = win ? win.bounds.size.width : parent.bounds.size.width;
+    CGPoint centerInParent = [parent convertPoint:CGPointMake(screenW / 2, dotCY) fromView:win];
+    bar.bounds = CGRectMake(0, 0, GC_DOT, GC_DOT);
+    bar.center = centerInParent;
+    GCShrinkSearchBar(bar);
     bar.hidden = NO;
     [parent bringSubviewToFront:bar];
     LayingOutHome = NO;
 }
 
-static void CenterTabButtons(UIView *bar) {
-    static BOOL adjusting;
-    if (adjusting) return;
-    // PROBE: dump 底栏完整层级（只打一次）
-    {
-        static BOOL dumped;
-        if (!dumped && bar.window) {
-            dumped = YES;
-            P(@"BAR frame=%@ bounds=%@ class=%@", NSStringFromCGRect([bar convertRect:bar.bounds toView:bar.window]), NSStringFromCGRect(bar.bounds), NSStringFromClass(bar.class));
-            NSArray *its = ObjectGetter(bar, @"tabBarItems");
-            P(@"BAR items=%lu", (unsigned long)([its isKindOfClass:NSArray.class] ? its.count : 0));
-            for (NSUInteger i = 0; i < its.count; i++) {
-                UIView *it = its[i];
-                if (![it isKindOfClass:UIView.class]) continue;
-                P(@"ITEM[%lu] %@ frame=%@ center=(%.1f,%.1f) sub=%lu",
-                  (unsigned long)i, NSStringFromClass(it.class),
-                  NSStringFromCGRect([it convertRect:it.bounds toView:bar]),
-                  it.center.x, it.center.y, (unsigned long)it.subviews.count);
-                for (NSUInteger j = 0; j < it.subviews.count; j++) {
-                    UIView *sv = it.subviews[j];
-                    P(@"  ITEM[%lu].sub[%lu] %@ frame=%@ hid=%d a=%.2f",
-                      (unsigned long)i, (unsigned long)j, NSStringFromClass(sv.class),
-                      NSStringFromCGRect(sv.frame), sv.hidden, sv.alpha);
-                    for (NSUInteger k = 0; k < sv.subviews.count && k < 8; k++) {
-                        UIView *s2 = sv.subviews[k];
-                        NSMutableString *ex = [NSMutableString string];
-                        if ([s2 isKindOfClass:UIImageView.class])
-                            [ex appendFormat:@" image=%@", ((UIImageView*)s2).image ? @"YES" : @"nil"];
-                        if ([s2 isKindOfClass:UILabel.class])
-                            [ex appendFormat:@" text='%@'", ((UILabel*)s2).text ?: @""];
-                        P(@"    .sub[%lu].sub[%lu] %@ frame=%@ hid=%d%@",
-                          (unsigned long)j, (unsigned long)k, NSStringFromClass(s2.class),
-                          NSStringFromCGRect(s2.frame), s2.hidden, ex);
-                    }
+// 目标布局（393pt 视口，与用户截图一致）：
+//   导航钮 中心 x=136.5   搜索钮 中心 x=196.5   我的钮 中心 x=256.5
+//   直径 52pt，中心 y = 屏高 - 60 - 30 = 屏高 - 90
+// 底栏底板（胶囊/阴影/描边）全部隐藏，三个钮浮在地图上。
+
+static BOOL GCDotDress(UIView *v, BOOL hideText) {
+    if (![v isKindOfClass:UIView.class]) return NO;
+    v.layer.cornerRadius = GC_DOT / 2.0;
+    v.layer.masksToBounds = YES;
+    v.backgroundColor = [UIColor colorWithWhite:0.97 alpha:1.0];
+    if (hideText) {
+        for (UIView *s1 in v.subviews) {
+            if ([s1 isKindOfClass:UILabel.class]) s1.hidden = YES;
+            for (UIView *s2 in s1.subviews)
+                if ([s2 isKindOfClass:UILabel.class]) s2.hidden = YES;
+        }
+    }
+    return YES;
+}
+
+// 隐藏底栏底板：胶囊 / 阴影 / 描边
+static void GCHideBarPlatter(UIView *bar) {
+    for (UIView *v in bar.subviews) {
+        if ([v isKindOfClass:[UIVisualEffectView class]]) { v.hidden = YES; continue; }
+        if ([v isKindOfClass:[UIImageView class]] && v.frame.size.height > 60) { v.hidden = YES; continue; }
+    }
+}
+
+// 把搜索框收成圆钮：只留放大镜
+static void GCShrinkSearchBar(UIView *bar) {
+    if (![bar isKindOfClass:UIView.class]) return;
+    bar.layer.cornerRadius = GC_DOT / 2.0;
+    bar.layer.masksToBounds = YES;
+    for (UIView *v in bar.subviews) {
+        // 语音钮 / 相机钮：不是胶囊的那个
+        if ([v isKindOfClass:[UIButton class]]) { v.hidden = YES; continue; }
+        if ([NSStringFromClass(v.class) containsString:@"EmojiView"]) { v.hidden = YES; continue; }
+        // 胶囊本体：撑满整个圆
+        if ([v isKindOfClass:[UIVisualEffectView class]]) {
+            v.frame = CGRectMake(0, 0, GC_DOT, GC_DOT);
+            v.layer.cornerRadius = GC_DOT / 2.0;
+            v.layer.masksToBounds = YES;
+            for (UIView *c in v.subviews) {
+                if ([c isKindOfClass:[UIView class]] && fabs(c.frame.size.width - 377) < 2) {
+                    c.frame = CGRectMake(0, 0, GC_DOT, GC_DOT);
                 }
-            }
-            // 底栏自身的背景层
-            for (NSUInteger j = 0; j < bar.subviews.count; j++) {
-                UIView *sv = bar.subviews[j];
-                P(@"BAR.sub[%lu] %@ frame=%@ hidden=%d alpha=%.2f",
-                  (unsigned long)j, NSStringFromClass(sv.class), NSStringFromCGRect(sv.frame), sv.hidden, sv.alpha);
+                for (UIView *g in c.subviews) {
+                    if ([g isKindOfClass:[UIImageView class]] && fabs(g.frame.size.width - 377) < 2) {
+                        g.frame = CGRectMake(0, 0, GC_DOT, GC_DOT);
+                    }
+                    // 放大镜：24x24 居中
+                    if ([g isKindOfClass:UIImageView.class] && fabs(g.frame.size.width - 24) < 2) {
+                        g.frame = CGRectMake((GC_DOT - 24) / 2, (GC_DOT - 24) / 2, 24, 24);
+                    }
+                    // 滚动文字：隐藏
+                    if ([NSStringFromClass(g.class) containsString:@"VerticalScrollText"]) g.hidden = YES;
+                }
             }
         }
     }
+}
+
+static void CenterTabButtons(UIView *bar) {
+    static BOOL adjusting;
+    if (adjusting) return;
     NSArray *items = ObjectGetter(bar, @"tabBarItems");
     if (![items isKindOfClass:NSArray.class] || items.count != 2) return;
     adjusting = YES;
-    // Keep the native full-width platter; retain the compact layout's item centers.
-    CGFloat compactWidth = MIN(252, bar.bounds.size.width - 32);
-    CGFloat separation = MAX(0, compactWidth - 48 - 84);
-    for (NSUInteger index = 0; index < items.count; index++) {
-        UIView *item = items[index];
-        if (![item isKindOfClass:UIView.class] || !item.superview) continue;
-        CGPoint center = [item.superview convertPoint:item.center toView:bar];
-        center.x = CGRectGetMidX(bar.bounds) + (index == 0 ? -0.5 : 0.5) * separation;
-        item.center = [bar convertPoint:center toView:item.superview];
+
+    GCHideBarPlatter(bar);
+
+    // 底栏上浮：用窗口坐标系算，避免父视图不同导致错位
+    UIWindow *win = bar.window;
+    CGFloat screenH = win ? win.bounds.size.height : 852;
+    CGFloat barH = 60;
+    CGFloat barY = screenH - GC_BOTTOM_INSET - barH;
+    if (bar.superview) {
+        // 把窗口坐标的目标 y 转成 bar 父视图坐标
+        CGPoint targetInWin = CGPointMake(0, barY);
+        CGPoint targetInSuper = [bar.superview convertPoint:targetInWin fromView:win];
+        if (fabs(bar.frame.origin.y - targetInSuper.y) > 0.5) {
+            CGRect f = bar.frame;
+            f.origin.y = targetInSuper.y;
+            bar.frame = f;
+        }
     }
+
+    // 三钮中心：屏宽 393 → 136.5 / 196.5 / 256.5
+    CGFloat W = bar.bounds.size.width;
+    CGFloat cx[3] = { W / 2 - 60, W / 2, W / 2 + 60 };
+
+    // 两个 tab → 圆钮
+    for (NSUInteger i = 0; i < items.count; i++) {
+        UIView *item = items[i];
+        if (![item isKindOfClass:UIView.class] || !item.superview) continue;
+        item.bounds = CGRectMake(0, 0, GC_DOT, GC_DOT);
+        GCDotDress(item, YES);
+        // 子项（选中/未选中两层）同步成圆
+        for (UIView *sub in item.subviews) {
+            sub.frame = CGRectMake(0, 0, GC_DOT, GC_DOT);
+            GCDotDress(sub, YES);
+        }
+        CGFloat targetX = (i == 0) ? cx[0] : cx[2];
+        CGPoint c = [item.superview convertPoint:item.center toView:bar];
+        c.x = targetX;
+        c.y = barH / 2;
+        item.center = [bar convertPoint:c toView:item.superview];
+    }
+
+    // 选中底衬：跟着第一个钮走，或直接隐藏（圆钮不需要）
+    for (UIView *v in bar.subviews) {
+        if ([NSStringFromClass(v.class) isEqualToString:@"UIView"] &&
+            fabs(v.frame.size.width - 84) < 2 && fabs(v.frame.size.height - 54) < 2) {
+            v.hidden = YES;
+        }
+    }
+
     SEL sync = NSSelectorFromString(@"amap_syncLegacySelectionAnimated:");
     if ([bar respondsToSelector:sync]) ((void (*)(id, SEL, BOOL))objc_msgSend)(bar, sync, NO);
     adjusting = NO;
 }
+
 
 static void InstallMinimalHome(void) {
     HookVoid(@"WINTabBar", @"layoutSubviews", ^(UIView *bar) { CenterTabButtons(bar); });
@@ -892,68 +911,6 @@ static void InstallMinimalHome(void) {
     }
 }
 
-
-// ==================== PROBE 0.3.2+P1 ====================
-// 探针：所有关键判定写入 Documents/GaodeClean-probe.log，不依赖 Console
-static NSString *GCProbePath(void) {
-    static NSString *p;
-    if (!p) {
-        NSString *dir = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES).firstObject;
-        p = [dir stringByAppendingPathComponent:@"GaodeClean-probe.log"];
-    }
-    return p;
-}
-static void P(NSString *fmt, ...) {
-    va_list ap; va_start(ap, fmt);
-    NSString *msg = [[NSString alloc] initWithFormat:fmt arguments:ap];
-    va_end(ap);
-    NSString *line = [NSString stringWithFormat:@"%@ %@\n", [NSDate date], msg];
-    NSLog(@"[GaodeClean] %@", msg);
-    NSFileHandle *fh = [NSFileHandle fileHandleForWritingAtPath:GCProbePath()];
-    if (!fh) {
-        [line writeToFile:GCProbePath() atomically:YES encoding:NSUTF8StringEncoding error:nil];
-    } else {
-        [fh seekToEndOfFile];
-        [fh writeData:[line dataUsingEncoding:NSUTF8StringEncoding]];
-        [fh closeFile];
-    }
-}
-// 统计视图树里出现的关键中文词，用于判断服务端文案是否变了
-static NSString *GCScanTerms(NSArray<UIView *> *nodes, NSArray<NSString *> *terms) {
-    NSMutableDictionary *hit = [NSMutableDictionary dictionary];
-    for (NSString *t in terms) {
-        NSInteger c = 0;
-        for (UIView *v in nodes) {
-            NSString *txt = NodeText(v);
-            if (txt.length && [txt containsString:t]) c++;
-        }
-        if (c) hit[t] = @(c);
-    }
-    return [hit description];
-}
-
-// 递归 dump 视图树（C 函数，避免 block 循环引用）
-static void GCDumpView(UIView *v, int depth) {
-    if (!v || depth > 5) return;
-    for (NSUInteger j = 0; j < v.subviews.count && j < 10; j++) {
-        UIView *sv = v.subviews[j];
-        NSMutableString *ind = [NSMutableString string];
-        for (int i = 0; i < depth; i++) [ind appendString:@"  "];
-        NSMutableString *ex = [NSMutableString string];
-        if ([sv isKindOfClass:UIImageView.class])
-            [ex appendFormat:@" image=%@", ((UIImageView *)sv).image ? @"YES" : @"nil"];
-        if ([sv isKindOfClass:UILabel.class])
-            [ex appendFormat:@" text='%@'", ((UILabel *)sv).text ?: @""];
-        if ([sv isKindOfClass:UIButton.class])
-            [ex appendFormat:@" btn='%@'", [((UIButton *)sv) titleForState:UIControlStateNormal] ?: @""];
-        P(@"DUMP %@[%lu] %@ frame=%@ hid=%d a=%.2f%@",
-          ind, (unsigned long)j, NSStringFromClass(sv.class),
-          NSStringFromCGRect(sv.frame), sv.hidden, sv.alpha, ex);
-        GCDumpView(sv, depth + 1);
-    }
-}
-// ==================== /PROBE ====================
-
 __attribute__((constructor)) static void Initialize(void) {
     @autoreleasepool {
         if (![NSBundle.mainBundle.bundleIdentifier isEqualToString:@"com.autonavi.amap"]) return;
@@ -977,8 +934,6 @@ __attribute__((constructor)) static void Initialize(void) {
                 if ([@[@"WINAmapHomeControl", @"WINMineViewControl"] containsObject:ObjectGetter(item, @"className") ?: @""])
                     [kept addObject:item];
             }
-            P(@"TABPARAMS in=%lu kept=%lu list=%@", (unsigned long)[params count], (unsigned long)kept.count,
-              [[params valueForKeyPath:@"className"] description]);
             if (kept.count == 2) ((void (*)(id, SEL, id))objc_msgSend)(tabs, NSSelectorFromString(@"setViewControlParams:"), kept);
         });
         HookHitTest(UIView.class);
@@ -993,7 +948,6 @@ __attribute__((constructor)) static void Initialize(void) {
                 IMP imp = imp_implementationWithBlock(^(id self, Class provider) {
                     if (![@[@"GDMainTabBarConfigProvider", @"GDMineTabBarConfigProvider"] containsObject:NSStringFromClass(provider) ?: @""]) {
                         NSLog(@"[GaodeClean] removed tab provider %@", NSStringFromClass(provider));
-                        P(@"TABPROVIDER removed=%@", NSStringFromClass(provider));
                         return;
                     }
                     ((void (*)(id, SEL, Class))original)(self, sel, provider);
@@ -1004,20 +958,7 @@ __attribute__((constructor)) static void Initialize(void) {
         HookVoid(@"AJXBaseElement", @"reloadView", ^(id e) { Capture(e); });
         HookVoid(@"AJXBaseElement", @"layoutSubViews", ^(id e) { Capture(e); });
         HookVoid(@"AJXBaseElement", @"updateVoiceOverIDAndLabel", ^(id e) { Capture(e); });
-        HookVoid(@"AJX3View", @"layoutSubviews", ^(id page) {
-            [Pages addObject:page];
-            {
-                static NSMutableSet *seen2;
-                if (!seen2) seen2 = [NSMutableSet set];
-                NSString *pp = PagePath(page);
-                NSString *key = pp.length ? pp : @"<empty>";
-                if (![seen2 containsObject:key] && seen2.count < 40) {
-                    [seen2 addObject:key];
-                    P(@"AJX3VIEW path=%@", key);
-                }
-            }
-            if (!Cleaning) { Cleaning = YES; CleanPage(page); Cleaning = NO; } Schedule();
-        });
+        HookVoid(@"AJX3View", @"layoutSubviews", ^(id page) { [Pages addObject:page]; if (!Cleaning) { Cleaning = YES; CleanPage(page); Cleaning = NO; } Schedule(); });
         HookVoid(@"AJX3View", @"didMoveToWindow", ^(id page) { [Pages addObject:page]; CleanPage(page); Schedule(); });
         HookVoid(@"AJXWINNearbyViewControl", @"viewDidLoad", ^(id controller) { [NearbyControllers addObject:controller]; Schedule(); });
         HookVoid(@"WINTabBarControl", @"viewDidLoad", ^(id tabs) { [TabControllers addObject:tabs]; Schedule(); });
@@ -1025,15 +966,6 @@ __attribute__((constructor)) static void Initialize(void) {
         dispatch_async(dispatch_get_main_queue(), ^{
             [NSTimer scheduledTimerWithTimeInterval:0.5 repeats:YES block:^(__unused NSTimer *timer) { Schedule(); }];
         });
-        NSLog(@"[GaodeClean] loaded 0.3.2 (no version limit; appVer=%@)", appVersion);
-        P(@"=== BOOT appVer=%@ bundle=%@ ===", appVersion, NSBundle.mainBundle.bundleIdentifier);
-        P(@"BOOT path=%@", GCProbePath());
-        // 探针：确认关键类是否存在
-        for (NSString *cn in @[@"WINTabBar", @"WINTabBarItem", @"WINTabBarControl", @"WINQuickSearchBarV2",
-                               @"GDMapHomeTabBarControl", @"GDTabBarItemRegistry", @"AJX3View",
-                               @"WINAmapHomeControl", @"WINMineViewControl", @"GDAmapHomeHandler"]) {
-            Class c = NSClassFromString(cn);
-            P(@"CLASS %@ = %@", cn, c ? @"YES" : @"NO");
-        }
+        NSLog(@"[GaodeClean] loaded 0.3.3 (no version limit; appVer=%@)", appVersion);
     }
 }
