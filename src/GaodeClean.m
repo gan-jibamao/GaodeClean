@@ -4172,6 +4172,57 @@ static void GCBtnTrace(UIWindow *win) {
 }
 #endif
 
+// ── 0.9.110：底栏 item 上窗即变深（解决「启动页消失那一瞬白」）────────────
+//   probe63 铁证：TABFILL#1/#2 都打了，最终 bg=w(0.16,0.92) 也对，
+//   但老大肉眼仍见白 ⇒ **写色发生在渲染之后**。
+//   60fps 通道最早也要等下一帧，而 App 建好 item 就立刻上屏。
+//   正解：钩 WINTabBarItem 的 didMoveToWindow，在**上窗的同一次调用内**写色，
+//   此时该视图还没被 compositor 提交，颜色一定先生效。
+static BOOL GCTabItemDarkHooked;
+static void GCTabItemDarkenNow(UIView *it) {
+    if (!it || !it.window) return;
+    // didMoveToWindow 可能在第 0 秒就被调用，此时采样窗口还没画好。
+    // GCIsDarkAppearance 在「从未采到有效值」时返回 YES（保守按深色），
+    // 这里直接用它，但**不要**在这条路径上触发昂贵的全窗渲染：
+    // 只要还没采到有效值，就先把深色写上（深色主题下正确；亮色主题下
+    // 会在 1 秒内被后续采样纠正，代价是一次轻微闪暗，优于白闪）。
+    if (!GCIsDarkAppearance(it.window)) return;
+    UIColor *fill = GCStyleFillColor(it);
+    BOOL viewDiff  = !it.backgroundColor ||
+                     !CGColorEqualToColor(it.backgroundColor.CGColor, fill.CGColor);
+    BOOL layerDiff = !it.layer.backgroundColor ||
+                     !CGColorEqualToColor(it.layer.backgroundColor, fill.CGColor);
+    if (viewDiff || layerDiff) {
+        [CATransaction begin]; [CATransaction setDisableActions:YES];
+        it.layer.backgroundColor = fill.CGColor;
+        it.backgroundColor = fill;
+        [CATransaction commit];
+#ifdef GAODECLEAN_PROBE
+        if (GCProbeBuf6) [GCProbeBuf6 appendString:[NSString stringWithFormat:
+            @"\nDMW-FILL %@ view=%d layer=%d\n",
+            @(class_getName(object_getClass(it))), (int)viewDiff, (int)layerDiff]];
+#endif
+    }
+}
+static void GCTabItemDarkHookOnce(void);   // 0.9.110：前置声明
+static void GCTabItemDarkHookOnce(void) {
+    if (GCTabItemDarkHooked) return;
+    Class cls = NSClassFromString(GCStrAt(149));      // WINTabBarItem
+    if (!cls) return;
+    SEL sel = NSSelectorFromString(GCStrAt(123));     // didMoveToWindow
+    Method m = class_getInstanceMethod(cls, sel);
+    if (!m) return;
+    NSMethodSignature *sig = [NSMethodSignature signatureWithObjCTypes:method_getTypeEncoding(m)];
+    if (sig.numberOfArguments != 2 || sig.methodReturnType[0] != 'v') return;
+    IMP o = method_getImplementation(m);
+    const char *t = method_getTypeEncoding(m);
+    Replace(cls, sel, imp_implementationWithBlock(^(id self) {
+        ((void (*)(id, SEL))o)(self, sel);
+        GCTabItemDarkenNow((UIView *)self);            // 上窗同一次调用内落地
+    }), t);
+    GCTabItemDarkHooked = YES;
+}
+
 static void GCStylePinTabItems(UIWindow *win) {
     if (!win || !CachedTabBar || !CachedTabBar.window) {
 #ifdef GAODECLEAN_PROBE
@@ -6611,6 +6662,8 @@ static void InstallSplashAdGuard(void) {
 // ─────────────────────────────────────────────────────────────────────
 
 static void InstallLaunchAndTabHooks(void) {
+    // 0.9.110：底栏 item「上窗即变深」钩子 —— 必须尽早装，赶在底栏创建之前
+    GCTabItemDarkHookOnce();
     // 0.7.0：开屏广告移除
     InstallSplashAdGuard();
     HookVoid(GCStrAt(88), GCStrAt(91), ^(UIView *bar) { CachedTabBar = bar; CenterTabButtons(bar); SweepTabBarHints(bar);
