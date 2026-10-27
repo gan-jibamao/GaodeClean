@@ -160,7 +160,7 @@ static BOOL GCIsDarkAppearance(UIWindow *win) {
     //         从未采到有效值前「保守按深色」—— 深色下早压是对的，亮色下也只是先暗后亮一瞬。
     static BOOL cached; static double lastT; static BOOL hasValid;
     double now = CACurrentMediaTime();
-    if (hasValid && now - lastT < 0.5 && now > lastT) return cached;
+    if (hasValid && now - lastT < 0.15 && now > lastT) return cached;   // 0.9.106：0.5→0.15，快跟随
     lastT = now;
     BOOL dark = NO;
     // ① 先问 trait（若某些机型/版本确实跟随系统，这条最准）
@@ -168,7 +168,31 @@ static BOOL GCIsDarkAppearance(UIWindow *win) {
         if (win.traitCollection.userInterfaceStyle == UIUserInterfaceStyleDark) dark = YES;
     }
     // ② trait 说亮色 → 再按屏幕实际亮度复核（高德自定义深色的情况）
-    if (!dark && win) {
+    //   ★0.9.106（probe59 铁证）：启动页/桌面阶段屏幕是白的，此时采样会得到
+    //     mean=196 并被判成「亮色」，缓存又覆盖到地图刚出来那 0.4 秒
+    //     （视频实测 t=2.83~3.23 地图已深色68、按钮却 218）。
+    //     改为：**只有地图容器真的在窗口里时才采样**，启动页一律不更新结论。
+    BOOL mapReady = NO;
+    if (win) {
+        static Class mapCls;
+        static BOOL looked;
+        if (!looked) { looked = YES; mapCls = NSClassFromString(@"MapWidgetContainerView"); }
+        if (mapCls) {
+            for (UIView *v in win.subviews) {
+                if ([v isKindOfClass:mapCls]) { mapReady = YES; break; }
+            }
+            if (!mapReady) {
+                NSMutableArray<UIView *> *q = [NSMutableArray arrayWithObject:win];
+                NSUInteger bud = 200;
+                for (NSUInteger i = 0; i < q.count && bud--; i++) {
+                    UIView *v = q[i];
+                    if ([v isKindOfClass:mapCls]) { mapReady = YES; break; }
+                    [q addObjectsFromArray:v.subviews];
+                }
+            }
+        }
+    }
+    if (!dark && win && mapReady) {
         @try {
             CGSize sz = win.bounds.size;
             if (sz.width > 40 && sz.height > 40) {
