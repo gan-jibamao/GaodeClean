@@ -4317,6 +4317,26 @@ static void GCStyleDarkenMinePage(UIView *rootView) {
 #ifdef GAODECLEAN_PROBE
         scanned++;
 #endif
+        // ★0.9.115（MINE68 实测定罪）：那片白是**满宽 UIImageView 的位图**，不是背景色。
+        //   实测：·图 cls=UIImageView win=(0,692,393x126) bg(w=-1.00 a=0.00) img=1
+        //   bg(w=-1) 表示根本没有 backgroundColor ⇒ 改色对它完全无效，
+        //   所以 probe67 才会「压深成功但页面仍白」。
+        //   判据：宽度 ≥ 90% 屏宽、高度 ≥ 60pt、layer.contents 非空
+        //        ⇒ 认定为页面底板位图，直接隐藏（下面的深色背景露出）。
+        if ([v isKindOfClass:UIImageView.class] && v.layer.contents) {
+            CGRect ir = [v convertRect:v.bounds toView:win];
+            if (ir.size.width >= sz.width * 0.90f && ir.size.height >= 60.0f) {
+                if (!v.hidden) {
+                    v.hidden = YES;
+#ifdef GAODECLEAN_PROBE
+                    if (GCProbeBuf6) [GCProbeBuf6 appendString:[NSString stringWithFormat:
+                        @"\nMINE-IMG-HIDE win=(%.0f,%.0f,%.0fx%.0f)\n",
+                        ir.origin.x, ir.origin.y, ir.size.width, ir.size.height]];
+#endif
+                }
+                continue;
+            }
+        }
         if ([v isKindOfClass:UILabel.class] || [v isKindOfClass:UIImageView.class] ||
             [v isKindOfClass:UIControl.class] || [v isKindOfClass:UIVisualEffectView.class]) continue;
         UIColor *bg = v.backgroundColor;
