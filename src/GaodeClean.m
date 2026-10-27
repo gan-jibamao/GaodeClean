@@ -304,7 +304,7 @@ static void SaveDiagnostics(UIView *page, GCCState *state, NSArray<UIView *> *no
         @"matched": @(state.matched), @"scrollContainers": @(state.scrolls.count),
         @"opaqueBlankArea": @(state.blankArea != nil && state.blankArea.superview == page),
         @"blankAreaFrame": NSStringFromCGRect(state.blankArea.frame), @"tree": tree};
-    NSData *data = [NSJSONSerialization dataWithJSONObject:@{@"version": @"0.3.2+p2", @"pages": records} options:NSJSONWritingPrettyPrinted error:nil];
+    NSData *data = [NSJSONSerialization dataWithJSONObject:@{@"version": @"0.3.2+p3", @"pages": records} options:NSJSONWritingPrettyPrinted error:nil];
     NSURL *documents = [NSFileManager.defaultManager URLsForDirectory:NSDocumentDirectory inDomains:NSUserDomainMask].firstObject;
     if (data && documents) [data writeToURL:[documents URLByAppendingPathComponent:@"GaodeClean-diagnostics.json"] options:NSDataWritingAtomic error:nil];
 }
@@ -397,7 +397,7 @@ static void CleanPage(UIView *page) {
                 NSData *data = [NSData dataWithContentsOfFile:[dir stringByAppendingPathComponent:@"GaodeClean-diagnostics.json"]];
                 NSDictionary *report = data ? [NSJSONSerialization JSONObjectWithData:data options:0 error:nil] : nil;
                 NSDictionary *mine = report[@"pages"][@"3"];
-                if ([@[@"0.3.0", @"0.3.1", @"0.3.2+p2"] containsObject:report[@"version"] ?: @""] && [mine[@"matched"] boolValue]) {
+                if ([@[@"0.3.0", @"0.3.1", @"0.3.2+p3"] containsObject:report[@"version"] ?: @""] && [mine[@"matched"] boolValue]) {
                     CGRect blank = CGRectFromString(mine[@"blankAreaFrame"] ?: @"");
                     if (blank.origin.y > 100) cached = @{@"width":@(blank.size.width), @"bottom":@(blank.origin.y)};
                 }
@@ -437,8 +437,15 @@ static void CleanPage(UIView *page) {
         if (state.attempts == 10) SaveDiagnostics(page, state, nodes);
         return;
     }
-    P(@"MATCH page=%ld anchor=%@ peer=%@ boundary=%.1f", (long)kind,
-      NSStringFromClass(anchor.class), peer ? NSStringFromClass(peer.class) : @"nil", boundary);
+    {   // PROBE: 只在 boundary 变化时打，避免刷屏（上次 38 秒打了 5109 次）
+        static CGFloat lastB[4];
+        static BOOL hasB[4];
+        if (kind >= 0 && kind < 4 && (!hasB[kind] || fabs(lastB[kind] - boundary) > 0.5)) {
+            lastB[kind] = boundary; hasB[kind] = YES;
+            P(@"MATCH page=%ld anchor=%@ peer=%@ boundary=%.1f", (long)kind,
+              NSStringFromClass(anchor.class), peer ? NSStringFromClass(peer.class) : @"nil", boundary);
+        }
+    }
     if (kind == 2) {
         // On-device ExplorePage has a separate recommendation list directly below
         // the horizontal categories. Align the blank area to its top, not into its first card.
@@ -735,6 +742,26 @@ static void LayoutMinimalHome(id handler) {
     if ([mask isKindOfClass:UIView.class]) mask.hidden = YES;
     CALayer *bottomMask = ObjectGetter(handler, @"bottomMaskLayer");
     if ([bottomMask isKindOfClass:CALayer.class]) bottomMask.hidden = YES;
+    {
+        static BOOL sdumped;
+        if (!sdumped && bar.window) {
+            sdumped = YES;
+            P(@"SEARCHBAR %@ frame=%@ inParent=%@", NSStringFromClass(bar.class),
+              NSStringFromCGRect([bar convertRect:bar.bounds toView:parent]),
+              NSStringFromCGRect(bar.frame));
+            for (NSUInteger j = 0; j < bar.subviews.count; j++) {
+                UIView *sv = bar.subviews[j];
+                P(@"  SB.sub[%lu] %@ frame=%@ hidden=%d alpha=%.2f",
+                  (unsigned long)j, NSStringFromClass(sv.class), NSStringFromCGRect(sv.frame), sv.hidden, sv.alpha);
+                for (NSUInteger k = 0; k < sv.subviews.count && k < 8; k++) {
+                    UIView *s2 = sv.subviews[k];
+                    P(@"    SB.sub[%lu].sub[%lu] %@ frame=%@ hidden=%d",
+                      (unsigned long)j, (unsigned long)k, NSStringFromClass(s2.class),
+                      NSStringFromCGRect(s2.frame), s2.hidden);
+                }
+            }
+        }
+    }
     CGRect tabFrame = [tabBar convertRect:tabBar.bounds toView:parent];
     CGFloat height = MAX(50, MIN(64, bar.bounds.size.height));
     bar.frame = CGRectMake(0, MAX(0, tabFrame.origin.y - height - 12), parent.bounds.size.width, height);
@@ -746,6 +773,42 @@ static void LayoutMinimalHome(id handler) {
 static void CenterTabButtons(UIView *bar) {
     static BOOL adjusting;
     if (adjusting) return;
+    // PROBE: dump 底栏完整层级（只打一次）
+    {
+        static BOOL dumped;
+        if (!dumped && bar.window) {
+            dumped = YES;
+            P(@"BAR frame=%@ bounds=%@ class=%@", NSStringFromCGRect([bar convertRect:bar.bounds toView:bar.window]), NSStringFromCGRect(bar.bounds), NSStringFromClass(bar.class));
+            NSArray *its = ObjectGetter(bar, @"tabBarItems");
+            P(@"BAR items=%lu", (unsigned long)([its isKindOfClass:NSArray.class] ? its.count : 0));
+            for (NSUInteger i = 0; i < its.count; i++) {
+                UIView *it = its[i];
+                if (![it isKindOfClass:UIView.class]) continue;
+                P(@"ITEM[%lu] %@ frame=%@ center=(%.1f,%.1f) sub=%lu",
+                  (unsigned long)i, NSStringFromClass(it.class),
+                  NSStringFromCGRect([it convertRect:it.bounds toView:bar]),
+                  it.center.x, it.center.y, (unsigned long)it.subviews.count);
+                for (NSUInteger j = 0; j < it.subviews.count; j++) {
+                    UIView *sv = it.subviews[j];
+                    P(@"  ITEM[%lu].sub[%lu] %@ frame=%@ hidden=%d alpha=%.2f",
+                      (unsigned long)i, (unsigned long)j, NSStringFromClass(sv.class),
+                      NSStringFromCGRect(sv.frame), sv.hidden, sv.alpha);
+                    for (NSUInteger k = 0; k < sv.subviews.count && k < 6; k++) {
+                        UIView *s2 = sv.subviews[k];
+                        P(@"    .sub[%lu].sub[%lu] %@ frame=%@ hidden=%d",
+                          (unsigned long)j, (unsigned long)k, NSStringFromClass(s2.class),
+                          NSStringFromCGRect(s2.frame), s2.hidden);
+                    }
+                }
+            }
+            // 底栏自身的背景层
+            for (NSUInteger j = 0; j < bar.subviews.count; j++) {
+                UIView *sv = bar.subviews[j];
+                P(@"BAR.sub[%lu] %@ frame=%@ hidden=%d alpha=%.2f",
+                  (unsigned long)j, NSStringFromClass(sv.class), NSStringFromCGRect(sv.frame), sv.hidden, sv.alpha);
+            }
+        }
+    }
     NSArray *items = ObjectGetter(bar, @"tabBarItems");
     if (![items isKindOfClass:NSArray.class] || items.count != 2) return;
     adjusting = YES;
