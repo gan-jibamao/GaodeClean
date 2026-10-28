@@ -250,7 +250,26 @@ static void RegisterNearby(id controller) {
     [Pages addObject:view];
 }
 
+// ===== Q3: 我的页遮罩消失取证 =====
+//
+// 19:37 面板日志推翻了"被压暗"假设：无 [MASK] 压掉行，且 21 秒的 FOG 扫描
+// 里没有 GCCBlankArea —— 遮罩是被【移除】的，不是被压暗。
+// 全代码只有 Restore() 会移除 blankArea，触发条件两个：
+//   ① state.path 变了（页面 path 短暂变空/变别的 → Kind=0 → Restore）
+//   ② 页面宽度变化 >1pt
+// Restore 后若锚点短暂找不到，遮罩一直不在，且 reportedMatch=YES 使
+// 后续完全静默 —— 这就是"之前都没有，刚刚出来"的机制。
+// 这里在 Restore 里报原因（状态变化才报，不刷屏）。
 static void Restore(GCCState *state) {
+#if GCC_DEVICE_TEST
+    if (state.matched || state.blankArea) {
+        NSString *now = PagePath(state.page);
+        GCLog(@"[MINE] Restore 原因 path变化=%d 宽变化=%d 旧path尾部=%@",
+              ![now isEqualToString:state.path],
+              fabs(state.width - state.page.bounds.size.width) > 1,
+              state.path.length > 50 ? [state.path substringFromIndex:state.path.length - 50] : state.path);
+    }
+#endif
     for (UIScrollView *scroll in state.scrolls) {
         GCCLimit *limit = objc_getAssociatedObject(scroll, &LimitKey);
         if (limit.owner != state) continue;
@@ -328,6 +347,11 @@ static void UpdateMask(UIView *page) {
         state.previousMask = nil;
         if (!state.blankArea) state.blankArea = [[GCCBlankArea alloc] initWithFrame:CGRectZero];
         if (state.blankArea.superview != page) [page addSubview:state.blankArea];
+        // Q3 自愈：外部（我们自己的兜底扫描、或 App）可能把遮罩改成
+        // alpha=0 / hidden —— alpha<0.01 会同时导致视觉消失和 hitTest 失效。
+        // 每次布局都补一次，100ms 内自动恢复。
+        if (state.blankArea.alpha < 0.99) state.blankArea.alpha = 1.0;
+        if (state.blankArea.hidden) state.blankArea.hidden = NO;
         UIColor *background = page.backgroundColor;
         CGFloat alpha = 0;
         if (!background || ![background getRed:NULL green:NULL blue:NULL alpha:&alpha] || alpha < 0.99)
@@ -470,7 +494,16 @@ static void CleanPage(UIView *page) {
         state.attempts = 0;
     }
     NSInteger kind = Kind(page);
-    if (!kind) { Restore(state); return; }
+    if (!kind) {
+        // Q3 补充：path 短暂变空（AJX 重载瞬间）会走到这里把遮罩拆掉。
+        // path 恢复后 CleanPage 会因 path 变化重置 reportedMatch 并重建，
+        // 这条路是通的；这里只打一条日志确认它发生了。
+        if (state.matched || state.blankArea)
+            GCLog(@"[MINE] kind=0 短暂失配，拆遮罩待重建 path=%@",
+                  PagePath(page).length ? @"非空" : @"空");
+        Restore(state);
+        return;
+    }
     if (!page.window) return;
     if (kind == 1) {
         // Search is native and lives outside the AJX quick-service page.
@@ -761,6 +794,16 @@ static void GCSuppressHomeMask(id handler) {
 // 只处理超大面积，正常卡片/导航栏不会被误伤。
 // 白名单：WINTabBar 及其子树（我们的圆钮）、UIWindow、以及 searchBar 本身。
 static void GCKillWhiteOverlay(UIView *bar) {
+    // Q1: 守卫放进函数内。0.4.21 的雷：handleTap: 调用点没有首页守卫，
+    // 在我的页点 tab 也会扫全窗。0.4.22 只给 Schedule() 调用点加了守卫，
+    // 两处不一致。现在非首页直接 return，两处调用点同时受控。
+    BOOL onHome = NO;
+    for (id tabs in TabControllers.allObjects) {
+        id sv = ObjectGetter(tabs, @"selectedViewControl");
+        if ([NSStringFromClass([sv class]) isEqualToString:@"WINAmapHomeControl"]) { onHome = YES; break; }
+    }
+    if (!onHome) return;
+
     UIWindow *win = bar.window;
     if (!win) return;
     CGFloat area = win.bounds.size.width * win.bounds.size.height;
@@ -774,6 +817,9 @@ static void GCKillWhiteOverlay(UIView *bar) {
         for (UIView *sub in v.subviews) [stack addObject:sub];
         if (v == win || v.hidden || v.alpha < 0.05) continue;
         if (v == bar || [v isDescendantOfView:bar]) continue;          // 我们的底栏
+        // Q2: 我们自己的遮罩（我的/探索页裁剪盖板）绝不能压 —— 它是白色、
+        // 65% 屏，特征完全符合"大白层"，0.4.21 曾被这层扫描误伤。
+        if ([v isKindOfClass:[GCCBlankArea class]]) continue;
         if ([v isKindOfClass:UIScrollView.class]) continue;            // 页面滚动容器
         if ([v isKindOfClass:UINavigationBar.class] || [v isKindOfClass:UITabBar.class]) continue;
         CGRect r = [v convertRect:v.bounds toView:win];
@@ -1950,6 +1996,6 @@ __attribute__((constructor)) static void Initialize(void) {
             }];
 #endif
         });
-        GCLog(@"[INIT] loaded 0.4.23 appVer=%@", appVersion);
+        GCLog(@"[INIT] loaded 0.4.24 appVer=%@", appVersion);
     }
 }
