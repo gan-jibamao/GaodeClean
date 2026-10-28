@@ -627,6 +627,67 @@ static void RunDeviceCheck(void) {
 }
 #endif
 
+// ===== L1: 首页遮罩常驻压制 =====
+//
+// 用户反馈（2026-10-28）：已经在首页时再点首页圆钮，屏幕出现一层白雾。
+//
+// 根因：高德首页的 slidableView（可滑动面板）上方有一层 maskView 半透明遮罩，
+// 面板被我们 hidden 之后，遮罩被 App 在 tab 重选流程里重新显示出来 ——
+// 因为面板没了，这层遮罩就孤零零地铺在屏幕上，看起来就是"白雾"。
+// 原来的压制只写在 LayoutMinimalHome 里，而它只在 layoutBottomSearchBar /
+// viewDidLayoutSubviews 两个钩子触发；再点一次首页走的是 App 自己的 tab
+// 重选路径，不经过这两个钩子，所以压制失效。
+//
+// 修法：独立成 GCSuppressHomeMask，挂在 100ms 的 Schedule() 循环里常驻执行，
+// 用 hidden 判定做幂等（已经压制过就直接返回，不重复写、不抖动）。
+static void GCSuppressHomeMask(id handler) {
+    if (!handler) return;
+    UIView *sheet = ObjectGetter(handler, @"slidableView");
+    if (![sheet isKindOfClass:UIView.class]) return;
+    // 只有首页才压（其它页的原生遮罩是正常 UI，不能动）
+    id tabs = ObjectGetter(handler, @"tabBarControl");
+    id selected = ObjectGetter(tabs, @"selectedViewControl");
+    if (![NSStringFromClass([selected class]) isEqualToString:@"WINAmapHomeControl"]) return;
+
+    BOOL changed = NO;
+    if (!sheet.hidden) { sheet.hidden = YES; changed = YES; }
+
+    // 首选：调 App 自己的开关。17.00.2 类转储确认 GDAmapHomeHandler 有
+    // setSlidableViewBottomMaskEnable: —— 这是原生控制底部遮罩的入口，
+    // 比硬压 hidden 更彻底（App 内部状态也一致，不会被后续布局再打开）。
+    // 只调一次（100ms 循环里反复调会让 App 内部状态抖动）
+    static char MaskFlagKey;
+    if (!objc_getAssociatedObject(handler, &MaskFlagKey)) {
+        SEL maskEnable = NSSelectorFromString(@"setSlidableViewBottomMaskEnable:");
+        if ([handler respondsToSelector:maskEnable]) {
+            ((void (*)(id, SEL, BOOL))objc_msgSend)(handler, maskEnable, NO);
+            objc_setAssociatedObject(handler, &MaskFlagKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            GCLog(@"[MASK] setSlidableViewBottomMaskEnable:NO 已下发");
+        }
+    }
+
+    UIView *mask = ObjectGetter(handler, @"maskView");
+    if ([mask isKindOfClass:UIView.class] && (!mask.hidden || mask.alpha > 0.01)) {
+        mask.hidden = YES;
+        mask.alpha = 0.0;
+        changed = YES;
+    }
+    CALayer *bottomMask = ObjectGetter(handler, @"bottomMaskLayer");
+    if ([bottomMask isKindOfClass:CALayer.class] && !bottomMask.hidden) {
+        bottomMask.hidden = YES;
+        changed = YES;
+    }
+    // 也压一层：有些版本遮罩是 handler 上的独立 UIView 属性
+    for (NSString *name in @[@"shadowView", @"dimmingView", @"overlayView", @"maskContainerView"]) {
+        UIView *v = ObjectGetter(handler, name);
+        if ([v isKindOfClass:UIView.class] && !v.hidden) { v.hidden = YES; changed = YES; }
+    }
+    if (changed) {
+        GCLog(@"[MASK] 重新压制 mask sheet=%d mask=%d bottom=%d",
+              sheet.hidden, mask ? mask.hidden : -1, bottomMask ? bottomMask.hidden : -1);
+    }
+}
+
 static void Schedule(void) {
     if (![NSThread isMainThread] || Scheduled) return;
     Scheduled = YES;
@@ -648,7 +709,11 @@ static void Schedule(void) {
         }
         for (id controller in NearbyControllers.allObjects) RegisterNearby(controller);
         for (UIView *page in Pages.allObjects) CleanPage(page);
-        for (id handler in HomeHandlers.allObjects) LayoutMinimalHome(handler);
+        for (id handler in HomeHandlers.allObjects) {
+            LayoutMinimalHome(handler);
+            // L1: 遮罩常驻压制（再点首页时 App 会重新显示 maskView）
+            GCSuppressHomeMask(handler);
+        }
 #if GCC_DEVICE_TEST
         RunDeviceCheck();
 #endif
@@ -1449,6 +1514,29 @@ static void InstallMinimalHome(void) {
     HookVoid(@"WINTabBar", @"layoutSubviews", ^(UIView *bar) { CenterTabButtons(bar); });
     HookVoid(@"WINTabBar", @"amap_relayoutTabItems", ^(UIView *bar) { CenterTabButtons(bar); });
 
+    // L2: 点底栏圆钮后立即压制首页遮罩。
+    // handleTap: 是 WINTabBar 的点击入口（17.00.2 类转储确认），带 1 个手势参数，
+    // 不能用 HookVoid（它只接无参方法），所以直接 Replace。
+    // 再点「首页」时 App 会重新显示 maskView → 白雾，这里当场压掉，
+    // 不必等 100ms 的 Schedule 循环（那会让白雾闪一下）。
+    {
+        Class tb = NSClassFromString(@"WINTabBar");
+        SEL ht = NSSelectorFromString(@"handleTap:");
+        Method hm = class_getInstanceMethod(tb, ht);
+        if (hm) {
+            IMP orig = method_getImplementation(hm);
+            Replace(tb, ht, imp_implementationWithBlock(^(id self, id gesture) {
+                ((void (*)(id, SEL, id))orig)(self, ht, gesture);
+                for (id handler in HomeHandlers.allObjects) GCSuppressHomeMask(handler);
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    for (id handler in HomeHandlers.allObjects) GCSuppressHomeMask(handler);
+                });
+            }), method_getTypeEncoding(hm));
+        } else {
+            GCLog(@"[MASK] WINTabBar.handleTap: 不存在");
+        }
+    }
+
     HookVoid(@"GDAmapHomeHandler", @"viewDidLoad", ^(id handler) { [HomeHandlers addObject:handler]; });
     HookVoid(@"GDAmapHomeHandler", @"layoutBottomSearchBar", ^(id handler) { [HomeHandlers addObject:handler]; LayoutMinimalHome(handler); });
     HookVoid(@"GDAmapHomeHandler", @"viewDidLayoutSubviews", ^(id handler) { [HomeHandlers addObject:handler]; LayoutMinimalHome(handler); });
@@ -1590,6 +1678,6 @@ __attribute__((constructor)) static void Initialize(void) {
             }];
 #endif
         });
-        GCLog(@"[INIT] loaded 0.4.19 appVer=%@", appVersion);
+        GCLog(@"[INIT] loaded 0.4.20 appVer=%@", appVersion);
     }
 }
