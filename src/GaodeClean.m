@@ -676,6 +676,41 @@ static void InstallScrollHooks(void) {
     }), method_getTypeEncoding(bounceMethod));
 }
 
+// ===== G 组：底栏圆钮只认圆内点击 =====
+//
+// 问题（用户反馈 2026-10-28）：三个圆钮「点周边也会切换」，只要落在原来
+// 84x54 的 item 区域内就会触发，手感上就是整个底栏都能点。
+// 根因：WINTabBarItem 的 frame 被保留为原生 84x54（我们只改了 bounds 视觉），
+// 但命中测试走的是 pointInside:，它按 frame 判断，所以圆外四角仍然命中。
+// 修法：给 WINTabBarItem 单独装 hitTest:，圆外一律返回 nil，
+// 让触摸穿到底下的地图，而不是落到 tab item 上。
+static void InstallTabDotHitTest(void) {
+    Class cls = NSClassFromString(@"WINTabBarItem");
+    if (!cls) {
+        NSLog(@"[GaodeClean] WINTabBarItem 不存在，圆钮热区限制跳过");
+        return;
+    }
+    SEL sel = @selector(hitTest:withEvent:);
+    Method m = class_getInstanceMethod(cls, sel);
+    if (!m) return;
+    IMP original = method_getImplementation(m);
+    Replace(cls, sel, imp_implementationWithBlock(^UIView *(UIView *self, CGPoint point, UIEvent *event) {
+        CGRect b = self.bounds;
+        CGFloat w = b.size.width, h = b.size.height;
+        // 只有被我们改成圆钮的 item 才限制（w≈h≈GC_DOT）；否则原样交给父类
+        if (isfinite(w) && isfinite(h) && w > 1 && h > 1 &&
+            fabs(w - GC_DOT) < 3 && fabs(h - GC_DOT) < 3) {
+            CGFloat cx = CGRectGetMidX(b), cy = CGRectGetMidY(b);
+            CGFloat dx = point.x - cx, dy = point.y - cy;
+            CGFloat r = GC_DOT / 2.0;
+            // 留 1pt 容差，避免圆边缘因亚像素抖动点不中
+            if (dx * dx + dy * dy > (r + 1.0) * (r + 1.0)) return nil;
+        }
+        return ((UIView *(*)(id, SEL, CGPoint, id))original)(self, sel, point, event);
+    }), method_getTypeEncoding(m));
+    NSLog(@"[GaodeClean] WINTabBarItem 圆钮热区已生效");
+}
+
 static void HookHitTest(Class cls) {
     // 0.4.10: 调用点在 Initialize() 里传 NSClassFromString(@"AJX3View")，
     // 该类比名在 17.02.2 上可能不存在；原代码直接下探 class_getInstanceMethod(nil,...)。
@@ -761,6 +796,17 @@ static GCTapRouter *GCSharedRouter;
 @implementation GCTapRouter
 - (void)gcTap:(UITapGestureRecognizer *)gr {
     if (gr.state != UIGestureRecognizerStateEnded) return;
+    // G: 只认圆内。bar 若是 393x54 的搜索条形态，点在两端也不该触发
+    UIView *v = gr.view;
+    if (v) {
+        CGPoint p = [gr locationInView:v];
+        CGRect b = v.bounds;
+        if (isfinite(b.size.width) && isfinite(b.size.height) && b.size.width > 1 && b.size.height > 1) {
+            CGFloat dx = p.x - CGRectGetMidX(b), dy = p.y - CGRectGetMidY(b);
+            CGFloat r = MIN(b.size.width, b.size.height) / 2.0 + 1.0;
+            if (dx * dx + dy * dy > r * r) return;
+        }
+    }
     GCFireSearchClick();
 }
 @end
@@ -836,18 +882,52 @@ static void LayoutMinimalHome(id handler) {
 // 唯一稳的做法：原生效层全部关掉，自己画一个放大镜。
 static void GCDressSearchDot(UIView *bar) {
     if (![bar isKindOfClass:UIView.class]) return;
-    bar.layer.cornerRadius = GC_DOT / 2.0;
-    bar.layer.masksToBounds = YES;
-    bar.backgroundColor = [UIColor colorWithWhite:0.97 alpha:1.0];
     bar.userInteractionEnabled = YES;
     if (bar.alpha < 0.99) bar.alpha = 1.0;
 
-    static char GlyphKey;
+    // ===== F1: 每帧把 bounds 压回 52x52 =====
+    // 真机实测（2026-10-28 16:43 截图）：中间钮白底只有 35pt 宽，是个竖着的
+    // 圆角矩形，而左右两颗钮是 50pt 正圆。
+    // 根因：App 会把 bar.bounds 改回 393x54，而 cornerRadius 的有效上限是
+    // min(w,h)/2 = 27，横向根本不裁 → masksToBounds 只能竖向裁出 35pt 白块。
+    // 所以「设圆角之前必须先确定 bounds」，且每帧都要重压一次。
+    CGRect want = CGRectMake(0, 0, GC_DOT, GC_DOT);
+    if (fabs(bar.bounds.size.width - GC_DOT) > 0.5 || fabs(bar.bounds.size.height - GC_DOT) > 0.5) {
+        bar.bounds = want;
+    }
+
+    static char GlyphKey, BackKey;
+    // ===== F2: 白底自己画，不依赖原生毛玻璃胶囊 =====
+    // 原生胶囊是 UIVisualEffectView（毛玻璃），backgroundColor 盖不住它；
+    // 之前完全靠 masksToBounds 硬裁，一旦 bounds 错就露出 35pt 竖块。
+    // 现在插一层自己的不透明白圆垫在最底下，原生层全部 hidden。
+    UIView *back = objc_getAssociatedObject(bar, &BackKey);
+    if (!back || back.superview != bar) {
+        back = [[UIView alloc] initWithFrame:want];
+        back.backgroundColor = [UIColor colorWithWhite:0.97 alpha:1.0];
+        back.layer.cornerRadius = GC_DOT / 2.0;
+        back.layer.masksToBounds = YES;
+        back.userInteractionEnabled = NO;
+        back.accessibilityIdentifier = @"GCSearchDotBack";
+        [bar addSubview:back];
+        objc_setAssociatedObject(bar, &BackKey, back, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
+    back.frame = want;
+    back.hidden = NO;
+    back.alpha = 1.0;
+
     for (UIView *v in bar.subviews) {
+        if (v == back) continue;
         UIImageView *g = objc_getAssociatedObject(bar, &GlyphKey);
         if (g && v == g) continue;
         v.hidden = YES;      // 胶囊/底图/语音/相机/滚动文字 全关
+        v.alpha = 0;
     }
+    // bar 自身不再画底色，白底由 back 负责，避免两层叠加出灰边
+    bar.backgroundColor = UIColor.clearColor;
+    bar.layer.cornerRadius = GC_DOT / 2.0;
+    bar.layer.masksToBounds = YES;
+
     UIImageView *glyph = objc_getAssociatedObject(bar, &GlyphKey);
     UIImage *img = [UIImage systemImageNamed:@"magnifyingglass"];
     if (!glyph || (img && glyph.image != img)) {
@@ -858,13 +938,15 @@ static void GCDressSearchDot(UIView *bar) {
         objc_setAssociatedObject(bar, &GlyphKey, glyph, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     }
     if (glyph.superview != bar) [bar addSubview:glyph];
-    // 按 GC_DOT 算，不用 bar.bounds —— App 会把 bar 的 bounds 改回 393x54
-    CGFloat side = GC_DOT;
+    // ===== F3: 图标按 bar.bounds 中心摆，不用常量 26 =====
     CGFloat glyphSide = 26.0;
     glyph.bounds = CGRectMake(0, 0, glyphSide, glyphSide);
-    glyph.center = CGPointMake(side / 2.0, side / 2.0);
+    glyph.center = CGPointMake(CGRectGetMidX(bar.bounds), CGRectGetMidY(bar.bounds));
+    if (!isfinite(glyph.center.x) || !isfinite(glyph.center.y))
+        glyph.center = CGPointMake(GC_DOT / 2.0, GC_DOT / 2.0);
     glyph.hidden = NO;
     glyph.alpha = 1.0;
+    [bar bringSubviewToFront:glyph];
 }
 
 // ===== 底栏平板隐藏 =====
@@ -1147,6 +1229,8 @@ __attribute__((constructor)) static void Initialize(void) {
         });
         HookHitTest(UIView.class);
         HookHitTest(NSClassFromString(@"AJX3View"));
+        // G: 底栏圆钮只认圆内点击（圆外四角穿透到底图）
+        InstallTabDotHitTest();
         Class registry = NSClassFromString(@"GDTabBarItemRegistry");
         SEL sel = NSSelectorFromString(@"registerTabProvider:");
         Method m = class_getInstanceMethod(registry, sel);
@@ -1175,6 +1259,6 @@ __attribute__((constructor)) static void Initialize(void) {
         dispatch_async(dispatch_get_main_queue(), ^{
             [NSTimer scheduledTimerWithTimeInterval:0.5 repeats:YES block:^(__unused NSTimer *timer) { Schedule(); }];
         });
-        NSLog(@"[GaodeClean] loaded 0.4.12 (universal; appVer=%@)", appVersion);
+        NSLog(@"[GaodeClean] loaded 0.4.13 (universal; appVer=%@)", appVersion);
     }
 }
