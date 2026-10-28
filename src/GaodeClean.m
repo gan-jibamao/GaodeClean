@@ -963,7 +963,6 @@ static void GCKillWhiteOverlay(UIView *bar) {
 // 水印（高德 logo + 比例尺）同样挂在地图容器下，随地图飘。
 // 固定到车机钮下方：车机钮 y=700，水印 y=745（间距 45，不重叠）
 #define GC_LOGO_Y         745.0
-#define GC_LOGO_X         48.0
 
 // 21:05 真机实证：App 进入某浏览态时连窗口层实例的 center.y 都直接改
 //（车机钮被改到 (32,364)、定位钮 (368,396)），100ms 校验盖不过动画。
@@ -1030,6 +1029,33 @@ static void GCPinLogoWidget(UIWindow *win) {
             if (target) break;
         }
     }
+    // 0.4.39: 水印只属于地图（首页）。切到「我的」/「探索」时必须隐藏 ——
+    // 之前只实现固定，搬到 UIWindow 后一直显示，导致我的页也看到高德 logo。
+    BOOL onHome = NO;
+    for (id tabs in TabControllers.allObjects) {
+        id sv = ObjectGetter(tabs, @"selectedViewControl");
+        if ([NSStringFromClass([sv class]) isEqualToString:@"WINAmapHomeControl"]) { onHome = YES; break; }
+    }
+    static __weak UIView *pinnedLogo;
+    if (!onHome) {
+        if (pinnedLogo && !pinnedLogo.hidden) {
+            pinnedLogo.hidden = YES;
+            GCLog(@"[LOGO] 非首页，隐藏水印");
+        }
+        return;
+    }
+    // 回到首页：若之前固定过就直接显示（不必重新找）
+    if (pinnedLogo && pinnedLogo.window == win) {
+        if (pinnedLogo.hidden) {
+            pinnedLogo.hidden = NO;
+            GCLog(@"[LOGO] 回到首页，显示水印");
+        }
+        CGFloat cw0 = pinnedLogo.bounds.size.width;
+        if (!isfinite(cw0) || cw0 < 20) cw0 = 140;
+        pinnedLogo.center = CGPointMake(10.0 + cw0 / 2.0, GC_LOGO_Y);
+        return;
+    }
+
     static int missCount;
     if (!target) {
         if (missCount++ % 40 == 0)
@@ -1052,6 +1078,7 @@ static void GCPinLogoWidget(UIWindow *win) {
         target.frame = inWin;
         GCLog(@"[LOGO] 水印已搬到窗口层");
     }
+    pinnedLogo = target;
     // 0.4.38: 水平位置必须按「容器左边缘贴边距」算，不能用固定中心 x。
     // 00:39 实证：容器实际宽 ~140（logo 76 + 间距 + 比例尺 60），
     // 我把中心设成 48 → 左边缘落到 -22，logo 被推出屏幕只剩"...地图"两字。
@@ -1097,6 +1124,25 @@ static BOOL GCPinWidget(UIWindow *win, NSString *clsName, CGFloat centerX, CGFlo
     if (!win) return NO;
     NSArray<UIView *> *all = GCFindWidgetsByClass(win, clsName, 40);
     if (!all.count) return NO;
+
+    // 0.4.39: 非首页（我的/探索）时隐藏已固定的控件 —— 它们只属于地图。
+    // 之前搬到 UIWindow 后会一直显示，切页也留着（用户反馈：我的页看到高德 logo，
+    // 同理两颗浮动钮也会残留）。
+    BOOL onHome = NO;
+    for (id tabs in TabControllers.allObjects) {
+        id sv = ObjectGetter(tabs, @"selectedViewControl");
+        if ([NSStringFromClass([sv class]) isEqualToString:@"WINAmapHomeControl"]) { onHome = YES; break; }
+    }
+    if (!onHome) {
+        for (UIView *v in all) {
+            if (v.superview == win && !v.hidden) v.hidden = YES;
+        }
+        return NO;
+    }
+    // 回首页：把窗口层那颗重新显示
+    for (UIView *v in all) {
+        if (v.superview == win && v.hidden) v.hidden = NO;
+    }
 
     // 0.4.28 重大修正：0.4.27 的「容器内全部实例 hidden」策略酿成事故 ——
     // 20:31 真机整屏地图变灰白。原因：WINAJXCombinedWidgetView 这类名
@@ -1156,8 +1202,8 @@ static void GCPinMapWidgets(void) {
     GCPinWidget(win, @"WINDeviceInterconnectWidget", 37.0, GC_WIDGET_LEFT_Y, "车机钮");
     // 右下：定位+路线组合胶囊（整颗搬，保持两者相对位置）
     GCPinWidget(win, @"WINAJXCombinedWidgetView", W - 34.5, GC_WIDGET_RIGHT_Y, "定位钮");
-    // 高德水印（logo + 比例尺）
-    GCPinWidget(win, @"WINScaleLineLogoMapWidget", GC_LOGO_X, GC_LOGO_Y, "水印");
+    // 高德水印走专用函数 GCPinLogoWidget（动态算中心 x，且按页面显隐），
+    // 不能走 GCPinWidget —— 那条路径会用固定 GC_LOGO_X 摆放，把 logo 推出屏幕。
 
     // 60fps 强锁通道（首次调用时启动）
     static dispatch_once_t onceToken;
@@ -2381,6 +2427,6 @@ __attribute__((constructor)) static void Initialize(void) {
             }];
 #endif
         });
-        GCLog(@"[INIT] loaded 0.4.38 appVer=%@", appVersion);
+        GCLog(@"[INIT] loaded 0.4.39 appVer=%@", appVersion);
     }
 }
