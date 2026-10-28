@@ -828,7 +828,10 @@ static void InstallTabDotHitTest(void) {
                 if (hit != self && ![hit isDescendantOfView:self]) return hit;
                 NSInteger slot = GCTabDotSlot(self, point);
                 // ★ 中间槽(搜索)必须穿透：底栏盖在搜索钮上方，放行会被它吃掉
-                if (slot != 0 && slot != 2) return nil;
+                if (slot != 0 && slot != 2) {
+                    GCLog(@"[HIT] bar (%.1f,%.1f) slot=%ld -> 穿透", point.x, point.y, (long)slot);
+                    return nil;
+                }
                 GCLog(@"[HIT] bar (%.1f,%.1f) slot=%ld hit=%@ -> PASS",
                       point.x, point.y, (long)slot, NSStringFromClass(hit.class));
                 return hit;
@@ -910,19 +913,59 @@ static BOOL IsStreetRank(UIView *view) {
 // 不是 target/action。内部视图被我们隐藏后原生手势也可能失效，所以自己兜一层。
 // UIGestureRecognizer 的 target/action 是私有属性，必须 KVC 取。
 static UIView *GCLiveSearchBar;
+static void GCFireSearchFallback(UIView *bar);
 
 static void GCFireSearchClick(void) {
     UIView *bar = GCLiveSearchBar;
     if (!bar) { GCLog(@"[TAP] liveBar 为空"); return; }
 
     // 路径1：clickAction block（0.3.5 在 17.00.2 实测有效）
+    // 17:21 面板实证：17.02.2 上 block 存在（__NSGlobalBlock__）且被调用，
+    // 但搜索页没开 —— block 依赖的内部状态可能已被我们的隐藏/搬移破坏。
+    // 策略：先调 block；0.4 秒后检查 keyWindow rootVC 是否变化，
+    // 没变化就自动补发 path2/3/4 —— 一切都有日志，不再靠猜。
+    __block BOOL pageChanged = NO;
     @try {
         id blk = [bar valueForKey:@"clickAction"];
-        GCLog(@"[TAP] path1 clickAction=%@", blk ? NSStringFromClass([blk class]) : @"nil");
-        if (blk) { void (^cb)(void) = blk; cb(); return; }
+        GCLog(@"[TAP] path1 block=%@", blk ? NSStringFromClass([blk class]) : @"nil");
+        if (blk) {
+            UIWindow *winBefore = nil;
+            for (UIScene *sc in UIApplication.sharedApplication.connectedScenes)
+                if ([sc isKindOfClass:UIWindowScene.class])
+                    for (UIWindow *w in ((UIWindowScene *)sc).windows)
+                        if (w.isKeyWindow) { winBefore = w; break; }
+            UIViewController *rootBefore = winBefore.rootViewController;
+            void (^cb)(void) = blk;
+            cb();
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.4 * NSEC_PER_SEC)),
+                           dispatch_get_main_queue(), ^{
+                UIWindow *winAfter = nil;
+                for (UIScene *sc in UIApplication.sharedApplication.connectedScenes)
+                    if ([sc isKindOfClass:UIWindowScene.class])
+                        for (UIWindow *w in ((UIWindowScene *)sc).windows)
+                            if (w.isKeyWindow) { winAfter = w; break; }
+                UIViewController *rootAfter = winAfter.rootViewController;
+                UIViewController *top = rootAfter;
+                while (top.presentedViewController) top = top.presentedViewController;
+                pageChanged = (rootAfter != rootBefore) || (top != rootAfter);
+                GCLog(@"[TAP] path1 执行后 rootChanged=%d top=%@",
+                      rootAfter != rootBefore, NSStringFromClass(top.class));
+                if (!pageChanged) {
+                    GCLog(@"[TAP] path1 无效，补发 path2/4");
+                    GCFireSearchFallback(bar);
+                }
+            });
+            return;
+        }
     } @catch (NSException *e) {
         GCLog(@"[TAP] path1 exception %@", e.reason);
     }
+    GCFireSearchFallback(bar);
+}
+
+// path2/3/4 兜底链（path1 的 block 无效时由 dispatch_after 自动补发）
+static void GCFireSearchFallback(UIView *bar) {
+    if (!bar) return;
 
     // 路径2：onTapBackgound:（原生触摸回调）
     SEL s = NSSelectorFromString(@"onTapBackgound:");
@@ -945,7 +988,7 @@ static void GCFireSearchClick(void) {
             tg = [g valueForKey:@"target"];
             ac = NSSelectorFromString([g valueForKey:@"action"] ?: @"");
         } @catch (NSException *e) { tg = nil; }
-        GCLog(@"[TAP] path3 gesture target=%@ sel=%@",
+        GCLog(@"[TAP] path3 target=%@ sel=%@",
               tg ? NSStringFromClass([tg class]) : @"nil",
               ac ? NSStringFromSelector(ac) : @"nil");
         if (tg && ac) {
@@ -957,8 +1000,7 @@ static void GCFireSearchClick(void) {
         }
     }
 
-    // 路径4（H3 新增）：找 GDAmapHomeHandler，直接调它的搜索入口
-    //   bar 的父链上挂着 handler（0.3.1 里 LayoutMinimalHome 就是从 handler 取的 searchBar）
+    // 路径4：找 GDAmapHomeHandler，直接调它的搜索入口
     id handler = nil;
     for (UIView *v = bar.superview; v && !handler; v = v.superview) {
         id cand = objc_getAssociatedObject(v, &HandlerKey);
@@ -1483,6 +1525,6 @@ __attribute__((constructor)) static void Initialize(void) {
             }];
 #endif
         });
-        GCLog(@"[INIT] loaded 0.4.16 appVer=%@", appVersion);
+        GCLog(@"[INIT] loaded 0.4.17 appVer=%@", appVersion);
     }
 }
