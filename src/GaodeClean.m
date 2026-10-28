@@ -688,6 +688,45 @@ static void GCSuppressHomeMask(id handler) {
     }
 }
 
+// ===== M3: 大面积近白覆盖层兜底 =====
+//
+// 白雾真身还没确认（M0 取证中）。这层是保险：扫全窗口，凡「覆盖 >= 55% 屏幕、
+// 可见、背景近白、且不是页面根视图」的层，压到 alpha=0。
+// 只处理超大面积，正常卡片/导航栏不会被误伤。
+// 白名单：WINTabBar 及其子树（我们的圆钮）、UIWindow、以及 searchBar 本身。
+static void GCKillWhiteOverlay(UIView *bar) {
+    UIWindow *win = bar.window;
+    if (!win) return;
+    CGFloat area = win.bounds.size.width * win.bounds.size.height;
+    if (area <= 0) return;
+    NSMutableArray<UIView *> *stack = [NSMutableArray arrayWithObject:win];
+    NSUInteger guard = 0;
+    int killed = 0;
+    while (stack.count && guard++ < 3000) {
+        UIView *v = stack.lastObject;
+        [stack removeLastObject];
+        for (UIView *sub in v.subviews) [stack addObject:sub];
+        if (v == win || v.hidden || v.alpha < 0.05) continue;
+        if (v == bar || [v isDescendantOfView:bar]) continue;          // 我们的底栏
+        if ([v isKindOfClass:UIScrollView.class]) continue;            // 页面滚动容器
+        if ([v isKindOfClass:UINavigationBar.class] || [v isKindOfClass:UITabBar.class]) continue;
+        CGRect r = [v convertRect:v.bounds toView:win];
+        if (!isfinite(r.size.width) || !isfinite(r.size.height)) continue;
+        if (r.size.width * r.size.height < area * 0.55) continue;
+        CGFloat rr = 0, gg = 0, bb = 0, aa = 0;
+        BOOL whiteish = NO;
+        if ([v.backgroundColor getRed:&rr green:&gg blue:&bb alpha:&aa] && aa > 0.02)
+            whiteish = (rr > 0.85 && gg > 0.85 && bb > 0.85);
+        if (!whiteish) continue;
+        v.alpha = 0.0;
+        killed++;
+        if (killed <= 6)
+            GCLog(@"[MASK] 压掉大白层 %@ {%.0f,%.0f,%.0f,%.0f}",
+                  NSStringFromClass([v class]), r.origin.x, r.origin.y, r.size.width, r.size.height);
+    }
+    if (killed) GCLog(@"[MASK] 本轮压掉 %d 层", killed);
+}
+
 static void Schedule(void) {
     if (![NSThread isMainThread] || Scheduled) return;
     Scheduled = YES;
@@ -713,6 +752,11 @@ static void Schedule(void) {
             LayoutMinimalHome(handler);
             // L1: 遮罩常驻压制（再点首页时 App 会重新显示 maskView）
             GCSuppressHomeMask(handler);
+        }
+        // M3: 大面积白层兜底（首页出现异常白雾时压掉）
+        for (id tabs in TabControllers.allObjects) {
+            UIView *tb = ObjectGetter(tabs, @"tabBar");
+            if ([tb isKindOfClass:UIView.class]) { GCKillWhiteOverlay(tb); break; }
         }
 #if GCC_DEVICE_TEST
         RunDeviceCheck();
@@ -1510,6 +1554,62 @@ static void CenterTabButtons(UIView *bar) {
     adjusting = NO;
 }
 
+// ===== M0: 白雾取证 =====
+//
+// 用户两轮反馈"还有白雾"，说明我压错了对象（maskView / bottomMaskLayer 都不是）。
+// 不再猜 —— 点完扫全窗口，把"大面积、可见、背景偏白"的视图全部报出来，
+// 真身就在里面。只读不写，纯诊断。
+static void GCProbeWhiteFog(__unused const char *tag) {
+#if GCC_DEVICE_TEST
+    UIWindow *win = nil;
+    for (UIScene *sc in UIApplication.sharedApplication.connectedScenes) {
+        if (![sc isKindOfClass:UIWindowScene.class]) continue;
+        for (UIWindow *w in ((UIWindowScene *)sc).windows) {
+            if (w.isKeyWindow) { win = w; break; }
+        }
+        if (win) break;
+    }
+    if (!win) { GCLog(@"[FOG %s] 无窗口", tag); return; }
+    CGFloat area = win.bounds.size.width * win.bounds.size.height;
+    if (area <= 0) return;
+    __block int hits = 0;
+    // 广度遍历整棵窗口树（上限 4000 个节点，防异常树卡死）
+    NSMutableArray<UIView *> *stack = [NSMutableArray arrayWithObject:win];
+    NSUInteger guard = 0;
+    while (stack.count && guard++ < 4000) {
+        UIView *v = stack.lastObject;
+        [stack removeLastObject];
+        for (UIView *sub in v.subviews) [stack addObject:sub];
+        if (v == win) continue;
+        if (v.hidden || v.alpha < 0.05) continue;
+        CGRect r = [v convertRect:v.bounds toView:win];
+        if (!isfinite(r.size.width) || !isfinite(r.size.height)) continue;
+        if (r.size.width * r.size.height < area * 0.18) continue;   // 只看大面积
+        // 背景偏白？（含 layer.backgroundColor）
+        CGFloat rr = 0, gg = 0, bb = 0, aa = 0;
+        BOOL whiteish = NO;
+        if ([v.backgroundColor getRed:&rr green:&gg blue:&bb alpha:&aa] && aa > 0.05) {
+            whiteish = (rr > 0.85 && gg > 0.85 && bb > 0.85);
+        } else {
+            CGColorRef c = v.layer.backgroundColor;
+            if (c) {
+                const CGFloat *comp = CGColorGetComponents(c);
+                if (comp && CGColorGetNumberOfComponents(c) >= 4) {
+                    whiteish = (comp[0] > 0.85 && comp[1] > 0.85 && comp[2] > 0.85 && comp[3] > 0.05);
+                }
+            }
+        }
+        if (!whiteish) continue;
+        hits++;
+        if (hits > 12) continue;
+        GCLog(@"[FOG %s] %@ {%.0f,%.0f,%.0f,%.0f} a=%.2f bg=%.2f,%.2f,%.2f,%.2f",
+              tag, NSStringFromClass([v class]), r.origin.x, r.origin.y,
+              r.size.width, r.size.height, v.alpha, rr, gg, bb, aa);
+    }
+    GCLog(@"[FOG %s] 命中 %d 个", tag, hits);
+#endif
+}
+
 static void InstallMinimalHome(void) {
     HookVoid(@"WINTabBar", @"layoutSubviews", ^(UIView *bar) { CenterTabButtons(bar); });
     HookVoid(@"WINTabBar", @"amap_relayoutTabItems", ^(UIView *bar) { CenterTabButtons(bar); });
@@ -1526,15 +1626,84 @@ static void InstallMinimalHome(void) {
         if (hm) {
             IMP orig = method_getImplementation(hm);
             Replace(tb, ht, imp_implementationWithBlock(^(id self, id gesture) {
+                // ===== M1: 已在首页又点首页 → 直接吞掉，不让 App 走重选流程 =====
+                // 白雾的源头是"重选首页"这个动作本身，压遮罩只是治标。
+                UIView *bar = (UIView *)self;
+                CGPoint p = CGPointZero;
+                BOOL havePoint = NO;
+                if ([gesture isKindOfClass:UIGestureRecognizer.class]) {
+                    p = [(UIGestureRecognizer *)gesture locationInView:bar];
+                    havePoint = YES;
+                }
+                NSInteger slot = havePoint ? GCTabDotSlot(bar, p) : -1;
+                // 判断"当前是不是首页"：优先用 selectIndex，但它可能是 NSUInteger
+                // 也可能是 NSNumber，类型不确定 —— 两条路都试，再退到
+                // tabBarControl.selectedViewControl 的类名判断。
+                BOOL onHome = NO;
+                SEL siSel = NSSelectorFromString(@"selectIndex");
+                if ([bar respondsToSelector:siSel]) {
+                    @try {
+                        NSMethodSignature *sig = [bar methodSignatureForSelector:siSel];
+                        if (sig && sig.numberOfArguments == 2) {
+                            const char *rt = sig.methodReturnType;
+                            if (rt[0] == 'Q' || rt[0] == 'q' || rt[0] == 'I' || rt[0] == 'i') {
+                                NSUInteger v = ((NSUInteger (*)(id, SEL))objc_msgSend)(bar, siSel);
+                                onHome = (v == 0);
+                            } else if (rt[0] == '@') {
+                                id v = ((id (*)(id, SEL))objc_msgSend)(bar, siSel);
+                                if ([v respondsToSelector:@selector(integerValue)])
+                                    onHome = ([v integerValue] == 0);
+                            }
+                        }
+                    } @catch (NSException *e) {}
+                }
+                if (!onHome) {
+                    for (id tabs in TabControllers.allObjects) {
+                        id sv = ObjectGetter(tabs, @"selectedViewControl");
+                        if ([NSStringFromClass([sv class]) isEqualToString:@"WINAmapHomeControl"]) { onHome = YES; break; }
+                    }
+                }
+                if (slot == 0 && onHome) {
+                    GCLog(@"[TAP] 已在首页，吞掉点击 (slot=0)");
+                    GCProbeWhiteFog("before");
+                    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.3 * NSEC_PER_SEC)),
+                                   dispatch_get_main_queue(), ^{
+                        GCProbeWhiteFog("after-swallow");
+                    });
+                    return;   // ★ 不调原实现
+                }
                 ((void (*)(id, SEL, id))orig)(self, ht, gesture);
                 for (id handler in HomeHandlers.allObjects) GCSuppressHomeMask(handler);
+                GCKillWhiteOverlay(bar);
                 dispatch_async(dispatch_get_main_queue(), ^{
                     for (id handler in HomeHandlers.allObjects) GCSuppressHomeMask(handler);
+                    GCKillWhiteOverlay(bar);
+                });
+                // 每次点击后取一次证，看白雾是否出现、是谁
+                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.35 * NSEC_PER_SEC)),
+                               dispatch_get_main_queue(), ^{
+                    GCProbeWhiteFog("after-tap");
                 });
             }), method_getTypeEncoding(hm));
+            GCLog(@"[MASK] handleTap: 已挂钩（含首页吞点击）");
         } else {
             GCLog(@"[MASK] WINTabBar.handleTap: 不存在");
         }
+    }
+
+    // ===== M2: 拦掉双击 =====
+    // 快速连点首页会被识别成双击，触发 App 未知行为（疑似白雾来源之一）。
+    for (NSString *name in @[@"handleDoubleTap:", @"doubleclick:"]) {
+        Class tb = NSClassFromString(@"WINTabBar");
+        SEL s = NSSelectorFromString(name);
+        Method m = class_getInstanceMethod(tb, s);
+        if (!m) { GCLog(@"[MASK] WINTabBar.%@ 不存在", name); continue; }
+        IMP o = method_getImplementation(m);
+        Replace(tb, s, imp_implementationWithBlock(^(id self, id arg) {
+            GCLog(@"[MASK] 拦截 %@", name);
+            (void)o; (void)self; (void)arg;
+        }), method_getTypeEncoding(m));
+        GCLog(@"[MASK] %@ 已拦截", name);
     }
 
     HookVoid(@"GDAmapHomeHandler", @"viewDidLoad", ^(id handler) { [HomeHandlers addObject:handler]; });
@@ -1678,6 +1847,6 @@ __attribute__((constructor)) static void Initialize(void) {
             }];
 #endif
         });
-        GCLog(@"[INIT] loaded 0.4.20 appVer=%@", appVersion);
+        GCLog(@"[INIT] loaded 0.4.21 appVer=%@", appVersion);
     }
 }
