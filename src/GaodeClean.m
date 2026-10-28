@@ -920,6 +920,90 @@ static void GCKillWhiteOverlay(UIView *bar) {
     if (killed) GCLog(@"[MASK] 本轮压掉 %d 层", killed);
 }
 
+// ===== S 组：地图浮动控件固定 =====
+//
+// 需求（2026-10-28）：把左下车机互联钮、右下定位钮固定到屏幕位置，不跟地图飘。
+//
+// R1 取证结果（20:03 面板日志）：
+//   左下车机钮：UIVisualEffectView {10,734,44,44} c=(32,756)
+//                < WINDeviceInterconnectWidget < MapWidgetContainerView < NMMoveContentView
+//   右下定位钮：WINLocationView {339,764,44,44} c=(361,786)
+//                < _UIVisualEffectContentView < UIVisualEffectView
+//                < WINAJXCombinedWidgetView < MapWidgetContainerView
+//   同一容器下还有 WINRouteLineWidgetView（路线钮 {339,808,44,44}）——右下其实是
+//   「定位+路线」一组 44x88 的组合胶囊。
+//
+// 为什么它们会飘：都挂在 MapWidgetContainerView（地图组件容器）下，
+// 该容器在地图坐标系里，拖动/缩放地图它就跟着动。
+//
+// 修法：把控件从地图容器搬到 UIWindow（窗口级固定层），坐标锁死；
+// 每 100ms 校验一次 —— 地图容器若把它收回去（重新 addSubview），再搬出来。
+#define GC_WIDGET_LEFT_Y  700.0    // 左下车机钮固定 center.y
+#define GC_WIDGET_RIGHT_Y 700.0    // 右下定位钮固定 center.y
+
+// 按类名在整棵窗口树里找（限深度，防异常树）
+static UIView *GCFindWidgetByClass(UIWindow *win, NSString *clsName, int maxDepth) {
+    if (!win || !clsName.length) return nil;
+    NSMutableArray *queue = [NSMutableArray array];
+    NSMutableArray *depths = [NSMutableArray array];
+    [queue addObject:win]; [depths addObject:@0];
+    NSUInteger i = 0, guard = 0;
+    while (i < queue.count && guard++ < 5000) {
+        UIView *v = queue[i];
+        int d = [depths[i] intValue];
+        i++;
+        if ([NSStringFromClass([v class]) isEqualToString:clsName]) return v;
+        if (d >= maxDepth) continue;
+        for (UIView *sub in v.subviews) {
+            [queue addObject:sub];
+            [depths addObject:@(d + 1)];
+        }
+    }
+    return nil;
+}
+
+// 把控件固定到窗口层指定坐标。返回 YES 表示本轮做了搬移/校正。
+static BOOL GCPinWidget(UIWindow *win, NSString *clsName, CGFloat centerX, CGFloat centerY, __unused const char *tag) {
+    if (!win) return NO;
+    UIView *v = GCFindWidgetByClass(win, clsName, 40);
+    if (!v) return NO;
+    if (v.hidden) return NO;
+    // 如果它还在原容器里（或已被别的层收走），搬到窗口
+    if (v.superview != win) {
+        // 用绝对 frame 搬到窗口：先算它在窗口里的当前位置，避免跳变
+        CGRect inWin = [v convertRect:v.bounds toView:win];
+        [v removeFromSuperview];
+        [win addSubview:v];
+        v.frame = inWin;
+        GCLog(@"[WIDGET] %s 已搬到窗口层", tag);
+    }
+    CGPoint want = CGPointMake(centerX, centerY);
+    if (fabs(v.center.x - want.x) > 0.5 || fabs(v.center.y - want.y) > 0.5) {
+        v.center = want;
+    }
+    // 保持在最上层（但不挡我们自己的三圆钮/搜索钮，它们在 parent 上，不在 win 上）
+    return YES;
+}
+
+static void GCPinMapWidgets(void) {
+    UIWindow *win = nil;
+    for (UIScene *sc in UIApplication.sharedApplication.connectedScenes) {
+        if (![sc isKindOfClass:UIWindowScene.class]) continue;
+        for (UIWindow *w in ((UIWindowScene *)sc).windows) {
+            if (w.isKeyWindow) { win = w; break; }
+        }
+        if (win) break;
+    }
+    if (!win) return;
+    CGFloat W = win.bounds.size.width;
+    if (!isfinite(W) || W < 200) return;
+
+    // 左下：车机互联钮（本体是 UIVisualEffectView，父类是 WINDeviceInterconnectWidget）
+    GCPinWidget(win, @"WINDeviceInterconnectWidget", 37.0, GC_WIDGET_LEFT_Y, "车机钮");
+    // 右下：定位+路线组合胶囊（整颗搬，保持两者相对位置）
+    GCPinWidget(win, @"WINAJXCombinedWidgetView", W - 34.5, GC_WIDGET_RIGHT_Y, "定位钮");
+}
+
 static void Schedule(void) {
     if (![NSThread isMainThread] || Scheduled) return;
     Scheduled = YES;
@@ -962,6 +1046,8 @@ static void Schedule(void) {
                 }
             }
         }
+        // S: 地图浮动控件固定（每 100ms 校验，被地图容器收回去就再搬出来）
+        GCPinMapWidgets();
 #if GCC_DEVICE_TEST
         RunDeviceCheck();
 #endif
@@ -2080,6 +2166,6 @@ __attribute__((constructor)) static void Initialize(void) {
             }];
 #endif
         });
-        GCLog(@"[INIT] loaded 0.4.25 appVer=%@", appVersion);
+        GCLog(@"[INIT] loaded 0.4.26 appVer=%@", appVersion);
     }
 }
