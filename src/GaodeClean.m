@@ -12,11 +12,13 @@
 #import <UIKit/UIKit.h>
 
 static void GCProbeWhiteFog(const char *tag);
+static void GCProbeMapWidgets(const char *tag);
 
 @interface GCHUDView : UIView
 @property(nonatomic, strong) NSMutableArray<NSString *> *lines;
 @property(nonatomic, strong) UILabel *label;
 @property(nonatomic, strong) UIButton *fogButton;
+@property(nonatomic, strong) UIButton *widgetButton;
 @end
 
 static GCHUDView *GCHUD;
@@ -54,6 +56,16 @@ static GCHUDView *GCHUD;
         [fb addTarget:GCHUD action:@selector(fogTap) forControlEvents:UIControlEventTouchUpInside];
         GCHUD.fogButton = fb;
         [GCHUD addSubview:fb];
+
+        UIButton *wb = [UIButton buttonWithType:UIButtonTypeSystem];
+        [wb setTitle:@"查控件" forState:UIControlStateNormal];
+        wb.titleLabel.font = [UIFont boldSystemFontOfSize:11];
+        [wb setTitleColor:UIColor.whiteColor forState:UIControlStateNormal];
+        wb.backgroundColor = [UIColor colorWithWhite:1 alpha:0.22];
+        wb.layer.cornerRadius = 4;
+        [wb addTarget:GCHUD action:@selector(widgetTap) forControlEvents:UIControlEventTouchUpInside];
+        GCHUD.widgetButton = wb;
+        [GCHUD addSubview:wb];
     });
     return GCHUD;
 }
@@ -102,6 +114,7 @@ static GCHUDView *GCHUD;
     self.label.frame = CGRectMake(pad, pad, w - pad * 2, fit.height);
     self.label.text = [self.lines componentsJoinedByString:@"\n"];
     self.fogButton.frame = CGRectMake(w - 76, 4, 68, 22);
+    self.widgetButton.frame = CGRectMake(w - 150, 4, 68, 22);
     [win bringSubviewToFront:self];
 }
 
@@ -109,6 +122,11 @@ static GCHUDView *GCHUD;
 - (UIView *)hitTest:(CGPoint)point withEvent:(UIEvent *)event {
     UIView *v = [super hitTest:point withEvent:event];
     return (v && v != self) ? v : nil;
+}
+
+- (void)widgetTap {
+    [GCHUDView log:@"[WIDGET] —— 手动触发 ——"];
+    GCProbeMapWidgets("manual");
 }
 
 - (void)fogTap {
@@ -793,6 +811,67 @@ static void GCSuppressHomeMask(id handler) {
 // 可见、背景近白、且不是页面根视图」的层，压到 alpha=0。
 // 只处理超大面积，正常卡片/导航栏不会被误伤。
 // 白名单：WINTabBar 及其子树（我们的圆钮）、UIWindow、以及 searchBar 本身。
+// ===== R1: 地图浮动控件探针 =====
+//
+// 需求（2026-10-28）：把「左下车机互联钮」和「右下定位/回正钮」固定到指定位置，
+// 不再跟着地图缩放/平移飘。
+// 真机实测（19:55 截图）：
+//   左下钮 中心 (36.8, 815.3) 尺寸约 50x47
+//   右下钮 中心 (358.5, 801.2) 尺寸约 34x34
+// 但我不知道它们的类名、也不知道挂在哪个父视图（地图容器？独立 HUD 层？）。
+// 前几轮已经因为"猜层级"翻车三次，这次先取证。
+//
+// 判据：可见、尺寸 28~80pt、中心落在屏幕左下角或右下角区域。
+#if GCC_DEVICE_TEST
+static void GCProbeMapWidgets(const char *tag) {
+    UIWindow *win = nil;
+    for (UIScene *sc in UIApplication.sharedApplication.connectedScenes) {
+        if (![sc isKindOfClass:UIWindowScene.class]) continue;
+        for (UIWindow *w in ((UIWindowScene *)sc).windows) {
+            if (w.isKeyWindow) { win = w; break; }
+        }
+        if (win) break;
+    }
+    if (!win) return;
+    CGFloat W = win.bounds.size.width, H = win.bounds.size.height;
+    if (W < 200 || H < 200) return;
+
+    GCLog(@"[WIDGET %s] win=%.0fx%.0f", tag, W, H);
+    NSMutableArray<UIView *> *stack = [NSMutableArray arrayWithObject:win];
+    NSUInteger guard = 0;
+    int hits = 0;
+    while (stack.count && guard++ < 4000) {
+        UIView *v = stack.lastObject;
+        [stack removeLastObject];
+        for (UIView *sub in v.subviews) [stack addObject:sub];
+        if (v == win || v.hidden || v.alpha < 0.05) continue;
+        CGRect r = [v convertRect:v.bounds toView:win];
+        if (!isfinite(r.size.width) || !isfinite(r.size.height)) continue;
+        CGFloat cw = r.size.width, ch = r.size.height;
+        if (cw < 28 || cw > 80 || ch < 28 || ch > 80) continue;   // 方形/圆形控件尺寸带
+        if (fabs(cw - ch) > 22) continue;                          // 近似正方形
+        CGFloat cx = CGRectGetMidX(r), cy = CGRectGetMidY(r);
+        BOOL lowerLeft  = (cx < W * 0.28 && cy > H * 0.80);
+        BOOL lowerRight = (cx > W * 0.72 && cy > H * 0.80);
+        if (!lowerLeft && !lowerRight) continue;
+        hits++;
+        if (hits > 14) continue;
+        // 父链 3 层，判断它到底挂在哪
+        NSMutableString *chain = [NSMutableString string];
+        UIView *p = v.superview;
+        for (int i = 0; i < 3 && p; i++, p = p.superview)
+            [chain appendFormat:@" <%@", NSStringFromClass([p class])];
+        GCLog(@"[WIDGET %s] %@ {%.0f,%.0f,%.0f,%.0f} c=(%.0f,%.0f) bg=%d%@",
+              tag, NSStringFromClass([v class]), r.origin.x, r.origin.y,
+              cw, ch, cx, cy, v.backgroundColor != nil, chain);
+    }
+    GCLog(@"[WIDGET %s] 命中 %d 个", tag, hits);
+}
+#else
+#define GCProbeMapWidgets(tag) do { } while (0)
+#endif
+
+
 static void GCKillWhiteOverlay(UIView *bar) {
     // Q1: 守卫放进函数内。0.4.21 的雷：handleTap: 调用点没有首页守卫，
     // 在我的页点 tab 也会扫全窗。0.4.22 只给 Schedule() 调用点加了守卫，
@@ -1989,6 +2068,11 @@ __attribute__((constructor)) static void Initialize(void) {
                            dispatch_get_main_queue(), ^{ GCProbeWhiteFog("startup3s"); });
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(8.0 * NSEC_PER_SEC)),
                            dispatch_get_main_queue(), ^{ GCProbeWhiteFog("startup8s"); });
+            // R1: 地图浮动控件取证（启动 5s / 12s 各一次）
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(5.0 * NSEC_PER_SEC)),
+                           dispatch_get_main_queue(), ^{ GCProbeMapWidgets("startup5s"); });
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(12.0 * NSEC_PER_SEC)),
+                           dispatch_get_main_queue(), ^{ GCProbeMapWidgets("startup12s"); });
             // HUD 会被 App 的重布局压到下面，1 秒拉回一次
             [NSTimer scheduledTimerWithTimeInterval:1.0 repeats:YES block:^(__unused NSTimer *timer) {
                 [(GCHUDView *)[GCHUDView shared] refresh];
@@ -1996,6 +2080,6 @@ __attribute__((constructor)) static void Initialize(void) {
             }];
 #endif
         });
-        GCLog(@"[INIT] loaded 0.4.24 appVer=%@", appVersion);
+        GCLog(@"[INIT] loaded 0.4.25 appVer=%@", appVersion);
     }
 }
