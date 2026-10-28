@@ -970,6 +970,8 @@ static void GCKillWhiteOverlay(UIView *bar) {
 // 升级为 CADisplayLink 60fps 强锁 —— 0.9.99 probe47 已验证此通道可用。
 static CADisplayLink *GCPinLink;
 static BOOL GCPinWidget(UIWindow *win, NSString *clsName, CGFloat centerX, CGFloat centerY, const char *tag);
+static void GCPinLogoWidget(UIWindow *win);
+static NSArray<UIView *> *GCFindWidgetsByClass(UIWindow *win, NSString *clsName, int maxDepth);
 
 
 static void GCPinTick(void) {
@@ -986,8 +988,63 @@ static void GCPinTick(void) {
     if (!isfinite(W) || W < 200) return;
     GCPinWidget(win, @"WINDeviceInterconnectWidget", 37.0, GC_WIDGET_LEFT_Y, "tick");
     GCPinWidget(win, @"WINAJXCombinedWidgetView", W - 34.5, GC_WIDGET_RIGHT_Y, "tick");
-    // 高德水印（logo + 比例尺）钉到车机钮下方
-    GCPinWidget(win, @"WINScaleLineLogoMapWidget", GC_LOGO_X, GC_LOGO_Y, "tick");
+    // 高德水印（logo + 比例尺）钉到车机钮下方。
+    // 22:03 实证：GCPinWidget 按外层类名有时找不到（App 按需显隐/重建），
+    // 改用专用函数：找「父类是 WINScaleLineLogoMapWidget 的 76x16 UIImageView」。
+    GCPinLogoWidget(win);
+}
+
+// 水印本体 = 父类 WINScaleLineLogoMapWidget 下的 UIImageView（约 76x16）。
+// 找不到时打一条日志（节流），下轮日志能区分「没实例」vs「没找到」。
+static void GCPinLogoWidget(UIWindow *win) {
+    if (!win) return;
+    static BOOL loggedMissing;
+    // ① 先找父容器（完整 logo+比例尺组合）
+    NSArray<UIView *> *cands = GCFindWidgetsByClass(win, @"WINScaleLineLogoMapWidget", 40);
+    UIView *target = nil;
+    for (UIView *c in cands) {
+        if (c.hidden || c.alpha < 0.05) continue;
+        target = c;
+        break;
+    }
+    // ② 父容器不可见/不存在 → 找内层 UIImageView（76x16 特征）
+    if (!target) {
+        NSMutableArray<UIView *> *stack = [NSMutableArray arrayWithObject:win];
+        NSUInteger guard = 0;
+        while (stack.count && guard++ < 3000) {
+            UIView *v = stack.lastObject;
+            [stack removeLastObject];
+            for (UIView *sub in v.subviews) [stack addObject:sub];
+            if (![NSStringFromClass([v class]) isEqualToString:@"UIImageView"]) continue;
+            CGSize sz = v.bounds.size;
+            if (sz.width < 60 || sz.width > 95 || sz.height < 10 || sz.height > 22) continue;
+            UIView *p = v.superview;
+            BOOL ok = NO;
+            for (int i = 0; i < 4 && p; i++, p = p.superview)
+                if ([NSStringFromClass([p class]) isEqualToString:@"WINScaleLineLogoMapWidget"]) { ok = YES; break; }
+            if (!ok) continue;
+            target = v.superview;
+            break;
+        }
+    }
+    if (!target) {
+        if (!loggedMissing) {
+            loggedMissing = YES;
+            GCLog(@"[LOGO] 未找到可见的水印实例（可能被 App 隐藏）");
+        }
+        return;
+    }
+    loggedMissing = NO;
+    if (target.superview != win) {
+        CGRect inWin = [target convertRect:target.bounds toView:win];
+        [target removeFromSuperview];
+        [win addSubview:target];
+        target.frame = inWin;
+        GCLog(@"[LOGO] 水印已搬到窗口层");
+    }
+    CGPoint want = CGPointMake(GC_LOGO_X, GC_LOGO_Y);
+    if (fabs(target.center.x - want.x) > 0.5 || fabs(target.center.y - want.y) > 0.5)
+        target.center = want;
 }
 
 // 按类名在整棵窗口树里找【全部实例】（限深度，防异常树）。
@@ -2303,6 +2360,6 @@ __attribute__((constructor)) static void Initialize(void) {
             }];
 #endif
         });
-        GCLog(@"[INIT] loaded 0.4.32 appVer=%@", appVersion);
+        GCLog(@"[INIT] loaded 0.4.33 appVer=%@", appVersion);
     }
 }
