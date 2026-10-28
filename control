@@ -7,4 +7,3 @@ Maintainer: Local Developer
 Author: Local Developer
 Section: Tweaks
 Depends: firmware (>= 15.0), mobilesubstrate
-Installed-Size: 172
