@@ -974,28 +974,20 @@ static NSArray<UIView *> *GCFindWidgetsByClass(UIWindow *win, NSString *clsName,
 
 
 static void GCPinTick(void) {
-    UIWindow *win = nil;
-    for (UIScene *sc in UIApplication.sharedApplication.connectedScenes) {
-        if (![sc isKindOfClass:UIWindowScene.class]) continue;
-        for (UIWindow *w in ((UIWindowScene *)sc).windows) {
-            if (w.isKeyWindow) { win = w; break; }
-        }
-        if (win) break;
-    }
-    if (!win) return;
-    CGFloat W = win.bounds.size.width;
-    if (!isfinite(W) || W < 200) return;
-    GCPinWidget(win, @"WINDeviceInterconnectWidget", 37.0, GC_WIDGET_LEFT_Y, "tick");
-    GCPinWidget(win, @"WINAJXCombinedWidgetView", W - 34.5, GC_WIDGET_RIGHT_Y, "tick");
-    // 高德水印（logo + 比例尺）钉到车机钮下方。
-    // 22:03 实证：GCPinWidget 按外层类名有时找不到（App 按需显隐/重建），
-    // 改用专用函数：找「父类是 WINScaleLineLogoMapWidget 的 76x16 UIImageView」。
-    GCPinLogoWidget(win);
+    // 0.4.41 方向修正（用户 01:20 明确）：
+    //   「车机和定位还有LOGO我要的不是固定死位置，而是像原生一样在合适的位置」
+    // 原实现把三个控件搬到 UIWindow 并锁死坐标 —— 那是「固定死」，不是用户要的。
+    // 用户要的是【保持原生布局】。所以整个强锁通道停用，让控件跟随 App 自己的
+    // 地图布局规则排布（原生位置：车机钮左下、定位钮右下、水印贴底）。
+    //
+    // 保留函数与 display link 结构（空跑，开销接近于零），
+    // 便于将来若要改「微调」而不是「锁死」时直接在这里实现。
 }
 
 // 水印本体 = 父类 WINScaleLineLogoMapWidget 下的 UIImageView（约 76x16）。
 // 找不到时打一条日志（节流），下轮日志能区分「没实例」vs「没找到」。
-static void GCPinLogoWidget(UIWindow *win) {
+// 0.4.41: 水印不再固定（用户要求保持原生布局）。函数保留但不参与调用。
+__attribute__((unused)) static void GCPinLogoWidget(UIWindow *win) {
     if (!win) return;
     // 00:34 真机铁证（两次会话一致）：
     //   UIImageView {10,792,76,16} c=(48,800)
@@ -1029,6 +1021,22 @@ static void GCPinLogoWidget(UIWindow *win) {
             if (target) break;
         }
     }
+    // 0.4.40: 多实例去重 —— 01:11 截图实证：首页出现【两个】水印
+    //（我们固定的 y=745 + App 重建的原生 y≈800），中间还夹着比例尺。
+    // App 会重建 WINScaleLineLogoMapWidget，我们只搬了第一次那颗。
+    // ★ 必须放在所有提前 return 之前，否则 pinnedLogo 分支会跳过它（0.4.39 的错）。
+    {
+        static int hidCount;
+        for (UIView *c in cands) {
+            if (c == target) continue;
+            if (c.hidden) continue;
+            // 窗口层只留 target 一棵；容器里的一律隐藏（App 重建的原生副本）
+            c.hidden = YES;
+            if (hidCount++ < 4)
+                GCLog(@"[LOGO] 隐藏副本");
+        }
+    }
+
     // 0.4.39: 水印只属于地图（首页）。切到「我的」/「探索」时必须隐藏 ——
     // 之前只实现固定，搬到 UIWindow 后一直显示，导致我的页也看到高德 logo。
     BOOL onHome = NO;
@@ -1186,6 +1194,8 @@ static BOOL GCPinWidget(UIWindow *win, NSString *clsName, CGFloat centerX, CGFlo
 }
 
 static void GCPinMapWidgets(void) {
+    // 0.4.41: 同上，停用搬移。控件回到 App 原生布局。
+    return;
     UIWindow *win = nil;
     for (UIScene *sc in UIApplication.sharedApplication.connectedScenes) {
         if (![sc isKindOfClass:UIWindowScene.class]) continue;
@@ -2427,6 +2437,6 @@ __attribute__((constructor)) static void Initialize(void) {
             }];
 #endif
         });
-        GCLog(@"[INIT] loaded 0.4.39 appVer=%@", appVersion);
+        GCLog(@"[INIT] loaded 0.4.41 appVer=%@", appVersion);
     }
 }
