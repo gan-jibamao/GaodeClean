@@ -914,6 +914,7 @@ static BOOL IsStreetRank(UIView *view) {
 // UIGestureRecognizer 的 target/action 是私有属性，必须 KVC 取。
 static UIView *GCLiveSearchBar;
 static void GCFireSearchFallback(UIView *bar);
+static void GCFireSearchViaService(void);
 
 static void GCFireSearchClick(void) {
     UIView *bar = GCLiveSearchBar;
@@ -1021,7 +1022,58 @@ static void GCFireSearchFallback(UIView *bar) {
         }
     }
 
-    GCLog(@"[TAP] 所有路径均未命中");
+    // path5：绕过 UI 直接调搜索服务（17:38 定案的最终方案）
+    GCFireSearchViaService();
+}
+
+// ===== path5：直接调搜索服务（K 组，最终方案）=====
+//
+// 17:38 面板定案：path1 clickAction（__NSGlobalBlock__ 空壳）与 path2
+// onTapBackgound: 都被调用但都不开页 —— 它们依赖被我们隐藏/搬移的内部状态。
+// 不再猜 UI 链路，直接调 App 的搜索服务打开输入页。
+//
+// 17.00.2 类转储（归档 analysis/classes.json）铁证：
+//   WINGeneralSearchVAppService:
+//     sharedInstance            ← 单例入口
+//     openInput:                ← 打开搜索输入页（带1参数，传 nil）
+//     openGeneralSearchHomePageWithKeyword:animated:  ← 备选
+//     startNewSearchWithParams:controllerSource:completion: ← 再备选
+static void GCFireSearchViaService(void) {
+    Class svc = NSClassFromString(@"WINGeneralSearchVAppService");
+    if (!svc) { GCLog(@"[TAP] path5 WINGeneralSearchVAppService 不存在"); return; }
+    SEL get = NSSelectorFromString(@"sharedInstance");
+    if (![svc respondsToSelector:get]) { GCLog(@"[TAP] path5 无 sharedInstance"); return; }
+    id inst = ((id (*)(id, SEL))objc_msgSend)(svc, get);
+    GCLog(@"[TAP] path5 service=%@", inst ? NSStringFromClass([inst class]) : @"nil");
+    if (!inst) return;
+
+    // 首选 openInput:（打输入法搜索页，等价点搜索框）。
+    // 参数未知，可能是 nil 也可能要词典 —— 包 @try，崩了不拖累 App。
+    SEL openInput = NSSelectorFromString(@"openInput:");
+    if ([inst respondsToSelector:openInput]) {
+        GCLog(@"[TAP] path5 调 openInput:");
+        @try {
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+            [inst performSelector:openInput withObject:nil];
+#pragma clang diagnostic pop
+        } @catch (NSException *e) {
+            GCLog(@"[TAP] path5 openInput exception %@", e.reason);
+        }
+        return;
+    }
+    // 备选 openGeneralSearchHomePageWithKeyword:animated:
+    SEL openHome = NSSelectorFromString(@"openGeneralSearchHomePageWithKeyword:animated:");
+    if ([inst respondsToSelector:openHome]) {
+        GCLog(@"[TAP] path5 调 openGeneralSearchHomePage");
+        @try {
+            ((void (*)(id, SEL, id, BOOL))objc_msgSend)(inst, openHome, nil, YES);
+        } @catch (NSException *e) {
+            GCLog(@"[TAP] path5 openHome exception %@", e.reason);
+        }
+        return;
+    }
+    GCLog(@"[TAP] path5 服务上无可用入口");
 }
 
 @interface GCTapRouter : NSObject
@@ -1525,6 +1577,6 @@ __attribute__((constructor)) static void Initialize(void) {
             }];
 #endif
         });
-        GCLog(@"[INIT] loaded 0.4.17 appVer=%@", appVersion);
+        GCLog(@"[INIT] loaded 0.4.18 appVer=%@", appVersion);
     }
 }
