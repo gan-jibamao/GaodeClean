@@ -297,7 +297,7 @@ static void BindBoundary(UIView *page, UIView *anchor, UIView *peer, CGFloat bou
 // 0.4.10 D2: 诊断落盘只存在于开发构建。正式包不往 App 沙盒写页面树
 // （class/frame 属于内部结构信息，且会额外产生磁盘写入）。
 #if GCC_DEVICE_TEST
-{
+static void SaveDiagnostics(UIView *page, GCCState *state, NSArray<UIView *> *nodes) {
     // No arbitrary label text, addresses, account details or network payloads are exported.
     static NSMutableDictionary *records;
     if (!records) records = [NSMutableDictionary dictionary];
@@ -867,22 +867,65 @@ static void GCDressSearchDot(UIView *bar) {
     glyph.alpha = 1.0;
 }
 
-// ===== 0.4.10 B3: 底栏平板隐藏 =====
-// 胶囊 / 阴影 / 描边 / 选中方形底衬 全部关掉，只留两颗圆钮浮在地图上。
+// ===== 底栏平板隐藏 =====
+//
+// 0.4.11 E2 —— 黑名单法失败实证（2026-10-28 15:35 截图）：
+//   我原来只按「UIImageView 且 height > 60」隐藏，但原生选中态高亮是一条
+//   345x40pt 的灰胶囊（实测 x 25~370pt / y 790~830pt），高度 40 < 60，
+//   直接漏网，在真机上就是图二那条横贯屏幕的灰条。
+//   黑名单永远会漏项，改成白名单：只保留 tabBarItems，其余子视图一律隐藏。
 static void GCHideBarPlatter(UIView *bar) {
     if (![bar isKindOfClass:UIView.class]) return;
+    NSArray *items = ObjectGetter(bar, @"tabBarItems");
+    NSMutableSet *keep = [NSMutableSet set];
+    if ([items isKindOfClass:NSArray.class]) {
+        for (UIView *item in items)
+            if ([item isKindOfClass:UIView.class]) [keep addObject:item];
+    }
     for (UIView *v in bar.subviews) {
-        NSString *cn = NSStringFromClass(v.class);
-        if ([v isKindOfClass:[UIVisualEffectView class]]) { v.hidden = YES; continue; }
-        if ([cn containsString:@"Backdrop"]) { v.hidden = YES; continue; }
-        // 原生阴影/描边都是超大 UIImageView（399x108 / 355x64）
-        if ([v isKindOfClass:[UIImageView class]] && v.frame.size.height > 60) { v.hidden = YES; continue; }
-        // 选中方形底衬 84x54
-        if (fabs(v.frame.size.width - 84) < 2 && fabs(v.frame.size.height - 54) < 2) { v.hidden = YES; continue; }
+        if ([keep containsObject:v]) continue;
+        v.hidden = YES;
+        v.alpha = 0;
+        v.userInteractionEnabled = NO;
     }
 }
 
-// 圆钮外观：52pt 正圆 + 纯白底 + 隐藏图标下方的文字
+// 圆钮外观：52pt 正圆 + 纯白底 + 隐藏文字。
+//
+// 0.4.11 E1 —— 真机截图暴露的两个问题（2026-10-28 15:35）：
+//   ① 圆里叠着一个「更白更窄的圆角矩形」(实测 x 181~212pt / 宽 31pt)；
+//   ② 另一个页面上两颗钮仍是 84x54 胶囊形，压根没变圆。
+// 根因：WINTabBarItem 内部是「选中态 / 未选中态」两层 icon 图片，各自带
+//   84x54 的位图。只对外层设 cornerRadius + masksToBounds 并不能改变内层
+//   位图的绘制尺寸，形状就残留在圆里。
+// 所以这里递归遍历整棵子树：凡是 UIImageView 一律 scaleAspectFit 并压到
+//   GC_DOT 内，凡是背景色块一律清成透明，凡是文字一律隐藏。
+#define GC_ICON_SIDE 26.0
+
+static void GCDotDressLayer(UIView *v, int depth) {
+    if (![v isKindOfClass:UIView.class] || depth > 4) return;
+    if ([v isKindOfClass:UILabel.class]) { v.hidden = YES; return; }
+    if ([v isKindOfClass:[UIImageView class]]) {
+        // icon 位图：不透明、按 26pt 等比缩放居中，绝不留 84x54 原尺寸
+        UIImageView *iv = (UIImageView *)v;
+        iv.hidden = NO;
+        iv.alpha = 1.0;
+        iv.backgroundColor = UIColor.clearColor;
+        iv.contentMode = UIViewContentModeScaleAspectFit;
+        iv.bounds = CGRectMake(0, 0, GC_ICON_SIDE, GC_ICON_SIDE);
+        iv.center = CGPointMake(GC_DOT / 2.0, GC_DOT / 2.0);
+        iv.layer.cornerRadius = 0;
+        iv.layer.masksToBounds = NO;
+        return;
+    }
+    // 普通容器：清掉自己的底色（否则会在圆里留一块矩形），并裁成同心圆
+    CGFloat a = 0;
+    UIColor *bg = v.backgroundColor;
+    if (bg && [bg getRed:NULL green:NULL blue:NULL alpha:&a] && a > 0.02) v.backgroundColor = UIColor.clearColor;
+    v.layer.masksToBounds = NO;
+    for (UIView *sub in v.subviews) GCDotDressLayer(sub, depth + 1);
+}
+
 static void GCDotDress(UIView *v, BOOL hideText) {
     if (![v isKindOfClass:UIView.class]) return;
     v.layer.cornerRadius = GC_DOT / 2.0;
@@ -891,12 +934,37 @@ static void GCDotDress(UIView *v, BOOL hideText) {
     UIColor *bg = v.backgroundColor;
     if (!bg || ![bg getRed:NULL green:NULL blue:NULL alpha:&alpha] || alpha < 0.99)
         v.backgroundColor = [UIColor colorWithWhite:0.97 alpha:1.0];
+    for (UIView *sub in v.subviews) GCDotDressLayer(sub, 1);
     if (!hideText) return;
     for (UIView *s1 in v.subviews) {
         if ([s1 isKindOfClass:UILabel.class]) s1.hidden = YES;
         for (UIView *s2 in s1.subviews)
             if ([s2 isKindOfClass:UILabel.class]) s2.hidden = YES;
     }
+}
+
+// ===== E4: 真机探针 =====
+// 这一轮翻车最大的教训是「全程靠猜层级」，改三次都没命中。加这个探针后，
+// 底栏真实子视图的 class/frame/hidden 会直接进日志，不用再猜。
+static void GCLogBarTree(__unused UIView *bar, __unused CGFloat winW) {
+#if GCC_DEVICE_TEST
+    static int loggedFrames;
+    if (loggedFrames > 6) return;
+    loggedFrames++;
+    NSArray *titems = ObjectGetter(bar, @"tabBarItems");
+    NSUInteger icount = [titems isKindOfClass:NSArray.class] ? titems.count : 0;
+    NSLog(@"[GaodeClean][BAR] #%d bar={%.1f,%.1f,%.1f,%.1f} winW=%.1f items=%lu",
+          loggedFrames, bar.frame.origin.x, bar.frame.origin.y,
+          bar.frame.size.width, bar.frame.size.height, winW, (unsigned long)icount);
+    int i = 0;
+    for (UIView *v in bar.subviews) {
+        if (i++ > 40) break;
+        NSLog(@"[GaodeClean][BAR]   sub[%d] %@ {%.1f,%.1f,%.1f,%.1f} hid=%d a=%.2f txt=%@",
+              i, NSStringFromClass(v.class), v.frame.origin.x, v.frame.origin.y,
+              v.frame.size.width, v.frame.size.height, v.hidden, v.alpha,
+              [NodeText(v) stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceCharacterSet]);
+    }
+#endif
 }
 
 static void CenterTabButtons(UIView *bar) {
@@ -906,19 +974,26 @@ static void CenterTabButtons(UIView *bar) {
     if (![items isKindOfClass:NSArray.class] || items.count != 2) return;
     adjusting = YES;
 
-    // ===== 0.4.10 B3: 先摘掉底栏平板（胶囊/阴影/描边/选中底衬） =====
+    // ===== E2: 先摘掉底栏平板（白名单法，只留 tabBarItems） =====
     GCHideBarPlatter(bar);
 
-    // 三槽位：槽0=导航 槽1=搜索(中间，由 LayoutMinimalHome 负责) 槽2=我的
+    // ===== E3: 三槽位用「窗口宽度」算，不信 bar.bounds =====
+    // bar.bounds.width 会被 App 在窄栏/宽栏之间来回改（0.3.x 就限制成 252），
+    // 一旦用 bar 宽度算，三颗钮会整体歪掉。窗口宽度才是稳定基准。
     // 393pt 视口 → 圆心 136.5 / 196.5 / 256.5，各差 GC_PITCH=60
-    CGFloat W = bar.bounds.size.width;
+    UIWindow *win = bar.window;
+    CGFloat W = win ? win.bounds.size.width : bar.bounds.size.width;
+    if (!isfinite(W) || W < 200) W = bar.bounds.size.width;
     CGFloat midY = bar.bounds.size.height / 2.0;
     CGFloat cx[3] = { W / 2.0 - GC_PITCH, W / 2.0, W / 2.0 + GC_PITCH };
+    GCLogBarTree(bar, W);
 
     for (NSUInteger index = 0; index < items.count; index++) {
         UIView *item = items[index];
         if (![item isKindOfClass:UIView.class] || !item.superview) continue;
-        // ★ 只写 bounds/center。写 frame 会在 App 内部重设 bounds 后产生非线性抖动
+        // ★ 只写 bounds/center。写 frame 会在 App 内部重设 bounds 后产生非线性抖动。
+        //   注意：外层 item 与内层状态容器都压成 52，icon 图片由 GCDotDressLayer
+        //   单独压到 26pt —— 三者尺寸必须由内向外收敛，不能只压外层（0.4.10 的错）。
         item.bounds = CGRectMake(0, 0, GC_DOT, GC_DOT);
         GCDotDress(item, YES);
         for (UIView *sub in item.subviews) {
@@ -1065,6 +1140,6 @@ __attribute__((constructor)) static void Initialize(void) {
         dispatch_async(dispatch_get_main_queue(), ^{
             [NSTimer scheduledTimerWithTimeInterval:0.5 repeats:YES block:^(__unused NSTimer *timer) { Schedule(); }];
         });
-        NSLog(@"[GaodeClean] loaded 0.4.10 (universal; appVer=%@)", appVersion);
+        NSLog(@"[GaodeClean] loaded 0.4.11 (universal; appVer=%@)", appVersion);
     }
 }
