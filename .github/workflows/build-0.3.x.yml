@@ -8,7 +8,7 @@ name: Build 0.3.x
 
 on:
   push:
-    branches: [ 'gc03/**' ]
+    branches: [ 'gc03/**', 'gc0410/**' ]
   workflow_dispatch:
 
 permissions:
