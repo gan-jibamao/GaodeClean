@@ -382,7 +382,7 @@ static void CleanPage(UIView *page) {
                 NSData *data = [NSData dataWithContentsOfFile:[dir stringByAppendingPathComponent:@"GaodeClean-diagnostics.json"]];
                 NSDictionary *report = data ? [NSJSONSerialization JSONObjectWithData:data options:0 error:nil] : nil;
                 NSDictionary *mine = report[@"pages"][@"3"];
-                if ([@[@"0.3.0", @"0.3.1", @"0.3.5"] containsObject:report[@"version"] ?: @""] && [mine[@"matched"] boolValue]) {
+                if ([@[@"0.3.0", @"0.3.1", @"0.3.6"] containsObject:report[@"version"] ?: @""] && [mine[@"matched"] boolValue]) {
                     CGRect blank = CGRectFromString(mine[@"blankAreaFrame"] ?: @"");
                     if (blank.origin.y > 100) cached = @{@"width":@(blank.size.width), @"bottom":@(blank.origin.y)};
                 }
@@ -855,7 +855,7 @@ static void GCShrinkSearchBar(UIView *bar) {
             }
         }
     }
-    // 白圆底：防胶囊自身圆角在圆内透出地图色
+    // 白圆底：把胶囊做成"纯白不透明"，不再靠叠加遮
     UIView *back = nil;
     for (UIView *v in bar.subviews)
         if ([v.accessibilityIdentifier isEqualToString:@"GCSearchDotBack"]) back = v;
@@ -866,9 +866,30 @@ static void GCShrinkSearchBar(UIView *bar) {
         back.layer.masksToBounds = YES;
         back.backgroundColor = [UIColor colorWithWhite:0.97 alpha:1.0];
         back.userInteractionEnabled = NO;
-        [bar insertSubview:back atIndex:0];
+        [bar insertSubview:back atIndex:0];   // 最底层：只负责给圆外区域兜白
     } else {
         back.frame = CGRectMake(0, 0, GC_DOT, GC_DOT);
+    }
+    if (capsule) {
+        // 胶囊改成纯白不透明 + 圆形裁剪：这样它就"变成"白圆本身，
+        // 既没有半透明残影，也不会透出地图
+        capsule.backgroundColor = [UIColor colorWithWhite:0.97 alpha:1.0];
+        capsule.layer.cornerRadius = GC_DOT / 2.0;
+        capsule.layer.masksToBounds = YES;
+        // 关掉毛玻璃效果（UIVisualEffectView 的背景是半透明的，必须清掉）
+        if ([capsule isKindOfClass:[UIVisualEffectView class]]) {
+            UIView *fill = [[UIView alloc] initWithFrame:capsule.bounds];
+            fill.backgroundColor = [UIColor colorWithWhite:0.97 alpha:1.0];
+            fill.userInteractionEnabled = NO;
+            fill.accessibilityIdentifier = @"GCFill";
+            [((UIVisualEffectView *)capsule).contentView addSubview:fill];
+        }
+        // 隐藏会透色的子层（backdrop / effect subview），但保留 ContentView 里的放大镜
+        for (UIView *c in capsule.subviews) {
+            NSString *cn = NSStringFromClass(c.class);
+            if ([cn containsString:@"Backdrop"]) c.hidden = YES;
+            else if ([cn containsString:@"EffectSubview"] && ![cn containsString:@"ContentView"]) c.hidden = YES;
+        }
     }
     // 点击：加一个固定手势，命中就主动触发原生 clickAction block
     // （原生手势可能因内部视图被平移而失效，不能依赖它）
@@ -1067,6 +1088,6 @@ __attribute__((constructor)) static void Initialize(void) {
         dispatch_async(dispatch_get_main_queue(), ^{
             [NSTimer scheduledTimerWithTimeInterval:0.5 repeats:YES block:^(__unused NSTimer *timer) { Schedule(); }];
         });
-        NSLog(@"[GaodeClean] loaded 0.3.5 (no version limit; appVer=%@)", appVersion);
+        NSLog(@"[GaodeClean] loaded 0.3.6 (no version limit; appVer=%@)", appVersion);
     }
 }
