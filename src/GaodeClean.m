@@ -963,7 +963,6 @@ static void GCKillWhiteOverlay(UIView *bar) {
 //（车机钮被改到 (32,364)、定位钮 (368,396)），100ms 校验盖不过动画。
 // 升级为 CADisplayLink 60fps 强锁 —— 0.9.99 probe47 已验证此通道可用。
 static CADisplayLink *GCPinLink;
-static NSMutableArray<NSValue *> *GCPinTargets;   // [clsName, centerX, centerY] 三元组
 static BOOL GCPinWidget(UIWindow *win, NSString *clsName, CGFloat centerX, CGFloat centerY, const char *tag);
 
 
@@ -977,11 +976,10 @@ static void GCPinTick(void) {
         if (win) break;
     }
     if (!win) return;
-    for (NSValue *v in GCPinTargets) {
-        NSArray *a = [v nonretainedObjectValue];
-        if (a.count < 3) continue;
-        GCPinWidget(win, a[0], [a[1] floatValue], [a[2] floatValue], "tick");
-    }
+    CGFloat W = win.bounds.size.width;
+    if (!isfinite(W) || W < 200) return;
+    GCPinWidget(win, @"WINDeviceInterconnectWidget", 37.0, GC_WIDGET_LEFT_Y, "tick");
+    GCPinWidget(win, @"WINAJXCombinedWidgetView", W - 34.5, GC_WIDGET_RIGHT_Y, "tick");
 }
 
 // 按类名在整棵窗口树里找【全部实例】（限深度，防异常树）。
@@ -1076,11 +1074,6 @@ static void GCPinMapWidgets(void) {
     // 60fps 强锁通道（首次调用时启动）
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
-        GCPinTargets = [NSMutableArray array];
-        [GCPinTargets addObject:[NSValue valueWithNonretainedObject:@[
-            @"WINDeviceInterconnectWidget", @37.0, @(GC_WIDGET_LEFT_Y)]]];
-        [GCPinTargets addObject:[NSValue valueWithNonretainedObject:@[
-            @"WINAJXCombinedWidgetView", @(W - 34.5), @(GC_WIDGET_RIGHT_Y)]]];
         Class routerCls = NSClassFromString(@"GCTapRouter");
         GCPinLink = [CADisplayLink displayLinkWithTarget:routerCls
                                                 selector:@selector(pinTick)];
@@ -2300,6 +2293,6 @@ __attribute__((constructor)) static void Initialize(void) {
             }];
 #endif
         });
-        GCLog(@"[INIT] loaded 0.4.30 appVer=%@", appVersion);
+        GCLog(@"[INIT] loaded 0.4.31 appVer=%@", appVersion);
     }
 }
