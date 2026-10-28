@@ -970,34 +970,41 @@ static BOOL GCPinWidget(UIWindow *win, NSString *clsName, CGFloat centerX, CGFlo
     if (!win) return NO;
     NSArray<UIView *> *all = GCFindWidgetsByClass(win, clsName, 40);
     if (!all.count) return NO;
-    // 分拣：窗口层的（我们搬出来的，负责显示）vs 容器里的（App 重建的新颗，隐藏）
+
+    // 0.4.28 重大修正：0.4.27 的「容器内全部实例 hidden」策略酿成事故 ——
+    // 20:31 真机整屏地图变灰白。原因：WINAJXCombinedWidgetView 这类名
+    // 在 App 里不止一个按钮实例，某些实例参与地图渲染/事件链，
+    // 全部 hidden 连带把地图画布藏了（[FOG] 命中数从 7~8 掉到 2）。
+    //
+    // 新策略（不再碰任何实例的 hidden）：
+    //   1. 窗口层有我们的实例 → 只锁坐标，其他一律不动
+    //   2. 窗口层没有 → 从容器实例里挑「屏幕边缘的 44pt 方块」（就是按钮本体）
+    //      搬上来接管；其余容器实例一律不碰
     UIView *pinned = nil;
     for (UIView *v in all) {
-        if (v.superview == win) { pinned = v; continue; }
-        // 容器里的新颗：直接隐藏（不能删，App 内部状态要保持完整）。
-        // 只在它可见时动一次，避免每 100ms 重复写。
-        if (!v.hidden) {
-            v.hidden = YES;
-            GCLog(@"[WIDGET] %s 隐藏容器内新实例", tag);
-        }
+        if (v.superview == win) { pinned = v; break; }
     }
     if (!pinned) {
-        // 窗口层那颗没了（被 App 收编/释放）—— 把容器里第一颗可见的搬上来
+        CGRect winB = win.bounds;
         for (UIView *v in all) {
-            if (v.hidden) continue;
+            if (v.hidden || v.alpha < 0.05) continue;
+            CGRect r = [v convertRect:v.bounds toView:win];
+            CGFloat cx = CGRectGetMidX(r), cy = CGRectGetMidY(r);
+            BOOL edgeZone = (cx < winB.size.width * 0.3 || cx > winB.size.width * 0.7)
+                         && cy > winB.size.height * 0.7;
+            BOOL sized = fabs(r.size.width - 44) < 8 && fabs(r.size.height - 44) < 8;
+            if (!edgeZone || !sized) continue;    // 只接管按钮本体，其它实例不碰
             CGRect inWin = [v convertRect:v.bounds toView:win];
             [v removeFromSuperview];
             [win addSubview:v];
             v.frame = inWin;
-            GCLog(@"[WIDGET] %s 重新接管", tag);
+            GCLog(@"[WIDGET] %s 接管边缘实例", tag);
             pinned = v;
             break;
         }
         if (!pinned) return NO;
     }
-    // 窗口层那颗：解除隐藏（App 可能把它 hidden）+ 坐标锁死
-    if (pinned.hidden) pinned.hidden = NO;
-    if (pinned.alpha < 0.99) pinned.alpha = 1.0;
+    // 只锁坐标，不再写 hidden/alpha（0.4.27 的事故教训：这些实例可能有其他职责）
     CGPoint want = CGPointMake(centerX, centerY);
     if (fabs(pinned.center.x - want.x) > 0.5 || fabs(pinned.center.y - want.y) > 0.5) {
         pinned.center = want;
@@ -2186,6 +2193,6 @@ __attribute__((constructor)) static void Initialize(void) {
             }];
 #endif
         });
-        GCLog(@"[INIT] loaded 0.4.27 appVer=%@", appVersion);
+        GCLog(@"[INIT] loaded 0.4.28 appVer=%@", appVersion);
     }
 }
