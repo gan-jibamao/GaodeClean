@@ -4,7 +4,7 @@
 #import "GCCGeometry.h"
 
 // This tweak changes UI only. No network interception or modification of the IPA.
-static char TextKey, StateKey, LimitKey, ForcedKindKey, ForcedPathKey;
+static char TextKey, StateKey, LimitKey, ForcedKindKey, ForcedPathKey, SearchDotKey;
 static NSHashTable<UIView *> *Pages;
 static NSHashTable *NearbyControllers;
 static NSHashTable *TabControllers;
@@ -14,6 +14,19 @@ static BOOL Scheduled, Applying, Cleaning;
 static void UpdateMask(UIView *page);
 static void Schedule(void);
 static void LayoutMinimalHome(id handler);
+
+// ===== 0.4.10 三圆钮几何 =====
+// 三槽位统一定义：槽0=导航 槽1=搜索(屏幕正中) 槽2=我的。
+// 所有元素一律从槽位取坐标，禁止各自"居中/左右摆"两套坐标系并存
+// （0.4.9 的偏左+重叠就是这样来的）。
+#define GC_DOT 52.0             // 圆钮直径
+#define GC_GAP 8.0              // 相邻圆心距 - 直径
+#define GC_BOTTOM_INSET 60.0    // 底栏原始高度，圆心 y = 屏高 - 该值 - GC_DOT/2 - 4
+#define GC_PITCH (GC_DOT + GC_GAP)
+
+static void GCDotDress(UIView *v, BOOL hideText);
+static void GCDressSearchDot(UIView *bar);
+static void GCHideBarPlatter(UIView *bar);
 
 @class GCCState;
 @interface GCCLimit : NSObject
@@ -281,7 +294,10 @@ static void BindBoundary(UIView *page, UIView *anchor, UIView *peer, CGFloat bou
     ApplyLimits(state);
 }
 
-static void SaveDiagnostics(UIView *page, GCCState *state, NSArray<UIView *> *nodes) {
+// 0.4.10 D2: 诊断落盘只存在于开发构建。正式包不往 App 沙盒写页面树
+// （class/frame 属于内部结构信息，且会额外产生磁盘写入）。
+#if GCC_DEVICE_TEST
+{
     // No arbitrary label text, addresses, account details or network payloads are exported.
     static NSMutableDictionary *records;
     if (!records) records = [NSMutableDictionary dictionary];
@@ -305,6 +321,9 @@ static void SaveDiagnostics(UIView *page, GCCState *state, NSArray<UIView *> *no
     NSURL *documents = [NSFileManager.defaultManager URLsForDirectory:NSDocumentDirectory inDomains:NSUserDomainMask].firstObject;
     if (data && documents) [data writeToURL:[documents URLByAppendingPathComponent:@"GaodeClean-diagnostics.json"] options:NSDataWritingAtomic error:nil];
 }
+#else
+static void SaveDiagnostics(__unused UIView *page, __unused GCCState *state, __unused NSArray<UIView *> *nodes) {}
+#endif
 
 static void CleanPage(UIView *page) {
     NSString *path = PagePath(page);
@@ -382,7 +401,7 @@ static void CleanPage(UIView *page) {
                 NSData *data = [NSData dataWithContentsOfFile:[dir stringByAppendingPathComponent:@"GaodeClean-diagnostics.json"]];
                 NSDictionary *report = data ? [NSJSONSerialization JSONObjectWithData:data options:0 error:nil] : nil;
                 NSDictionary *mine = report[@"pages"][@"3"];
-                if ([@[@"0.3.0", @"0.3.1", @"0.3.6"] containsObject:report[@"version"] ?: @""] && [mine[@"matched"] boolValue]) {
+                if ([@[@"0.3.0", @"0.3.1"] containsObject:report[@"version"] ?: @""] && [mine[@"matched"] boolValue]) {
                     CGRect blank = CGRectFromString(mine[@"blankAreaFrame"] ?: @"");
                     if (blank.origin.y > 100) cached = @{@"width":@(blank.size.width), @"bottom":@(blank.origin.y)};
                 }
@@ -564,9 +583,17 @@ static void Capture(id element) {
 }
 
 // Install on a class's own method table, preserving inherited implementations.
+// 0.4.10: 原实现缺 nil 守卫 —— class_addMethod 失败且方法不存在时
+// class_getInstanceMethod 返回 NULL，method_setImplementation(NULL,...) 必崩。
 static void Replace(Class cls, SEL sel, IMP replacement, const char *types) {
-    if (!class_addMethod(cls, sel, replacement, types))
-        method_setImplementation(class_getInstanceMethod(cls, sel), replacement);
+    if (!cls || !sel || !replacement) return;
+    if (class_addMethod(cls, sel, replacement, types)) return;
+    Method m = class_getInstanceMethod(cls, sel);
+    if (!m) {
+        NSLog(@"[GaodeClean] skip missing %@", NSStringFromSelector(sel));
+        return;
+    }
+    method_setImplementation(m, replacement);
 }
 
 static void HookVoid(NSString *name, NSString *methodName, void (^after)(id)) {
@@ -650,6 +677,12 @@ static void InstallScrollHooks(void) {
 }
 
 static void HookHitTest(Class cls) {
+    // 0.4.10: 调用点在 Initialize() 里传 NSClassFromString(@"AJX3View")，
+    // 该类比名在 17.02.2 上可能不存在；原代码直接下探 class_getInstanceMethod(nil,...)。
+    if (!cls) {
+        NSLog(@"[GaodeClean] hitTest hook skipped: class nil");
+        return;
+    }
     SEL sel = @selector(hitTest:withEvent:);
     Method m = class_getInstanceMethod(cls, sel);
     if (!m) return;
@@ -682,14 +715,71 @@ static BOOL IsStreetRank(UIView *view) {
     return [ObjectGetter(view, @"getItemTag") isEqual:@"template_rank"] || [identity containsString:@"扫街榜"] || [lower containsString:@"saojie"] || [lower containsString:@"streetrank"];
 }
 
-// ============ 0.3.3 (A2): 三个圆钮 ============
-#define GC_DOT 52.0
-#define GC_GAP 8.0
-#define GC_BOTTOM_INSET 60.0
+// ===== 0.4.10 B5: 搜索钮点击转发 =====
+// 0.3.5 真机验证：17.00.2 的 WINQuickSearchBarV2 点击走 clickAction block，
+// 不是 target/action。内部视图被我们隐藏后原生手势也可能失效，所以自己兜一层。
+// UIGestureRecognizer 的 target/action 是私有属性，必须 KVC 取。
+static UIView *GCLiveSearchBar;
 
-static void GCHideBarPlatter(UIView *bar);
-static void GCShrinkSearchBar(UIView *bar);
-static BOOL GCDotDress(UIView *v, BOOL hideText);
+static void GCFireSearchClick(void) {
+    UIView *bar = GCLiveSearchBar;
+    if (!bar) return;
+    @try {
+        id blk = [bar valueForKey:@"clickAction"];
+        if (blk) { void (^cb)(void) = blk; cb(); return; }
+    } @catch (NSException *e) {}
+    SEL s = NSSelectorFromString(@"onTapBackgound:");
+    if ([bar respondsToSelector:s]) {
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+        [bar performSelector:s withObject:nil];
+#pragma clang diagnostic pop
+        return;
+    }
+    for (UIGestureRecognizer *g in bar.gestureRecognizers) {
+        if (![g isKindOfClass:[UITapGestureRecognizer class]] || !g.enabled) continue;
+        id tg = nil; SEL ac = NULL;
+        @try {
+            tg = [g valueForKey:@"target"];
+            ac = NSSelectorFromString([g valueForKey:@"action"] ?: @"");
+        } @catch (NSException *e) { tg = nil; }
+        if (tg && ac) {
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+            [tg performSelector:ac withObject:g];
+#pragma clang diagnostic pop
+            return;
+        }
+    }
+    NSLog(@"[GaodeClean] search dot tap: no action path found");
+}
+
+@interface GCTapRouter : NSObject
+- (void)gcTap:(UITapGestureRecognizer *)gr;
+@end
+static GCTapRouter *GCSharedRouter;
+@implementation GCTapRouter
+- (void)gcTap:(UITapGestureRecognizer *)gr {
+    if (gr.state != UIGestureRecognizerStateEnded) return;
+    GCFireSearchClick();
+}
+@end
+
+static void GCAttachSearchTap(UIView *bar) {
+    if (![bar isKindOfClass:UIView.class]) return;
+    GCLiveSearchBar = bar;
+    if (!GCSharedRouter) GCSharedRouter = [GCTapRouter new];
+    for (UIGestureRecognizer *g in bar.gestureRecognizers) {
+        if (![g isKindOfClass:[UITapGestureRecognizer class]]) continue;
+        id tg = nil;
+        @try { tg = [g valueForKey:@"target"]; } @catch (NSException *e) {}
+        if (tg == GCSharedRouter) return;
+    }
+    UITapGestureRecognizer *tr = [[UITapGestureRecognizer alloc] initWithTarget:GCSharedRouter
+                                                                       action:@selector(gcTap:)];
+    tr.cancelsTouchesInView = NO;
+    [bar addGestureRecognizer:tr];
+}
 
 static void LayoutMinimalHome(id handler) {
     if (LayingOutHome) return;
@@ -710,202 +800,102 @@ static void LayoutMinimalHome(id handler) {
     if ([mask isKindOfClass:UIView.class]) mask.hidden = YES;
     CALayer *bottomMask = ObjectGetter(handler, @"bottomMaskLayer");
     if ([bottomMask isKindOfClass:CALayer.class]) bottomMask.hidden = YES;
-    // 0.3.3 (A2): 搜索框不再是底栏上方的长条，改成三个圆钮中间那个。
-    // 用窗口坐标算中心，再转回 parent 坐标，避免父子层级不同导致错位
+
+    // ===== 0.4.10 B1: 搜索框不再是底栏上方的长条，而是三槽位中间那颗圆钮 =====
+    // 用窗口坐标算圆心，再转回 parent 坐标，避免父子层级不同导致错位。
+    // ★ 只写 bounds/center，绝不写 frame（transform 非单位阵时 frame 是合成值），
+    //   也绝不对 bar 写 transform（0.4.9 就是这样把 CALayer.position 算成 NaN 崩掉的）。
     UIWindow *win = parent.window;
     CGFloat screenH = win ? win.bounds.size.height : parent.bounds.size.height;
-    CGFloat dotCY = screenH - GC_BOTTOM_INSET - 30;
     CGFloat screenW = win ? win.bounds.size.width : parent.bounds.size.width;
-    CGPoint centerInParent = [parent convertPoint:CGPointMake(screenW / 2, dotCY) fromView:win];
+    if (!isfinite(screenH) || !isfinite(screenW) || screenH < 200 || screenW < 200) { LayingOutHome = NO; return; }
+    // ★ 圆心 y 一律从底栏自身的实际 frame 取，禁止用「屏高 - 常量」另算一套。
+    //   两套坐标系一旦有偏移，三颗钮就不在同一水平线（0.4.9 偏左+重叠的同类问题）。
+    CGRect tabInParent = [tabBar convertRect:tabBar.bounds toView:parent];
+    CGFloat dotCY = CGRectGetMidY(tabInParent);
+    if (!isfinite(dotCY) || dotCY <= 0) dotCY = screenH - GC_BOTTOM_INSET - GC_DOT / 2.0 - 4.0;
+    CGPoint centerInParent = CGPointMake(CGRectGetMidX(parent.bounds), dotCY);
+    if (!isfinite(centerInParent.x) || !isfinite(centerInParent.y)) { LayingOutHome = NO; return; }
     bar.bounds = CGRectMake(0, 0, GC_DOT, GC_DOT);
     bar.center = centerInParent;
-    GCShrinkSearchBar(bar);
+    objc_setAssociatedObject(bar, &SearchDotKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    GCDressSearchDot(bar);
+    GCAttachSearchTap(bar);
     bar.hidden = NO;
     [parent bringSubviewToFront:bar];
     LayingOutHome = NO;
 }
 
-// 目标布局（393pt 视口，与用户截图一致）：
-//   导航钮 中心 x=136.5   搜索钮 中心 x=196.5   我的钮 中心 x=256.5
-//   直径 52pt，中心 y = 屏高 - 60 - 30 = 屏高 - 90
-// 底栏底板（胶囊/阴影/描边）全部隐藏，三个钮浮在地图上。
-
-static BOOL GCDotDress(UIView *v, BOOL hideText) {
-    if (![v isKindOfClass:UIView.class]) return NO;
-    v.layer.cornerRadius = GC_DOT / 2.0;
-    v.layer.masksToBounds = YES;
-    v.backgroundColor = [UIColor colorWithWhite:0.97 alpha:1.0];
-    if (hideText) {
-        for (UIView *s1 in v.subviews) {
-            if ([s1 isKindOfClass:UILabel.class]) s1.hidden = YES;
-            for (UIView *s2 in s1.subviews)
-                if ([s2 isKindOfClass:UILabel.class]) s2.hidden = YES;
-        }
-    }
-    return YES;
-}
-
-// 隐藏底栏底板：胶囊 / 阴影 / 描边
-static void GCHideBarPlatter(UIView *bar) {
-    for (UIView *v in bar.subviews) {
-        if ([v isKindOfClass:[UIVisualEffectView class]]) { v.hidden = YES; continue; }
-        if ([v isKindOfClass:[UIImageView class]] && v.frame.size.height > 60) { v.hidden = YES; continue; }
-    }
-}
-
-// 把搜索框收成圆钮：只留放大镜（v2 —— 不缩放内部视图，只平移 + 裁剪）
-// 原生结构（p4 探针实测）：
-//   bar {0,9,393,54}
-//   ├ UIVisualEffectView {8,0,377,54}          胶囊（圆角27）
-//   │   └ _UIVisualEffectContentView
-//   │       └ UIImageView {0,0,377,54}          容器
-//   │           ├ UIImageView {16,15,24,24}     放大镜
-//   │           └ WINVerticalScrollText hid=1   滚动文字
-//   ├ LTMVUIEmojiView {341,11,32,32}            语音（隐藏）
-//   └ UIButton {293,3,48,48}                    相机（隐藏）
-// 做法：胶囊只平移 (-16,-1) → 盖满 52×52 圆；容器平移到放大镜居中；
-//       垫一层不透明白圆底防胶囊圆角透出；手势不动，缺原生 tap 时加兜底转发。
-static UIView *GCLiveSearchBar;
-
-// 直接触发 WINQuickSearchBarV2 的 clickAction block（17.00.2 实测：点击走 block，不是 target/action）
-static void GCFireSearchClick(void) {
-    UIView *bar = GCLiveSearchBar;
-    if (!bar) return;
-    // 1) block 属性 clickAction
-    @try {
-        id blk = [bar valueForKey:@"clickAction"];
-        if (blk) {
-            void (^cb)(void) = blk;
-            cb();
-            return;
-        }
-    } @catch (NSException *e) {}
-    // 2) 回退：onTapBackgound:（原生触摸回调）
-    SEL s = NSSelectorFromString(@"onTapBackgound:");
-    if ([bar respondsToSelector:s]) {
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Warc-performSelector-leaks"
-        [bar performSelector:s withObject:nil];
-#pragma clang diagnostic pop
-        return;
-    }
-    // 3) 再回退：手势 target/action
-    for (UIGestureRecognizer *g in bar.gestureRecognizers) {
-        if (![g isKindOfClass:[UITapGestureRecognizer class]] || !g.enabled) continue;
-        id tg = nil; SEL ac = NULL;
-        @try { tg = [g valueForKey:@"target"]; ac = NSSelectorFromString([g valueForKey:@"action"] ?: @""); }
-        @catch (NSException *e) { tg = nil; }
-        if (tg && ac) {
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Warc-performSelector-leaks"
-            [tg performSelector:ac withObject:g];
-#pragma clang diagnostic pop
-            return;
-        }
-    }
-}
-
-@interface GCTapRouter : NSObject
-- (void)gcTap:(UITapGestureRecognizer *)gr;
-+ (instancetype)shared;
-@end
-@implementation GCTapRouter
-+ (instancetype)shared {
-    static GCTapRouter *s;
-    if (!s) s = [GCTapRouter new];
-    return s;
-}
-- (void)gcTap:(UITapGestureRecognizer *)gr {
-    if (gr.state != UIGestureRecognizerStateEnded) return;
-    GCFireSearchClick();
-}
-@end
-static inline GCTapRouter *GCTapShared(void) { return [GCTapRouter shared]; }
-
-static void GCShrinkSearchBar(UIView *bar) {
+// ===== 0.4.10 B2: 搜索钮内部重绘 =====
+// 铁证（0.4.8 真机层级）：
+//   _ContentView {0,0,377,54}
+//     UIImageView {0,0,377,54}        ← 底图
+//       UIImageView {16,15,24,24}     ← 放大镜就挂在底图下面！
+// 因此「隐藏底图」会连带整棵子树消失（放大镜一起没了），
+// 「对底图做 transform 缩放」会把图形推出 52pt 圆外只剩月牙。
+// 唯一稳的做法：原生效层全部关掉，自己画一个放大镜。
+static void GCDressSearchDot(UIView *bar) {
     if (![bar isKindOfClass:UIView.class]) return;
     bar.layer.cornerRadius = GC_DOT / 2.0;
     bar.layer.masksToBounds = YES;
-    // 必须能收触摸，否则手势不触发
+    bar.backgroundColor = [UIColor colorWithWhite:0.97 alpha:1.0];
     bar.userInteractionEnabled = YES;
-    if (bar.hidden) bar.hidden = NO;
     if (bar.alpha < 0.99) bar.alpha = 1.0;
 
-    UIView *capsule = nil;
+    static char GlyphKey;
     for (UIView *v in bar.subviews) {
-        if ([v isKindOfClass:[UIButton class]]) { v.hidden = YES; continue; }
-        if ([NSStringFromClass(v.class) containsString:@"EmojiView"]) { v.hidden = YES; continue; }
-        if ([v isKindOfClass:[UIVisualEffectView class]]) capsule = v;
+        UIImageView *g = objc_getAssociatedObject(bar, &GlyphKey);
+        if (g && v == g) continue;
+        v.hidden = YES;      // 胶囊/底图/语音/相机/滚动文字 全关
     }
-    // 胶囊平移到盖满圆：原生 x=8 → -8（重复调用安全：x<0 就不再移）
-    if (capsule && capsule.frame.origin.x > 0) {
-        capsule.frame = CGRectOffset(capsule.frame, -16, -1);
+    UIImageView *glyph = objc_getAssociatedObject(bar, &GlyphKey);
+    UIImage *img = [UIImage systemImageNamed:@"magnifyingglass"];
+    if (!glyph || (img && glyph.image != img)) {
+        glyph = [[UIImageView alloc] initWithImage:img];
+        glyph.contentMode = UIViewContentModeScaleAspectFit;
+        glyph.userInteractionEnabled = NO;
+        glyph.tintColor = [UIColor colorWithWhite:0.13 alpha:1.0];
+        objc_setAssociatedObject(bar, &GlyphKey, glyph, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     }
-    // 容器平移使放大镜居中：放大镜原生在容器内 (16,15)+(12,12) 中心=(28,27)
-    // 目标：effectView.x(-8) + container.x + 28 = 26 → container.x = 6
-    if (capsule) {
-        for (UIView *c in capsule.subviews) {
-            for (UIView *g in c.subviews) {
-                if ([g isKindOfClass:[UIImageView class]] && g.frame.size.width > 300) {
-                    if (g.frame.origin.x < 300 && fabs(g.frame.origin.x) < 2) {
-                        CGRect f = g.frame; f.origin.x = 6; f.origin.y = 0; g.frame = f;
-                    }
-                }
-                if ([NSStringFromClass(g.class) containsString:@"VerticalScrollText"]) g.hidden = YES;
-            }
-        }
+    if (glyph.superview != bar) [bar addSubview:glyph];
+    // 按 GC_DOT 算，不用 bar.bounds —— App 会把 bar 的 bounds 改回 393x54
+    CGFloat side = GC_DOT;
+    CGFloat glyphSide = 26.0;
+    glyph.bounds = CGRectMake(0, 0, glyphSide, glyphSide);
+    glyph.center = CGPointMake(side / 2.0, side / 2.0);
+    glyph.hidden = NO;
+    glyph.alpha = 1.0;
+}
+
+// ===== 0.4.10 B3: 底栏平板隐藏 =====
+// 胶囊 / 阴影 / 描边 / 选中方形底衬 全部关掉，只留两颗圆钮浮在地图上。
+static void GCHideBarPlatter(UIView *bar) {
+    if (![bar isKindOfClass:UIView.class]) return;
+    for (UIView *v in bar.subviews) {
+        NSString *cn = NSStringFromClass(v.class);
+        if ([v isKindOfClass:[UIVisualEffectView class]]) { v.hidden = YES; continue; }
+        if ([cn containsString:@"Backdrop"]) { v.hidden = YES; continue; }
+        // 原生阴影/描边都是超大 UIImageView（399x108 / 355x64）
+        if ([v isKindOfClass:[UIImageView class]] && v.frame.size.height > 60) { v.hidden = YES; continue; }
+        // 选中方形底衬 84x54
+        if (fabs(v.frame.size.width - 84) < 2 && fabs(v.frame.size.height - 54) < 2) { v.hidden = YES; continue; }
     }
-    // 白圆底：把胶囊做成"纯白不透明"，不再靠叠加遮
-    UIView *back = nil;
-    for (UIView *v in bar.subviews)
-        if ([v.accessibilityIdentifier isEqualToString:@"GCSearchDotBack"]) back = v;
-    if (!back) {
-        back = [[UIView alloc] initWithFrame:CGRectMake(0, 0, GC_DOT, GC_DOT)];
-        back.accessibilityIdentifier = @"GCSearchDotBack";
-        back.layer.cornerRadius = GC_DOT / 2.0;
-        back.layer.masksToBounds = YES;
-        back.backgroundColor = [UIColor colorWithWhite:0.97 alpha:1.0];
-        back.userInteractionEnabled = NO;
-        [bar insertSubview:back atIndex:0];   // 最底层：只负责给圆外区域兜白
-    } else {
-        back.frame = CGRectMake(0, 0, GC_DOT, GC_DOT);
-    }
-    if (capsule) {
-        // 胶囊改成纯白不透明 + 圆形裁剪：这样它就"变成"白圆本身，
-        // 既没有半透明残影，也不会透出地图
-        capsule.backgroundColor = [UIColor colorWithWhite:0.97 alpha:1.0];
-        capsule.layer.cornerRadius = GC_DOT / 2.0;
-        capsule.layer.masksToBounds = YES;
-        // 关掉毛玻璃效果（UIVisualEffectView 的背景是半透明的，必须清掉）
-        if ([capsule isKindOfClass:[UIVisualEffectView class]]) {
-            UIView *fill = [[UIView alloc] initWithFrame:capsule.bounds];
-            fill.backgroundColor = [UIColor colorWithWhite:0.97 alpha:1.0];
-            fill.userInteractionEnabled = NO;
-            fill.accessibilityIdentifier = @"GCFill";
-            [((UIVisualEffectView *)capsule).contentView addSubview:fill];
-        }
-        // 隐藏会透色的子层（backdrop / effect subview），但保留 ContentView 里的放大镜
-        for (UIView *c in capsule.subviews) {
-            NSString *cn = NSStringFromClass(c.class);
-            if ([cn containsString:@"Backdrop"]) c.hidden = YES;
-            else if ([cn containsString:@"EffectSubview"] && ![cn containsString:@"ContentView"]) c.hidden = YES;
-        }
-    }
-    // 点击：加一个固定手势，命中就主动触发原生 clickAction block
-    // （原生手势可能因内部视图被平移而失效，不能依赖它）
-    GCLiveSearchBar = bar;
-    BOOL hasGCTap = NO;
-    for (UIGestureRecognizer *g in bar.gestureRecognizers) {
-        if (![g isKindOfClass:[UITapGestureRecognizer class]]) continue;
-        id tg = nil;
-        @try { tg = [g valueForKey:@"target"]; } @catch (NSException *e) {}
-        if (tg == GCTapShared()) { hasGCTap = YES; break; }
-    }
-    if (!hasGCTap) {
-        UITapGestureRecognizer *tr = [[UITapGestureRecognizer alloc] initWithTarget:GCTapShared()
-                                                                            action:@selector(gcTap:)];
-        tr.cancelsTouchesInView = NO;
-        [bar addGestureRecognizer:tr];
+}
+
+// 圆钮外观：52pt 正圆 + 纯白底 + 隐藏图标下方的文字
+static void GCDotDress(UIView *v, BOOL hideText) {
+    if (![v isKindOfClass:UIView.class]) return;
+    v.layer.cornerRadius = GC_DOT / 2.0;
+    v.layer.masksToBounds = YES;
+    CGFloat alpha = 0;
+    UIColor *bg = v.backgroundColor;
+    if (!bg || ![bg getRed:NULL green:NULL blue:NULL alpha:&alpha] || alpha < 0.99)
+        v.backgroundColor = [UIColor colorWithWhite:0.97 alpha:1.0];
+    if (!hideText) return;
+    for (UIView *s1 in v.subviews) {
+        if ([s1 isKindOfClass:UILabel.class]) s1.hidden = YES;
+        for (UIView *s2 in s1.subviews)
+            if ([s2 isKindOfClass:UILabel.class]) s2.hidden = YES;
     }
 }
 
@@ -916,59 +906,36 @@ static void CenterTabButtons(UIView *bar) {
     if (![items isKindOfClass:NSArray.class] || items.count != 2) return;
     adjusting = YES;
 
+    // ===== 0.4.10 B3: 先摘掉底栏平板（胶囊/阴影/描边/选中底衬） =====
     GCHideBarPlatter(bar);
 
-    // 底栏上浮：用窗口坐标系算，避免父视图不同导致错位
-    UIWindow *win = bar.window;
-    CGFloat screenH = win ? win.bounds.size.height : 852;
-    CGFloat barH = 60;
-    CGFloat barY = screenH - GC_BOTTOM_INSET - barH;
-    if (bar.superview) {
-        // 把窗口坐标的目标 y 转成 bar 父视图坐标
-        CGPoint targetInWin = CGPointMake(0, barY);
-        CGPoint targetInSuper = [bar.superview convertPoint:targetInWin fromView:win];
-        if (fabs(bar.frame.origin.y - targetInSuper.y) > 0.5) {
-            CGRect f = bar.frame;
-            f.origin.y = targetInSuper.y;
-            bar.frame = f;
-        }
-    }
-
-    // 三钮中心：屏宽 393 → 136.5 / 196.5 / 256.5
+    // 三槽位：槽0=导航 槽1=搜索(中间，由 LayoutMinimalHome 负责) 槽2=我的
+    // 393pt 视口 → 圆心 136.5 / 196.5 / 256.5，各差 GC_PITCH=60
     CGFloat W = bar.bounds.size.width;
-    CGFloat cx[3] = { W / 2 - 60, W / 2, W / 2 + 60 };
+    CGFloat midY = bar.bounds.size.height / 2.0;
+    CGFloat cx[3] = { W / 2.0 - GC_PITCH, W / 2.0, W / 2.0 + GC_PITCH };
 
-    // 两个 tab → 圆钮
-    for (NSUInteger i = 0; i < items.count; i++) {
-        UIView *item = items[i];
+    for (NSUInteger index = 0; index < items.count; index++) {
+        UIView *item = items[index];
         if (![item isKindOfClass:UIView.class] || !item.superview) continue;
+        // ★ 只写 bounds/center。写 frame 会在 App 内部重设 bounds 后产生非线性抖动
         item.bounds = CGRectMake(0, 0, GC_DOT, GC_DOT);
         GCDotDress(item, YES);
-        // 子项（选中/未选中两层）同步成圆
         for (UIView *sub in item.subviews) {
-            sub.frame = CGRectMake(0, 0, GC_DOT, GC_DOT);
+            sub.bounds = CGRectMake(0, 0, GC_DOT, GC_DOT);
             GCDotDress(sub, YES);
         }
-        CGFloat targetX = (i == 0) ? cx[0] : cx[2];
-        CGPoint c = [item.superview convertPoint:item.center toView:bar];
-        c.x = targetX;
-        c.y = barH / 2;
-        item.center = [bar convertPoint:c toView:item.superview];
-    }
-
-    // 选中底衬：跟着第一个钮走，或直接隐藏（圆钮不需要）
-    for (UIView *v in bar.subviews) {
-        if ([NSStringFromClass(v.class) isEqualToString:@"UIView"] &&
-            fabs(v.frame.size.width - 84) < 2 && fabs(v.frame.size.height - 54) < 2) {
-            v.hidden = YES;
-        }
+        CGPoint center = [item.superview convertPoint:item.center toView:bar];
+        center.x = cx[index == 0 ? 0 : 2];
+        center.y = midY;
+        if (!isfinite(center.x) || !isfinite(center.y)) continue;
+        item.center = [bar convertPoint:center toView:item.superview];
     }
 
     SEL sync = NSSelectorFromString(@"amap_syncLegacySelectionAnimated:");
     if ([bar respondsToSelector:sync]) ((void (*)(id, SEL, BOOL))objc_msgSend)(bar, sync, NO);
     adjusting = NO;
 }
-
 
 static void InstallMinimalHome(void) {
     HookVoid(@"WINTabBar", @"layoutSubviews", ^(UIView *bar) { CenterTabButtons(bar); });
@@ -1007,9 +974,21 @@ static void InstallMinimalHome(void) {
             ((void (*)(id, SEL, id, id, id, id, BOOL))original)(self, sel, @"", nil, nil, nil, NO);
         }), method_getTypeEncoding(method));
     }
-    HookVoid(@"WINQuickSearchBarV2", @"layoutSubviews", ^(id bar) {
+    // ===== 0.4.10 B4: 每次布局都把搜索框压回 52x52 =====
+    // 铁证（0.4.9 实测）：App 会把 WINQuickSearchBarV2 的 bounds 重置回 393x54，
+    // 只在 LayoutMinimalHome 里写一次会被覆盖，所以必须挂在 layoutSubviews 上补压。
+    // 用 setFrame: 钩子而不是 transform —— 两者绝不能同时写（0.4.9 NaN 崩溃根因）。
+    HookVoid(@"WINQuickSearchBarV2", @"layoutSubviews", ^(id obj) {
+        UIView *bar = (UIView *)obj;
         UIView *text = ObjectGetter(bar, @"verticalScrollText");
         if ([text isKindOfClass:UIView.class]) text.hidden = YES;
+        if (![bar isKindOfClass:UIView.class] || !bar.window) return;
+        // ★ 只处理首页那颗已被接管的圆钮。搜索页里的原生搜索框必须保持原样，
+        //   否则一进搜索页整条输入框会被隐藏（0.3.x 踩过）。
+        if (!objc_getAssociatedObject(bar, &SearchDotKey)) return;
+        if (fabs(bar.bounds.size.width - GC_DOT) > 0.5 || fabs(bar.bounds.size.height - GC_DOT) > 0.5)
+            bar.bounds = CGRectMake(0, 0, GC_DOT, GC_DOT);
+        GCDressSearchDot(bar);
     });
     HookVoid(@"WINAJXCombinedItemView", @"layoutSubviews", ^(id view) { if (IsStreetRank(view)) [view setHidden:YES]; });
     cls = NSClassFromString(@"WINAJXCombinedItemView");
@@ -1036,10 +1015,8 @@ static void InstallMinimalHome(void) {
 __attribute__((constructor)) static void Initialize(void) {
     @autoreleasepool {
         if (![NSBundle.mainBundle.bundleIdentifier isEqualToString:@"com.autonavi.amap"]) return;
-        // 0.3.2 (A1): 原版本硬闸门 isEqual:@"17.00.2" 已删除。
-        // 高德一旦不是该版本，原代码在这里 return，零钩子安装且不打日志，
-        // 用户只会看到「没效果」。现在改为全版本自适应：日志打印实际版本，
-        // 不适配的类/selector 由各 Hook 的 `if (!m) return;` 静默跳过。
+        // 0.4.10: 原硬闸门 isEqual:@"17.00.2" 已删除。17.02.2 及以后版本的类/selector
+        // 变化由各 Hook 内的 `if (!m) return;` 逐项跳过，不能整体零钩子安装。
         NSString *appVersion = [NSBundle.mainBundle objectForInfoDictionaryKey:@"CFBundleShortVersionString"] ?: @"unknown";
         NSLog(@"[GaodeClean] app version %@ - installing hooks (no version limit)", appVersion);
         Pages = [NSHashTable weakObjectsHashTable];
@@ -1088,6 +1065,6 @@ __attribute__((constructor)) static void Initialize(void) {
         dispatch_async(dispatch_get_main_queue(), ^{
             [NSTimer scheduledTimerWithTimeInterval:0.5 repeats:YES block:^(__unused NSTimer *timer) { Schedule(); }];
         });
-        NSLog(@"[GaodeClean] loaded 0.3.6 (no version limit; appVer=%@)", appVersion);
+        NSLog(@"[GaodeClean] loaded 0.4.10 (universal; appVer=%@)", appVersion);
     }
 }
