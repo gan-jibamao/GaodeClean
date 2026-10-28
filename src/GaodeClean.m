@@ -786,21 +786,31 @@ static void InstallScrollHooks(void) {
 //
 // v3 正确做法：把网关提到 WINTabBar 这一层。接到点后先判断
 //   「是否落在三个圆心的 52pt 圆内」，不在圆内就 return nil（穿透到地图）。
-static BOOL GCPointInAnyTabDot(UIView *bar, CGPoint point) {
-    if (![bar isKindOfClass:UIView.class]) return NO;
+// 命中槽位号：-1 = 不在任何圆内；0 = 左(首页)；1 = 中(搜索)；2 = 右(我的)
+//
+// 真机实测（2026-10-28 17:11 面板日志）定的两个数：
+//   ① 热区半径 52/2=26 太大 —— 用户"点首页钮左边"也落在圆内，
+//      所以缩到 GC_DOT_HIT 直径 30pt（半径 15），只认图标附近。
+//   ② 点中间搜索钮命中的是 WINTabBar（x=197.3 正好是中间槽），
+//      说明底栏盖在搜索钮上方。中间槽必须 return nil 让触摸穿到搜索钮，
+//      否则底栏会把它吃掉 —— 这就是"点搜索钮没任何反应"的原因。
+#define GC_DOT_HIT 30.0
+
+static NSInteger GCTabDotSlot(UIView *bar, CGPoint point) {
+    if (![bar isKindOfClass:UIView.class]) return -1;
     UIWindow *win = bar.window;
     CGFloat W = win ? win.bounds.size.width : bar.bounds.size.width;
     if (!isfinite(W) || W < 200) W = bar.bounds.size.width;
     CGFloat midY = bar.bounds.size.height / 2.0;
     CGFloat cx[3] = { W / 2.0 - GC_PITCH, W / 2.0, W / 2.0 + GC_PITCH };
-    CGFloat r = GC_DOT / 2.0 + 1.0;         // 1pt 容差，防亚像素抖动
+    CGFloat r = GC_DOT_HIT / 2.0 + 1.0;      // 1pt 容差，防亚像素抖动
     CGFloat r2 = r * r;
     for (int i = 0; i < 3; i++) {
         CGFloat dx = point.x - cx[i];
         CGFloat dy = point.y - midY;
-        if (isfinite(dx) && isfinite(dy) && dx * dx + dy * dy <= r2) return YES;
+        if (isfinite(dx) && isfinite(dy) && dx * dx + dy * dy <= r2) return i;
     }
-    return NO;
+    return -1;
 }
 
 static void InstallTabDotHitTest(void) {
@@ -816,11 +826,12 @@ static void InstallTabDotHitTest(void) {
                 if (!hit) return nil;
                 // 只拦「落在本底栏上」的命中；点到别处（比如外部控件）不干预
                 if (hit != self && ![hit isDescendantOfView:self]) return hit;
-                BOOL inDot = GCPointInAnyTabDot(self, point);
-                GCLog(@"[HIT] bar hit=(%.1f,%.1f) inDot=%d hit=%@ -> %@",
-                      point.x, point.y, inDot, NSStringFromClass(hit.class),
-                      inDot ? @"PASS" : @"nil(穿透)");
-                return inDot ? hit : nil;
+                NSInteger slot = GCTabDotSlot(self, point);
+                // ★ 中间槽(搜索)必须穿透：底栏盖在搜索钮上方，放行会被它吃掉
+                if (slot != 0 && slot != 2) return nil;
+                GCLog(@"[HIT] bar (%.1f,%.1f) slot=%ld hit=%@ -> PASS",
+                      point.x, point.y, (long)slot, NSStringFromClass(hit.class));
+                return hit;
             }), method_getTypeEncoding(m));
             GCLog(@"[INIT] WINTabBar 网关已装");
         }
@@ -846,11 +857,11 @@ static void InstallTabDotHitTest(void) {
         while (ancestor && ![NSStringFromClass(ancestor.class) isEqualToString:@"WINTabBar"]) ancestor = ancestor.superview;
         if (!ancestor) return hit;
         CGPoint p = [self convertPoint:point toView:ancestor];
-        BOOL inDot = GCPointInAnyTabDot(ancestor, p);
-        GCLog(@"[HIT] item %@ p=(%.1f,%.1f)->bar(%.1f,%.1f) inDot=%d %@",
-              NSStringFromClass(self.class), point.x, point.y, p.x, p.y, inDot,
-              inDot ? @"PASS" : @"nil");
-        return inDot ? hit : nil;
+        NSInteger slot = GCTabDotSlot(ancestor, p);
+        // 中间槽不属于任何 tab item；其余槽外一律穿透
+        if (slot != 0 && slot != 2) return nil;
+        GCLog(@"[HIT] item p=(%.1f,%.1f) slot=%ld -> PASS", p.x, p.y, (long)slot);
+        return hit;
     }), method_getTypeEncoding(m));
     GCLog(@"[INIT] WINTabBarItem 热区已装");
 }
@@ -1052,7 +1063,16 @@ static void LayoutMinimalHome(id handler) {
     GCDressSearchDot(bar);
     GCAttachSearchTap(bar);
     bar.hidden = NO;
+    // I3: 搜索钮必须在底栏之上。App 每次布局都会把 WINTabBar 重新置顶，
+    // 单次 bringSubviewToFront 不够 —— 由两处兜底：
+    //   ① 布局同帧 dispatch_async 再提一次（排在 App 的布局块后面执行）
+    //   ② 0.5s 定时器周期性提一次
+    // 实证（17:11 面板）：点中间钮命中的是 WINTabBar，说明 bar 被压在底栏下。
     [parent bringSubviewToFront:bar];
+    dispatch_async(dispatch_get_main_queue(), ^{
+        UIView *p = bar.superview;
+        if (p && bar.superview == p) [p bringSubviewToFront:bar];
+    });
     LayingOutHome = NO;
 }
 
@@ -1447,6 +1467,14 @@ __attribute__((constructor)) static void Initialize(void) {
         // Recheck after asynchronous cards and cell reuse; only attached target pages are scanned.
         dispatch_async(dispatch_get_main_queue(), ^{
             [NSTimer scheduledTimerWithTimeInterval:0.5 repeats:YES block:^(__unused NSTimer *timer) { Schedule(); }];
+            // I3: 搜索钮置顶保活（App 重布局会把它压回底栏下面）
+            [NSTimer scheduledTimerWithTimeInterval:0.5 repeats:YES block:^(__unused NSTimer *timer) {
+                UIView *bar = GCLiveSearchBar;
+                UIView *p = bar.superview;
+                if (!p || !p.window) return;
+                NSArray *subs = p.subviews;
+                if (subs.lastObject != bar) [p bringSubviewToFront:bar];
+            }];
 #ifdef GCC_DEVICE_TEST
             // HUD 会被 App 的重布局压到下面，1 秒拉回一次
             [NSTimer scheduledTimerWithTimeInterval:1.0 repeats:YES block:^(__unused NSTimer *timer) {
@@ -1455,6 +1483,6 @@ __attribute__((constructor)) static void Initialize(void) {
             }];
 #endif
         });
-        GCLog(@"[INIT] loaded 0.4.15 appVer=%@", appVersion);
+        GCLog(@"[INIT] loaded 0.4.16 appVer=%@", appVersion);
     }
 }
