@@ -1177,6 +1177,70 @@ static BOOL GCPinWidgetGeom(UIWindow *win, BOOL leftSide, CGFloat centerX, CGFlo
     return YES;
 }
 
+// ===== U1: WINAJXCombinedWidgetView 多实例取证 =====
+//
+// 01:43 真机：WINDeviceInterconnectWidget 实例数=1（安全），
+//             WINAJXCombinedWidgetView 实例数=3（危险 —— 0.4.27 批量 hidden
+//             导致地图整屏灰白，说明其中某个在渲染链上）。
+//
+// 要安全固定定位钮，必须先知道 3 个实例各自：位置、尺寸、子树规模、是否可见。
+// 只看不碰。
+#if GCC_DEVICE_TEST
+static void GCProbeCombinedWidgets(void) {
+    UIWindow *win = nil;
+    for (UIScene *sc in UIApplication.sharedApplication.connectedScenes) {
+        if (![sc isKindOfClass:UIWindowScene.class]) continue;
+        for (UIWindow *w in ((UIWindowScene *)sc).windows) {
+            if (w.isKeyWindow) { win = w; break; }
+        }
+        if (win) break;
+    }
+    if (!win) return;
+    NSArray<UIView *> *cands = GCFindWidgetsByClass(win, @"WINAJXCombinedWidgetView", 40);
+    GCLog(@"[COMB] 实例数=%lu", (unsigned long)cands.count);
+    int idx = 0;
+    for (UIView *v in cands) {
+        CGRect r = [v convertRect:v.bounds toView:win];
+        // 子树规模
+        NSMutableArray<UIView *> *st = [NSMutableArray arrayWithObject:v];
+        NSUInteger g = 0, total = 0, imgs = 0, labels = 0;
+        while (st.count && g++ < 500) {
+            UIView *x = st.lastObject;
+            [st removeLastObject];
+            total++;
+            if ([x isKindOfClass:[UIImageView class]]) imgs++;
+            if ([x isKindOfClass:[UILabel class]]) labels++;
+            for (UIView *sub in x.subviews) [st addObject:sub];
+        }
+        GCLog(@"[COMB] #%d %@ {%.0f,%.0f,%.0f,%.0f} hid=%d a=%.2f 子树=%lu 图%lu 文%lu super=%@",
+              idx++, NSStringFromClass([v class]), r.origin.x, r.origin.y,
+              r.size.width, r.size.height, v.hidden, v.alpha,
+              (unsigned long)total, (unsigned long)imgs, (unsigned long)labels,
+              NSStringFromClass([v.superview class]));
+        // 直接子视图清单（找 WINLocationView）
+        int subIdx = 0;
+        for (UIView *c in v.subviews) {
+            CGRect cr = [c convertRect:c.bounds toView:win];
+            GCLog(@"[COMB]    sub[%d] %@ {%.0f,%.0f,%.0f,%.0f} hid=%d",
+                  subIdx++, NSStringFromClass([c class]),
+                  cr.origin.x, cr.origin.y, cr.size.width, cr.size.height, c.hidden);
+        }
+        if (idx > 4) break;
+    }
+    // 同时报告 WINLocationView 的情况
+    NSArray<UIView *> *locs = GCFindWidgetsByClass(win, @"WINLocationView", 40);
+    GCLog(@"[COMB] WINLocationView 实例数=%lu", (unsigned long)locs.count);
+    for (UIView *v in locs) {
+        CGRect r = [v convertRect:v.bounds toView:win];
+        GCLog(@"[COMB]    LOC {%.0f,%.0f,%.0f,%.0f} hid=%d super=%@",
+              r.origin.x, r.origin.y, r.size.width, r.size.height, v.hidden,
+              NSStringFromClass([v.superview class]));
+    }
+}
+#else
+#define GCProbeCombinedWidgets() do { } while (0)
+#endif
+
 // ===== T1: 按几何特征找地图浮动控件（类名不可靠）=====
 //
 // 01:36 真机实证：[WIDGET] 扫到的是 AJXContainerView {34,727,63,48}
@@ -2564,6 +2628,9 @@ __attribute__((constructor)) static void Initialize(void) {
             // U1: 水印取证（15s，等地图完全就绪）
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(15.0 * NSEC_PER_SEC)),
                            dispatch_get_main_queue(), ^{ GCProbeLogoWatermark("startup15s"); });
+            // U1: 定位钮多实例取证（20s，等地图控件全部就位）
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(20.0 * NSEC_PER_SEC)),
+                           dispatch_get_main_queue(), ^{ GCProbeCombinedWidgets(); });
             // HUD 会被 App 的重布局压到下面，1 秒拉回一次
             [NSTimer scheduledTimerWithTimeInterval:1.0 repeats:YES block:^(__unused NSTimer *timer) {
                 [(GCHUDView *)[GCHUDView shared] refresh];
@@ -2571,6 +2638,6 @@ __attribute__((constructor)) static void Initialize(void) {
             }];
 #endif
         });
-        GCLog(@"[INIT] loaded 0.4.44 appVer=%@", appVersion);
+        GCLog(@"[INIT] loaded 0.4.45 appVer=%@", appVersion);
     }
 }
