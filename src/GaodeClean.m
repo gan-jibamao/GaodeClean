@@ -906,23 +906,62 @@ static void GCDotDressLayer(UIView *v, int depth) {
     if (![v isKindOfClass:UIView.class] || depth > 4) return;
     if ([v isKindOfClass:UILabel.class]) { v.hidden = YES; return; }
     if ([v isKindOfClass:[UIImageView class]]) {
-        // icon 位图：不透明、按 26pt 等比缩放居中，绝不留 84x54 原尺寸
+        // icon 位图：不透明、按 26pt 等比缩放，居中到「自己父视图」的中心。
+        //
+        // 0.4.11 真机实证（2026-10-28 16:32 截图）：图标整个跑到圆的右上角。
+        // 根因是我把 center 写成了 CGPointMake(GC_DOT/2, GC_DOT/2) = (26,26)，
+        // 但 center 是「直接父视图坐标系」——图标可能挂在 item > 选中层 > 容器
+        // 三层下面，每层都拿 (26,26) 当中心，误差逐层累积，最后偏出圆外。
+        // 正确做法：在父视图坐标系里取父视图 bounds 的中心，而不是猜一个常量。
         UIImageView *iv = (UIImageView *)v;
         iv.hidden = NO;
         iv.alpha = 1.0;
         iv.backgroundColor = UIColor.clearColor;
         iv.contentMode = UIViewContentModeScaleAspectFit;
         iv.bounds = CGRectMake(0, 0, GC_ICON_SIDE, GC_ICON_SIDE);
-        iv.center = CGPointMake(GC_DOT / 2.0, GC_DOT / 2.0);
+        UIView *sp = iv.superview;
+        if (sp) {
+            CGRect pb = sp.bounds;
+            if (isfinite(pb.size.width) && isfinite(pb.size.height) &&
+                pb.size.width > 1 && pb.size.height > 1) {
+                iv.center = CGPointMake(CGRectGetMidX(pb), CGRectGetMidY(pb));
+            }
+        }
+        if (!isfinite(iv.center.x) || !isfinite(iv.center.y))
+            iv.center = CGPointMake(GC_DOT / 2.0, GC_DOT / 2.0);
         iv.layer.cornerRadius = 0;
         iv.layer.masksToBounds = NO;
         return;
     }
-    // 普通容器：清掉自己的底色（否则会在圆里留一块矩形），并裁成同心圆
+    // 普通容器：清掉自己的底色（否则会在圆里留一块矩形），
+    // 并把自己「摆到父容器正中、尺寸与父一致」。
+    // icon 的 center 是相对它算的，它一旦是 84x54 或偏离父中心，
+    // icon 就永远对不齐圆心（真机实测：图标整体跑到圆右上角）。
     CGFloat a = 0;
     UIColor *bg = v.backgroundColor;
     if (bg && [bg getRed:NULL green:NULL blue:NULL alpha:&a] && a > 0.02) v.backgroundColor = UIColor.clearColor;
     v.layer.masksToBounds = NO;
+    UIView *superview = v.superview;
+    CGSize target = CGSizeMake(GC_DOT, GC_DOT);
+    CGPoint center = CGPointMake(GC_DOT / 2.0, GC_DOT / 2.0);
+    if (superview) {
+        CGSize sb = superview.bounds.size;
+        if (isfinite(sb.width) && isfinite(sb.height) && sb.width > 1 && sb.height > 1) {
+            target = sb;
+            center = CGPointMake(CGRectGetMidX(superview.bounds), CGRectGetMidY(superview.bounds));
+        }
+    }
+    if (isfinite(target.width) && isfinite(target.height) &&
+        fabs(v.bounds.size.width - target.width) > 0.5) {
+        v.bounds = CGRectMake(0, 0, target.width, target.height);
+    }
+    // bounds.origin 非 0 时（原生容器偶发如此），center 要按 bounds 中点算，
+    // 否则父坐标系里实际位置会再偏一个 origin。
+    CGRect vb = v.bounds;
+    CGPoint want = center;
+    if (isfinite(vb.origin.x) && isfinite(vb.origin.y))
+        want = CGPointMake(center.x - vb.origin.x, center.y - vb.origin.y);
+    if (isfinite(want.x) && isfinite(want.y)) v.center = want;
     for (UIView *sub in v.subviews) GCDotDressLayer(sub, depth + 1);
 }
 
@@ -991,15 +1030,11 @@ static void CenterTabButtons(UIView *bar) {
     for (NSUInteger index = 0; index < items.count; index++) {
         UIView *item = items[index];
         if (![item isKindOfClass:UIView.class] || !item.superview) continue;
-        // ★ 只写 bounds/center。写 frame 会在 App 内部重设 bounds 后产生非线性抖动。
-        //   注意：外层 item 与内层状态容器都压成 52，icon 图片由 GCDotDressLayer
-        //   单独压到 26pt —— 三者尺寸必须由内向外收敛，不能只压外层（0.4.10 的错）。
+        // ★ 只写外层 item 的 bounds/center。写 frame 会在 App 内部重设 bounds 后
+        //   产生非线性抖动。内层容器的尺寸交给 GCDotDressLayer 处理
+        //   （它会让内层「填满父容器」），这里再压一层会把 icon 顶出圆心。
         item.bounds = CGRectMake(0, 0, GC_DOT, GC_DOT);
         GCDotDress(item, YES);
-        for (UIView *sub in item.subviews) {
-            sub.bounds = CGRectMake(0, 0, GC_DOT, GC_DOT);
-            GCDotDress(sub, YES);
-        }
         CGPoint center = [item.superview convertPoint:item.center toView:bar];
         center.x = cx[index == 0 ? 0 : 2];
         center.y = midY;
@@ -1140,6 +1175,6 @@ __attribute__((constructor)) static void Initialize(void) {
         dispatch_async(dispatch_get_main_queue(), ^{
             [NSTimer scheduledTimerWithTimeInterval:0.5 repeats:YES block:^(__unused NSTimer *timer) { Schedule(); }];
         });
-        NSLog(@"[GaodeClean] loaded 0.4.11 (universal; appVer=%@)", appVersion);
+        NSLog(@"[GaodeClean] loaded 0.4.12 (universal; appVer=%@)", appVersion);
     }
 }
