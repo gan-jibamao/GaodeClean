@@ -998,88 +998,50 @@ static void GCPinTick(void) {
 // 找不到时打一条日志（节流），下轮日志能区分「没实例」vs「没找到」。
 static void GCPinLogoWidget(UIWindow *win) {
     if (!win) return;
-    // 0.4.36: 一次性全量 dump 左下角所有视图（不设过滤），彻底查清水印真身。
-    {
-        static int dumpCount;
-        if (dumpCount < 3) {
-            dumpCount++;
-            GCLog(@"[LOGO] === 左下角全量 dump #%d ===", dumpCount);
-            NSMutableArray<UIView *> *st0 = [NSMutableArray arrayWithObject:win];
-            NSUInteger g0 = 0;
-            int shown = 0;
-            while (st0.count && g0++ < 3000 && shown < 30) {
-                UIView *v = st0.lastObject;
-                [st0 removeLastObject];
-                for (UIView *sub in v.subviews) [st0 addObject:sub];
-                if (v == win) continue;
-                CGRect r = [v convertRect:v.bounds toView:win];
-                if (!isfinite(r.size.width) || !isfinite(r.size.height)) continue;
-                if (r.origin.y < win.bounds.size.height * 0.85) continue;
-                if (r.size.width < 40) continue;
-                GCLog(@"[LOGO]   %@ {%.0f,%.0f,%.0f,%.0f} hid=%d a=%.2f",
-                      NSStringFromClass([v class]), r.origin.x, r.origin.y,
-                      r.size.width, r.size.height, v.hidden, v.alpha);
-                shown++;
-            }
-            GCLog(@"[LOGO] === dump 结束，共 %d ===", shown);
-        }
-    }
-    // 22:33 实测：水印整体（logo+文字）129x17 @ (16~144, 790~806)，
-    // 类名跨会话不稳定（21:50 命中 WINScaleLineLogoMapWidget，22:03 缺席）。
-    // 改纯几何特征：左下角横条 宽100~160 高12~24 可见。
-    // 排除：我们自己的控件（在窗口层）；挂在窗口层的都会被排除。
+    // 00:34 真机铁证（两次会话一致）：
+    //   UIImageView {10,792,76,16} c=(48,800)
+    //     < WINScaleLineLogoMapWidget < MapWidgetContainerView < NMMoveContentView
+    //   旁边还有 NMStrokeLabel {96,788,80,15}（比例尺文字）< NMScaleLineView
+    //     < WINScaleLineLogoMapWidget
+    //
+    // 0.4.34/0.4.36 为什么一直 miss：我用「宽 100~165」过滤视图树，
+    // 但 129pt 是「logo+比例尺」的视觉合成宽度，视图树里没有这个尺寸的单个视图
+    //（UIImageView 只有 76pt 宽，父容器可能 bounds 为 0）。过滤条件本身就是错的。
+    //
+    // 0.4.37：直接用类名找 WINScaleLineLogoMapWidget（两次会话都稳定命中）。
+    //   找到父容器 → 搬它（含比例尺，视觉完整）
+    //   父容器尺寸异常 → 退而搬那个 76x16 的 UIImageView（可见真身）
+    NSArray<UIView *> *cands = GCFindWidgetsByClass(win, @"WINScaleLineLogoMapWidget", 40);
     UIView *target = nil;
-    NSMutableArray<UIView *> *stack = [NSMutableArray arrayWithObject:win];
-    NSUInteger guard = 0;
-    CGFloat W = win.bounds.size.width, H = win.bounds.size.height;
-    while (stack.count && guard++ < 3000) {
-        UIView *v = stack.lastObject;
-        [stack removeLastObject];
-        for (UIView *sub in v.subviews) [stack addObject:sub];
-        if (v == win || v.hidden || v.alpha < 0.05) continue;
-        if (v.superview == win) continue;          // 窗口层的都是我们自己搬的
-        CGRect r = [v convertRect:v.bounds toView:win];
-        if (!isfinite(r.size.width) || !isfinite(r.size.height)) continue;
-        CGFloat w = r.size.width, h = r.size.height;
-        if (w < 100 || w > 165 || h < 12 || h > 24) continue;
-        CGFloat cx = CGRectGetMidX(r), cy = CGRectGetMidY(r);
-        if (cx > W * 0.42 || cy < H * 0.88) continue;   // 左下角
-        // 几何初筛命中 —— 必须内容终审（0.4.34 误抓 AJX 浮条教训：
-        // 「宽100~165高12~24左下角」太宽泛，AJX 页面元素也命中）。
-        // 水印真身特征：内含高德蓝标（深蓝 B>150 且 B-R>60 的像素团）。
-        // 用 layer 快照判断太重；直接扫它的子树有没有深蓝像素——
-        // 用 bounds 尺寸 + 两级子视图的 backgroundColor/image 特征近似：
-        // 水印是 UIImageView（内容图）或含 UIImageView 的容器，
-        // 而 AJX 容器全是 AJX 前缀类名。这里用类名排除 AJX：
-        NSString *cn = NSStringFromClass([v class]);
-        if ([cn hasPrefix:@"AJX"]) continue;          // AJX 元素不是水印
-        // 水印必有位图：子树内必须有 UIImageView（限定 3 层防走飞）
-        BOOL hasImage = NO;
-        NSMutableArray<UIView *> *st2 = [NSMutableArray arrayWithObject:v];
-        NSUInteger g2 = 0;
-        while (st2.count && g2++ < 60) {
-            UIView *x = st2.lastObject;
-            [st2 removeLastObject];
-            if ([x isKindOfClass:[UIImageView class]]) { hasImage = YES; break; }
-            for (UIView *sub in x.subviews) [st2 addObject:sub];
-        }
-        if (!hasImage) continue;
-        target = v;
-        break;
+    for (UIView *c in cands) {
+        if (c.hidden || c.alpha < 0.05) continue;
+        CGSize sz = c.bounds.size;
+        if (isfinite(sz.width) && sz.width > 40 && sz.height > 8) { target = c; break; }
     }
-    // 0.4.36: 日志不再节流 —— 面板只有16条，节流一次后就被刷掉了，
-    // 导致完全无法判断「没找到」还是「没跑」。水印只有一个，不会刷屏。
+    if (!target) {
+        // 退路：父类是 WINScaleLineLogoMapWidget 的第一个可见 UIImageView
+        for (UIView *c in cands) {
+            for (UIView *sub in c.subviews) {
+                if (![sub isKindOfClass:[UIImageView class]]) continue;
+                if (sub.hidden || sub.alpha < 0.05) continue;
+                target = sub;
+                break;
+            }
+            if (target) break;
+        }
+    }
     static int missCount;
     if (!target) {
-        if (missCount++ % 40 == 0)   // 30fps 下每 40 帧报一次 ≈ 1.3 秒
-            GCLog(@"[LOGO] 未找到水印（miss=%d）", missCount);
+        if (missCount++ % 40 == 0)
+            GCLog(@"[LOGO] 未找到水印（miss=%d, cands=%lu）", missCount, (unsigned long)cands.count);
         return;
     }
     {
         static __weak UIView *lastLogged;
         if (lastLogged != target) {
             lastLogged = target;
-            GCLog(@"[LOGO] 找到水印 class=%@ frame=%@", NSStringFromClass([target class]),
+            GCLog(@"[LOGO] 找到水印 class=%@ frame=%@",
+                  NSStringFromClass([target class]),
                   NSStringFromCGRect([target convertRect:target.bounds toView:win]));
         }
     }
@@ -1088,7 +1050,7 @@ static void GCPinLogoWidget(UIWindow *win) {
         [target removeFromSuperview];
         [win addSubview:target];
         target.frame = inWin;
-        GCLog(@"[LOGO] 水印已搬到窗口层 class=%@", NSStringFromClass([target class]));
+        GCLog(@"[LOGO] 水印已搬到窗口层");
     }
     CGPoint want = CGPointMake(GC_LOGO_X, GC_LOGO_Y);
     if (fabs(target.center.x - want.x) > 0.5 || fabs(target.center.y - want.y) > 0.5)
@@ -2408,6 +2370,6 @@ __attribute__((constructor)) static void Initialize(void) {
             }];
 #endif
         });
-        GCLog(@"[INIT] loaded 0.4.36 appVer=%@", appVersion);
+        GCLog(@"[INIT] loaded 0.4.37 appVer=%@", appVersion);
     }
 }
