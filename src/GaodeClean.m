@@ -1019,7 +1019,26 @@ static void GCPinLogoWidget(UIWindow *win) {
         if (w < 100 || w > 165 || h < 12 || h > 24) continue;
         CGFloat cx = CGRectGetMidX(r), cy = CGRectGetMidY(r);
         if (cx > W * 0.42 || cy < H * 0.88) continue;   // 左下角
-        // 窗口坐标里的水印特征命中
+        // 几何初筛命中 —— 必须内容终审（0.4.34 误抓 AJX 浮条教训：
+        // 「宽100~165高12~24左下角」太宽泛，AJX 页面元素也命中）。
+        // 水印真身特征：内含高德蓝标（深蓝 B>150 且 B-R>60 的像素团）。
+        // 用 layer 快照判断太重；直接扫它的子树有没有深蓝像素——
+        // 用 bounds 尺寸 + 两级子视图的 backgroundColor/image 特征近似：
+        // 水印是 UIImageView（内容图）或含 UIImageView 的容器，
+        // 而 AJX 容器全是 AJX 前缀类名。这里用类名排除 AJX：
+        NSString *cn = NSStringFromClass([v class]);
+        if ([cn hasPrefix:@"AJX"]) continue;          // AJX 元素不是水印
+        // 水印必有位图：子树内必须有 UIImageView（限定 3 层防走飞）
+        BOOL hasImage = NO;
+        NSMutableArray<UIView *> *st2 = [NSMutableArray arrayWithObject:v];
+        NSUInteger g2 = 0;
+        while (st2.count && g2++ < 60) {
+            UIView *x = st2.lastObject;
+            [st2 removeLastObject];
+            if ([x isKindOfClass:[UIImageView class]]) { hasImage = YES; break; }
+            for (UIView *sub in x.subviews) [st2 addObject:sub];
+        }
+        if (!hasImage) continue;
         target = v;
         break;
     }
@@ -2356,6 +2375,6 @@ __attribute__((constructor)) static void Initialize(void) {
             }];
 #endif
         });
-        GCLog(@"[INIT] loaded 0.4.34 appVer=%@", appVersion);
+        GCLog(@"[INIT] loaded 0.4.35 appVer=%@", appVersion);
     }
 }
