@@ -958,6 +958,12 @@ static void GCKillWhiteOverlay(UIView *bar) {
 // 每 100ms 校验一次 —— 地图容器若把它收回去（重新 addSubview），再搬出来。
 #define GC_WIDGET_LEFT_Y  700.0    // 左下车机钮固定 center.y
 #define GC_WIDGET_RIGHT_Y 700.0    // 右下定位钮固定 center.y
+// 21:50 取证：[LOGO] UIImageView {10,792,76,16} c=(48,800)
+//            < WINScaleLineLogoMapWidget < MapWidgetContainerView < NMMoveContentView
+// 水印（高德 logo + 比例尺）同样挂在地图容器下，随地图飘。
+// 固定到车机钮下方：车机钮 y=700，水印 y=745（间距 45，不重叠）
+#define GC_LOGO_Y         745.0
+#define GC_LOGO_X         48.0
 
 // 21:05 真机实证：App 进入某浏览态时连窗口层实例的 center.y 都直接改
 //（车机钮被改到 (32,364)、定位钮 (368,396)），100ms 校验盖不过动画。
@@ -980,6 +986,8 @@ static void GCPinTick(void) {
     if (!isfinite(W) || W < 200) return;
     GCPinWidget(win, @"WINDeviceInterconnectWidget", 37.0, GC_WIDGET_LEFT_Y, "tick");
     GCPinWidget(win, @"WINAJXCombinedWidgetView", W - 34.5, GC_WIDGET_RIGHT_Y, "tick");
+    // 高德水印（logo + 比例尺）钉到车机钮下方
+    GCPinWidget(win, @"WINScaleLineLogoMapWidget", GC_LOGO_X, GC_LOGO_Y, "tick");
 }
 
 // 按类名在整棵窗口树里找【全部实例】（限深度，防异常树）。
@@ -1070,6 +1078,8 @@ static void GCPinMapWidgets(void) {
     GCPinWidget(win, @"WINDeviceInterconnectWidget", 37.0, GC_WIDGET_LEFT_Y, "车机钮");
     // 右下：定位+路线组合胶囊（整颗搬，保持两者相对位置）
     GCPinWidget(win, @"WINAJXCombinedWidgetView", W - 34.5, GC_WIDGET_RIGHT_Y, "定位钮");
+    // 高德水印（logo + 比例尺）
+    GCPinWidget(win, @"WINScaleLineLogoMapWidget", GC_LOGO_X, GC_LOGO_Y, "水印");
 
     // 60fps 强锁通道（首次调用时启动）
     static dispatch_once_t onceToken;
@@ -2293,6 +2303,6 @@ __attribute__((constructor)) static void Initialize(void) {
             }];
 #endif
         });
-        GCLog(@"[INIT] loaded 0.4.31 appVer=%@", appVersion);
+        GCLog(@"[INIT] loaded 0.4.32 appVer=%@", appVersion);
     }
 }
