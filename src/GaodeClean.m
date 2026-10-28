@@ -998,7 +998,32 @@ static void GCPinTick(void) {
 // 找不到时打一条日志（节流），下轮日志能区分「没实例」vs「没找到」。
 static void GCPinLogoWidget(UIWindow *win) {
     if (!win) return;
-    static BOOL loggedMissing;
+    // 0.4.36: 一次性全量 dump 左下角所有视图（不设过滤），彻底查清水印真身。
+    {
+        static int dumpCount;
+        if (dumpCount < 3) {
+            dumpCount++;
+            GCLog(@"[LOGO] === 左下角全量 dump #%d ===", dumpCount);
+            NSMutableArray<UIView *> *st0 = [NSMutableArray arrayWithObject:win];
+            NSUInteger g0 = 0;
+            int shown = 0;
+            while (st0.count && g0++ < 3000 && shown < 30) {
+                UIView *v = st0.lastObject;
+                [st0 removeLastObject];
+                for (UIView *sub in v.subviews) [st0 addObject:sub];
+                if (v == win) continue;
+                CGRect r = [v convertRect:v.bounds toView:win];
+                if (!isfinite(r.size.width) || !isfinite(r.size.height)) continue;
+                if (r.origin.y < win.bounds.size.height * 0.85) continue;
+                if (r.size.width < 40) continue;
+                GCLog(@"[LOGO]   %@ {%.0f,%.0f,%.0f,%.0f} hid=%d a=%.2f",
+                      NSStringFromClass([v class]), r.origin.x, r.origin.y,
+                      r.size.width, r.size.height, v.hidden, v.alpha);
+                shown++;
+            }
+            GCLog(@"[LOGO] === dump 结束，共 %d ===", shown);
+        }
+    }
     // 22:33 实测：水印整体（logo+文字）129x17 @ (16~144, 790~806)，
     // 类名跨会话不稳定（21:50 命中 WINScaleLineLogoMapWidget，22:03 缺席）。
     // 改纯几何特征：左下角横条 宽100~160 高12~24 可见。
@@ -1042,14 +1067,22 @@ static void GCPinLogoWidget(UIWindow *win) {
         target = v;
         break;
     }
+    // 0.4.36: 日志不再节流 —— 面板只有16条，节流一次后就被刷掉了，
+    // 导致完全无法判断「没找到」还是「没跑」。水印只有一个，不会刷屏。
+    static int missCount;
     if (!target) {
-        if (!loggedMissing) {
-            loggedMissing = YES;
-            GCLog(@"[LOGO] 未找到水印（可能被 App 隐藏或比例尺模式变化）");
-        }
+        if (missCount++ % 40 == 0)   // 30fps 下每 40 帧报一次 ≈ 1.3 秒
+            GCLog(@"[LOGO] 未找到水印（miss=%d）", missCount);
         return;
     }
-    loggedMissing = NO;
+    {
+        static __weak UIView *lastLogged;
+        if (lastLogged != target) {
+            lastLogged = target;
+            GCLog(@"[LOGO] 找到水印 class=%@ frame=%@", NSStringFromClass([target class]),
+                  NSStringFromCGRect([target convertRect:target.bounds toView:win]));
+        }
+    }
     if (target.superview != win) {
         CGRect inWin = [target convertRect:target.bounds toView:win];
         [target removeFromSuperview];
@@ -2375,6 +2408,6 @@ __attribute__((constructor)) static void Initialize(void) {
             }];
 #endif
         });
-        GCLog(@"[INIT] loaded 0.4.35 appVer=%@", appVersion);
+        GCLog(@"[INIT] loaded 0.4.36 appVer=%@", appVersion);
     }
 }
