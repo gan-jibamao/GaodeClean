@@ -1052,9 +1052,20 @@ static void GCPinLogoWidget(UIWindow *win) {
         target.frame = inWin;
         GCLog(@"[LOGO] 水印已搬到窗口层");
     }
-    CGPoint want = CGPointMake(GC_LOGO_X, GC_LOGO_Y);
-    if (fabs(target.center.x - want.x) > 0.5 || fabs(target.center.y - want.y) > 0.5)
+    // 0.4.38: 水平位置必须按「容器左边缘贴边距」算，不能用固定中心 x。
+    // 00:39 实证：容器实际宽 ~140（logo 76 + 间距 + 比例尺 60），
+    // 我把中心设成 48 → 左边缘落到 -22，logo 被推出屏幕只剩"...地图"两字。
+    // 正确：centerX = 左边距 + 容器宽/2
+    CGFloat cw = target.bounds.size.width;
+    if (!isfinite(cw) || cw < 20) cw = 140;             // 兜底
+    CGFloat wantX = 10.0 + cw / 2.0;                    // 左边距 10pt
+    CGPoint want = CGPointMake(wantX, GC_LOGO_Y);
+    if (fabs(target.center.x - want.x) > 0.5 || fabs(target.center.y - want.y) > 0.5) {
         target.center = want;
+        static int logCount;
+        if (logCount++ < 3)
+            GCLog(@"[LOGO] 定位到 (%.1f,%.1f) 容器宽%.0f", want.x, want.y, cw);
+    }
 }
 
 // 按类名在整棵窗口树里找【全部实例】（限深度，防异常树）。
@@ -2370,6 +2381,6 @@ __attribute__((constructor)) static void Initialize(void) {
             }];
 #endif
         });
-        GCLog(@"[INIT] loaded 0.4.37 appVer=%@", appVersion);
+        GCLog(@"[INIT] loaded 0.4.38 appVer=%@", appVersion);
     }
 }
