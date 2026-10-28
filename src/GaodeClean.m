@@ -223,10 +223,13 @@ static NSString *PagePath(UIView *page) {
 static NSInteger PageKind(NSString *path) {
     // Exact page allowlist: other pages in these bundles remain untouched.
     NSString *p = [[path componentsSeparatedByString:@"?"] firstObject];
-    if ([p hasSuffix:@"/amap_bundle_quickservice/src/pages/QuickServiceRedesign.page.js"]) return 1;
-    if ([p hasSuffix:@"/amap_bundle_nearby/src/pages/BizNearbyIndex.page.js"]) return 2;
-    if ([p hasSuffix:@"/amap_bundle_globalvoice/src/llm/ExplorePage/ExplorePage.page.js"]) return 2;
-    if ([p hasSuffix:@"/amap_bundle_mine/src/pages/MinePage.page.js"]) return 3;
+    if ([p containsString:@"QuickServiceRedesign"]) return 1;
+    if ([p containsString:@"BizNearbyIndex"]) return 2;
+    if ([p containsString:@"ExplorePage"]) return 2;
+    // P2: 17.02.2 可能改了 bundle 目录/文件名，hasSuffix 精确匹配会静默失配
+    //（Kind()==0 → Capture 直接 return，整页零裁剪且无日志）。
+    // 放宽成「包含 MinePage」，仍只认我的页，不会误伤其它页面。
+    if ([p containsString:@"MinePage"]) return 3;
     return 0;
 }
 
@@ -487,17 +490,45 @@ static void CleanPage(UIView *page) {
     UIView *anchor = nil, *peer = nil;
     CGFloat boundary = 0;
     if (kind == 3) {
+        // P3: 高度上限 200→320（17.02.2 卡片可能变高），并加两级兜底：
+        //   ① 原判据：宽≥75%页、高 70~320 的祖先卡片
+        //   ② 兜底：往上最多 6 层，取第一个「宽度接近整页」的祖先，用它底边
+        // 两轮都失败才放弃（日志会报 [MINE] anchor=未命中）。
+        UIView *footNode = nil;
         for (UIView *node in nodes) {
-            if (!Visible(node) || ![NodeText(node) containsString:@"足迹"] || node.bounds.size.height > 80) continue;
-            for (UIView *card = node.superview; card && card != page; card = card.superview) {
+            if (!Visible(node)) continue;
+            if (![NodeText(node) containsString:@"足迹"]) continue;
+            if (node.bounds.size.height > 120) continue;
+            footNode = node;
+            int depth = 0;
+            for (UIView *card = node.superview; card && card != page && depth < 8; card = card.superview, depth++) {
                 CGRect rect = [card convertRect:card.bounds toView:page];
-                if (rect.size.width >= page.bounds.size.width * 0.75 && rect.size.height >= 70 && rect.size.height <= 200) {
+                if (rect.size.width >= page.bounds.size.width * 0.75 &&
+                    rect.size.height >= 60 && rect.size.height <= 320) {
                     anchor = peer = node;
                     boundary = CGRectGetMaxY(rect) + 8;
                     break;
                 }
             }
             if (anchor) break;
+            // ② 兜底：足迹节点上方 6 层内第一个接近整页宽的祖先
+            depth = 0;
+            for (UIView *card = node.superview; card && card != page && depth < 6; card = card.superview, depth++) {
+                CGRect rect = [card convertRect:card.bounds toView:page];
+                if (rect.size.width >= page.bounds.size.width * 0.9 && rect.size.height > 40) {
+                    anchor = peer = node;
+                    boundary = CGRectGetMaxY(rect) + 8;
+                    break;
+                }
+            }
+            if (anchor) break;
+        }
+        if (!anchor && footNode) {
+            // ③ 最后兜底：用足迹节点自身底边 + 28（历史 0.3.0 的经验值）
+            CGRect nr = [footNode convertRect:footNode.bounds toView:page];
+            anchor = peer = footNode;
+            boundary = CGRectGetMaxY(nr) + 28;
+            GCLog(@"[MINE] 用足迹节点自身兜底 boundary=%.1f", boundary);
         }
     }
     // Two separate labels on the same row must agree; avoid matching recommendation copy.
@@ -545,7 +576,8 @@ static void CleanPage(UIView *page) {
         // A recycled/offscreen anchor does not mean that the recommendation boundary vanished.
         ApplyLimits(state);
         if (!state.reportedMiss) {
-            NSLog(@"[GaodeClean] page=%ld anchor=pending", (long)kind);
+            GCLog(@"[MINE] kind=%ld anchor=未命中 attempts=%lu（本页内容不会被裁剪）",
+                  (long)kind, (unsigned long)state.attempts);
             state.reportedMiss = YES;
         }
         if (state.attempts == 10) SaveDiagnostics(page, state, nodes);
@@ -563,6 +595,9 @@ static void CleanPage(UIView *page) {
                 r.origin.y >= rowBottom && r.origin.y <= boundary) boundary = r.origin.y;
         }
     }
+    if (kind == 3 && !(boundary > 100 && boundary < page.bounds.size.height)) {
+        GCLog(@"[MINE] kind=3 boundary 越界 %.1f (pageH=%.0f)，跳过缓存", boundary, page.bounds.size.height);
+    }
     if (kind == 3 && boundary > 100 && boundary < page.bounds.size.height) {
         NSDictionary *cached = [NSUserDefaults.standardUserDefaults dictionaryForKey:@"GaodeClean.MineBoundary.17.00.2"];
         if (fabs([cached[@"bottom"] doubleValue] - boundary) > 0.5 || fabs([cached[@"width"] doubleValue] - page.bounds.size.width) > 0.5)
@@ -570,7 +605,8 @@ static void CleanPage(UIView *page) {
     }
     BindBoundary(page, anchor, peer, boundary, state);
     if (!state.reportedMatch) {
-        NSLog(@"[GaodeClean] page=%ld anchor=matched limitedScrolls=%lu", (long)kind, (unsigned long)state.scrolls.count);
+        GCLog(@"[MINE] kind=%ld anchor=命中 boundary=%.1f scrolls=%lu pageH=%.0f",
+              (long)kind, boundary, (unsigned long)state.scrolls.count, page.bounds.size.height);
         state.reportedMatch = YES;
         SaveDiagnostics(page, state, nodes);
     }
@@ -811,7 +847,22 @@ static void Capture(id element) {
     if (![NSThread isMainThread]) return;
     id render = ObjectGetter(element, @"rootRender") ?: ObjectGetter(element, @"render");
     UIView *page = ObjectGetter(render, @"ajx3View");
-    if (![page isKindOfClass:UIView.class] || !Kind(page)) return;
+    if (![page isKindOfClass:UIView.class]) return;
+    // P1: 取证 —— 每个 AJX 页面只报一次真实 pagePath 和识别结果。
+    // 之前 Kind()==0 时这里直接 return，整页静默跳过、一行日志都没有，
+    // 所以"我的页突然不裁剪"完全无从观察。现在把它摊开。
+    {
+        static char PathLogKey;
+        if (!objc_getAssociatedObject(page, &PathLogKey)) {
+            objc_setAssociatedObject(page, &PathLogKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+#if GCC_DEVICE_TEST
+            NSString *raw = PagePath(page);
+            NSString *tail = raw.length > 90 ? [raw substringFromIndex:raw.length - 90] : raw;
+            GCLog(@"[PATH] kind=%ld path=%@", (long)PageKind(raw), tail.length ? tail : @"(空)");
+#endif
+        }
+    }
+    if (!Kind(page)) return;
     [Pages addObject:page];
     UIView *view = ObjectGetter(element, @"view");
     if ([view isKindOfClass:UIView.class]) {
@@ -1899,6 +1950,6 @@ __attribute__((constructor)) static void Initialize(void) {
             }];
 #endif
         });
-        GCLog(@"[INIT] loaded 0.4.22 appVer=%@", appVersion);
+        GCLog(@"[INIT] loaded 0.4.23 appVer=%@", appVersion);
     }
 }
