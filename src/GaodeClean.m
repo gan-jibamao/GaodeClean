@@ -13,12 +13,14 @@
 
 static void GCProbeWhiteFog(const char *tag);
 static void GCProbeMapWidgets(const char *tag);
+static void GCProbeLogoWatermark(const char *tag);
 
 @interface GCHUDView : UIView
 @property(nonatomic, strong) NSMutableArray<NSString *> *lines;
 @property(nonatomic, strong) UILabel *label;
 @property(nonatomic, strong) UIButton *fogButton;
 @property(nonatomic, strong) UIButton *widgetButton;
+@property(nonatomic, strong) UIButton *logoButton;
 @end
 
 static GCHUDView *GCHUD;
@@ -66,6 +68,16 @@ static GCHUDView *GCHUD;
         [wb addTarget:GCHUD action:@selector(widgetTap) forControlEvents:UIControlEventTouchUpInside];
         GCHUD.widgetButton = wb;
         [GCHUD addSubview:wb];
+
+        UIButton *lb = [UIButton buttonWithType:UIButtonTypeSystem];
+        [lb setTitle:@"查logo" forState:UIControlStateNormal];
+        lb.titleLabel.font = [UIFont boldSystemFontOfSize:11];
+        [lb setTitleColor:UIColor.whiteColor forState:UIControlStateNormal];
+        lb.backgroundColor = [UIColor colorWithWhite:1 alpha:0.22];
+        lb.layer.cornerRadius = 4;
+        [lb addTarget:GCHUD action:@selector(logoTap) forControlEvents:UIControlEventTouchUpInside];
+        GCHUD.logoButton = lb;
+        [GCHUD addSubview:lb];
     });
     return GCHUD;
 }
@@ -115,6 +127,7 @@ static GCHUDView *GCHUD;
     self.label.text = [self.lines componentsJoinedByString:@"\n"];
     self.fogButton.frame = CGRectMake(w - 76, 4, 68, 22);
     self.widgetButton.frame = CGRectMake(w - 150, 4, 68, 22);
+    self.logoButton.frame = CGRectMake(w - 224, 4, 68, 22);
     [win bringSubviewToFront:self];
 }
 
@@ -122,6 +135,11 @@ static GCHUDView *GCHUD;
 - (UIView *)hitTest:(CGPoint)point withEvent:(UIEvent *)event {
     UIView *v = [super hitTest:point withEvent:event];
     return (v && v != self) ? v : nil;
+}
+
+- (void)logoTap {
+    [GCHUDView log:@"[LOGO] —— 手动触发 ——"];
+    GCProbeLogoWatermark("manual");
 }
 
 - (void)widgetTap {
@@ -851,8 +869,8 @@ static void GCProbeMapWidgets(const char *tag) {
         if (cw < 28 || cw > 80 || ch < 28 || ch > 80) continue;   // 方形/圆形控件尺寸带
         if (fabs(cw - ch) > 22) continue;                          // 近似正方形
         CGFloat cx = CGRectGetMidX(r), cy = CGRectGetMidY(r);
-        BOOL lowerLeft  = (cx < W * 0.28 && cy > H * 0.80);
-        BOOL lowerRight = (cx > W * 0.72 && cy > H * 0.80);
+        BOOL lowerLeft  = (cx < W * 0.30 && cy > H * 0.80);
+        BOOL lowerRight = (cx > W * 0.70 && cy > H * 0.80);
         if (!lowerLeft && !lowerRight) continue;
         hits++;
         if (hits > 14) continue;
@@ -1030,6 +1048,50 @@ static void GCPinMapWidgets(void) {
     // 右下：定位+路线组合胶囊（整颗搬，保持两者相对位置）
     GCPinWidget(win, @"WINAJXCombinedWidgetView", W - 34.5, GC_WIDGET_RIGHT_Y, "定位钮");
 }
+
+// ===== U1: 高德 logo 水印探针 =====
+// 需求：把左下角「高德地图」logo 水印固定到车机钮下方 (20, 745~775)。
+// 水印特征：横条（宽 60~150、高 14~34）、中心在屏幕左下角、可见。
+#if GCC_DEVICE_TEST
+static void GCProbeLogoWatermark(const char *tag) {
+    UIWindow *win = nil;
+    for (UIScene *sc in UIApplication.sharedApplication.connectedScenes) {
+        if (![sc isKindOfClass:UIWindowScene.class]) continue;
+        for (UIWindow *w in ((UIWindowScene *)sc).windows) {
+            if (w.isKeyWindow) { win = w; break; }
+        }
+        if (win) break;
+    }
+    if (!win) return;
+    CGFloat W = win.bounds.size.width, H = win.bounds.size.height;
+    NSMutableArray<UIView *> *stack = [NSMutableArray arrayWithObject:win];
+    NSUInteger guard = 0;
+    int hits = 0;
+    while (stack.count && guard++ < 4000) {
+        UIView *v = stack.lastObject;
+        [stack removeLastObject];
+        for (UIView *sub in v.subviews) [stack addObject:sub];
+        if (v == win || v.hidden || v.alpha < 0.05) continue;
+        CGRect r = [v convertRect:v.bounds toView:win];
+        if (!isfinite(r.size.width) || !isfinite(r.size.height)) continue;
+        CGFloat cw = r.size.width, ch = r.size.height;
+        if (cw < 55 || cw > 160 || ch < 12 || ch > 36) continue;     // 水印尺寸带
+        CGFloat cx = CGRectGetMidX(r), cy = CGRectGetMidY(r);
+        if (cx > W * 0.35 || cy < H * 0.86) continue;                // 左下角
+        hits++;
+        if (hits > 10) continue;
+        NSMutableString *chain = [NSMutableString string];
+        UIView *p = v.superview;
+        for (int i = 0; i < 3 && p; i++, p = p.superview)
+            [chain appendFormat:@" <%@", NSStringFromClass([p class])];
+        GCLog(@"[LOGO %s] %@ {%.0f,%.0f,%.0f,%.0f} c=(%.0f,%.0f)%@",
+              tag, NSStringFromClass([v class]), r.origin.x, r.origin.y, cw, ch, cx, cy, chain);
+    }
+    GCLog(@"[LOGO %s] 命中 %d 个", tag, hits);
+}
+#else
+#define GCProbeLogoWatermark(tag) do { } while (0)
+#endif
 
 static void Schedule(void) {
     if (![NSThread isMainThread] || Scheduled) return;
@@ -2186,6 +2248,9 @@ __attribute__((constructor)) static void Initialize(void) {
                            dispatch_get_main_queue(), ^{ GCProbeMapWidgets("startup5s"); });
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(12.0 * NSEC_PER_SEC)),
                            dispatch_get_main_queue(), ^{ GCProbeMapWidgets("startup12s"); });
+            // U1: 水印取证（15s，等地图完全就绪）
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(15.0 * NSEC_PER_SEC)),
+                           dispatch_get_main_queue(), ^{ GCProbeLogoWatermark("startup15s"); });
             // HUD 会被 App 的重布局压到下面，1 秒拉回一次
             [NSTimer scheduledTimerWithTimeInterval:1.0 repeats:YES block:^(__unused NSTimer *timer) {
                 [(GCHUDView *)[GCHUDView shared] refresh];
@@ -2193,6 +2258,6 @@ __attribute__((constructor)) static void Initialize(void) {
             }];
 #endif
         });
-        GCLog(@"[INIT] loaded 0.4.28 appVer=%@", appVersion);
+        GCLog(@"[INIT] loaded 0.4.29 appVer=%@", appVersion);
     }
 }
