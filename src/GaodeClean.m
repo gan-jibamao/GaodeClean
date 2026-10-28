@@ -382,7 +382,7 @@ static void CleanPage(UIView *page) {
                 NSData *data = [NSData dataWithContentsOfFile:[dir stringByAppendingPathComponent:@"GaodeClean-diagnostics.json"]];
                 NSDictionary *report = data ? [NSJSONSerialization JSONObjectWithData:data options:0 error:nil] : nil;
                 NSDictionary *mine = report[@"pages"][@"3"];
-                if ([@[@"0.3.0", @"0.3.1", @"0.3.4"] containsObject:report[@"version"] ?: @""] && [mine[@"matched"] boolValue]) {
+                if ([@[@"0.3.0", @"0.3.1", @"0.3.5"] containsObject:report[@"version"] ?: @""] && [mine[@"matched"] boolValue]) {
                     CGRect blank = CGRectFromString(mine[@"blankAreaFrame"] ?: @"");
                     if (blank.origin.y > 100) cached = @{@"width":@(blank.size.width), @"bottom":@(blank.origin.y)};
                 }
@@ -766,38 +766,70 @@ static void GCHideBarPlatter(UIView *bar) {
 // 做法：胶囊只平移 (-16,-1) → 盖满 52×52 圆；容器平移到放大镜居中；
 //       垫一层不透明白圆底防胶囊圆角透出；手势不动，缺原生 tap 时加兜底转发。
 static UIView *GCLiveSearchBar;
-@interface GCTapRouter : NSObject
-- (void)gcRoute:(UIGestureRecognizer *)gr;
-@end
-@implementation GCTapRouter
-- (void)gcRoute:(__unused UIGestureRecognizer *)gr {
+
+// 直接触发 WINQuickSearchBarV2 的 clickAction block（17.00.2 实测：点击走 block，不是 target/action）
+static void GCFireSearchClick(void) {
     UIView *bar = GCLiveSearchBar;
     if (!bar) return;
-    for (UIGestureRecognizer *g in bar.gestureRecognizers) {
-        if (![g isKindOfClass:[UITapGestureRecognizer class]] || g == gr || !g.enabled) continue;
-        id target = nil;
-        SEL action = NULL;
-        // target/action 是 UIGestureRecognizer 的只读私有属性，走 KVC
-        @try {
-            target = [g valueForKey:@"target"];
-            action = NSSelectorFromString([g valueForKey:@"action"] ?: @"");
-        } @catch (NSException *e) { target = nil; }
-        if (target && action) {
+    // 1) block 属性 clickAction
+    @try {
+        id blk = [bar valueForKey:@"clickAction"];
+        if (blk) {
+            void (^cb)(void) = blk;
+            cb();
+            return;
+        }
+    } @catch (NSException *e) {}
+    // 2) 回退：onTapBackgound:（原生触摸回调）
+    SEL s = NSSelectorFromString(@"onTapBackgound:");
+    if ([bar respondsToSelector:s]) {
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
-            [target performSelector:action withObject:g];
+        [bar performSelector:s withObject:nil];
+#pragma clang diagnostic pop
+        return;
+    }
+    // 3) 再回退：手势 target/action
+    for (UIGestureRecognizer *g in bar.gestureRecognizers) {
+        if (![g isKindOfClass:[UITapGestureRecognizer class]] || !g.enabled) continue;
+        id tg = nil; SEL ac = NULL;
+        @try { tg = [g valueForKey:@"target"]; ac = NSSelectorFromString([g valueForKey:@"action"] ?: @""); }
+        @catch (NSException *e) { tg = nil; }
+        if (tg && ac) {
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+            [tg performSelector:ac withObject:g];
 #pragma clang diagnostic pop
             return;
         }
     }
 }
+
+@interface GCTapRouter : NSObject
+- (void)gcTap:(UITapGestureRecognizer *)gr;
++ (instancetype)shared;
 @end
-static GCTapRouter *GCTapRouterShared;
+@implementation GCTapRouter
++ (instancetype)shared {
+    static GCTapRouter *s;
+    if (!s) s = [GCTapRouter new];
+    return s;
+}
+- (void)gcTap:(UITapGestureRecognizer *)gr {
+    if (gr.state != UIGestureRecognizerStateEnded) return;
+    GCFireSearchClick();
+}
+@end
+static inline GCTapRouter *GCTapShared(void) { return [GCTapRouter shared]; }
 
 static void GCShrinkSearchBar(UIView *bar) {
     if (![bar isKindOfClass:UIView.class]) return;
     bar.layer.cornerRadius = GC_DOT / 2.0;
     bar.layer.masksToBounds = YES;
+    // 必须能收触摸，否则手势不触发
+    bar.userInteractionEnabled = YES;
+    if (bar.hidden) bar.hidden = NO;
+    if (bar.alpha < 0.99) bar.alpha = 1.0;
 
     UIView *capsule = nil;
     for (UIView *v in bar.subviews) {
@@ -838,22 +870,21 @@ static void GCShrinkSearchBar(UIView *bar) {
     } else {
         back.frame = CGRectMake(0, 0, GC_DOT, GC_DOT);
     }
-    // 点击兜底：bar 和胶囊都没有原生 tap 时，加转发手势
+    // 点击：加一个固定手势，命中就主动触发原生 clickAction block
+    // （原生手势可能因内部视图被平移而失效，不能依赖它）
     GCLiveSearchBar = bar;
-    if (!GCTapRouterShared) GCTapRouterShared = [GCTapRouter new];
-    BOOL hasNativeTap = NO;
-    NSArray *check = capsule ? @[bar, capsule] : @[bar];
-    for (UIView *cv in check)
-        for (UIGestureRecognizer *g in cv.gestureRecognizers)
-            if ([g isKindOfClass:[UITapGestureRecognizer class]]) hasNativeTap = YES;
-    if (!hasNativeTap) {
-        for (UIGestureRecognizer *g in bar.gestureRecognizers)
-            if ([g isKindOfClass:[UITapGestureRecognizer class]] && [[g valueForKey:@"target"] isEqual:GCTapRouterShared]) hasNativeTap = YES;
-        if (!hasNativeTap) {
-            UITapGestureRecognizer *tr = [[UITapGestureRecognizer alloc] initWithTarget:GCTapRouterShared
-                                                                                action:@selector(gcRoute:)];
-            [bar addGestureRecognizer:tr];
-        }
+    BOOL hasGCTap = NO;
+    for (UIGestureRecognizer *g in bar.gestureRecognizers) {
+        if (![g isKindOfClass:[UITapGestureRecognizer class]]) continue;
+        id tg = nil;
+        @try { tg = [g valueForKey:@"target"]; } @catch (NSException *e) {}
+        if (tg == GCTapShared()) { hasGCTap = YES; break; }
+    }
+    if (!hasGCTap) {
+        UITapGestureRecognizer *tr = [[UITapGestureRecognizer alloc] initWithTarget:GCTapShared()
+                                                                            action:@selector(gcTap:)];
+        tr.cancelsTouchesInView = NO;
+        [bar addGestureRecognizer:tr];
     }
 }
 
@@ -1036,6 +1067,6 @@ __attribute__((constructor)) static void Initialize(void) {
         dispatch_async(dispatch_get_main_queue(), ^{
             [NSTimer scheduledTimerWithTimeInterval:0.5 repeats:YES block:^(__unused NSTimer *timer) { Schedule(); }];
         });
-        NSLog(@"[GaodeClean] loaded 0.3.4 (no version limit; appVer=%@)", appVersion);
+        NSLog(@"[GaodeClean] loaded 0.3.5 (no version limit; appVer=%@)", appVersion);
     }
 }
