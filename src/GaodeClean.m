@@ -941,9 +941,12 @@ static void GCKillWhiteOverlay(UIView *bar) {
 #define GC_WIDGET_LEFT_Y  700.0    // 左下车机钮固定 center.y
 #define GC_WIDGET_RIGHT_Y 700.0    // 右下定位钮固定 center.y
 
-// 按类名在整棵窗口树里找（限深度，防异常树）
-static UIView *GCFindWidgetByClass(UIWindow *win, NSString *clsName, int maxDepth) {
-    if (!win || !clsName.length) return nil;
+// 按类名在整棵窗口树里找【全部实例】（限深度，防异常树）。
+// 0.4.27 修正：0.4.26 只返回第一颗 —— 广度遍历先扫到窗口层那颗（我们自己搬的），
+// App 在地图容器里重建的新实例完全没人管，继续随地图飘（20:20 截图实证）。
+static NSArray<UIView *> *GCFindWidgetsByClass(UIWindow *win, NSString *clsName, int maxDepth) {
+    if (!win || !clsName.length) return @[];
+    NSMutableArray<UIView *> *out = [NSMutableArray array];
     NSMutableArray *queue = [NSMutableArray array];
     NSMutableArray *depths = [NSMutableArray array];
     [queue addObject:win]; [depths addObject:@0];
@@ -952,36 +955,53 @@ static UIView *GCFindWidgetByClass(UIWindow *win, NSString *clsName, int maxDept
         UIView *v = queue[i];
         int d = [depths[i] intValue];
         i++;
-        if ([NSStringFromClass([v class]) isEqualToString:clsName]) return v;
+        if ([NSStringFromClass([v class]) isEqualToString:clsName]) [out addObject:v];
         if (d >= maxDepth) continue;
         for (UIView *sub in v.subviews) {
             [queue addObject:sub];
             [depths addObject:@(d + 1)];
         }
     }
-    return nil;
+    return out;
 }
 
 // 把控件固定到窗口层指定坐标。返回 YES 表示本轮做了搬移/校正。
 static BOOL GCPinWidget(UIWindow *win, NSString *clsName, CGFloat centerX, CGFloat centerY, __unused const char *tag) {
     if (!win) return NO;
-    UIView *v = GCFindWidgetByClass(win, clsName, 40);
-    if (!v) return NO;
-    if (v.hidden) return NO;
-    // 如果它还在原容器里（或已被别的层收走），搬到窗口
-    if (v.superview != win) {
-        // 用绝对 frame 搬到窗口：先算它在窗口里的当前位置，避免跳变
-        CGRect inWin = [v convertRect:v.bounds toView:win];
-        [v removeFromSuperview];
-        [win addSubview:v];
-        v.frame = inWin;
-        GCLog(@"[WIDGET] %s 已搬到窗口层", tag);
+    NSArray<UIView *> *all = GCFindWidgetsByClass(win, clsName, 40);
+    if (!all.count) return NO;
+    // 分拣：窗口层的（我们搬出来的，负责显示）vs 容器里的（App 重建的新颗，隐藏）
+    UIView *pinned = nil;
+    for (UIView *v in all) {
+        if (v.superview == win) { pinned = v; continue; }
+        // 容器里的新颗：直接隐藏（不能删，App 内部状态要保持完整）。
+        // 只在它可见时动一次，避免每 100ms 重复写。
+        if (!v.hidden) {
+            v.hidden = YES;
+            GCLog(@"[WIDGET] %s 隐藏容器内新实例", tag);
+        }
     }
+    if (!pinned) {
+        // 窗口层那颗没了（被 App 收编/释放）—— 把容器里第一颗可见的搬上来
+        for (UIView *v in all) {
+            if (v.hidden) continue;
+            CGRect inWin = [v convertRect:v.bounds toView:win];
+            [v removeFromSuperview];
+            [win addSubview:v];
+            v.frame = inWin;
+            GCLog(@"[WIDGET] %s 重新接管", tag);
+            pinned = v;
+            break;
+        }
+        if (!pinned) return NO;
+    }
+    // 窗口层那颗：解除隐藏（App 可能把它 hidden）+ 坐标锁死
+    if (pinned.hidden) pinned.hidden = NO;
+    if (pinned.alpha < 0.99) pinned.alpha = 1.0;
     CGPoint want = CGPointMake(centerX, centerY);
-    if (fabs(v.center.x - want.x) > 0.5 || fabs(v.center.y - want.y) > 0.5) {
-        v.center = want;
+    if (fabs(pinned.center.x - want.x) > 0.5 || fabs(pinned.center.y - want.y) > 0.5) {
+        pinned.center = want;
     }
-    // 保持在最上层（但不挡我们自己的三圆钮/搜索钮，它们在 parent 上，不在 win 上）
     return YES;
 }
 
@@ -2166,6 +2186,6 @@ __attribute__((constructor)) static void Initialize(void) {
             }];
 #endif
         });
-        GCLog(@"[INIT] loaded 0.4.26 appVer=%@", appVersion);
+        GCLog(@"[INIT] loaded 0.4.27 appVer=%@", appVersion);
     }
 }
