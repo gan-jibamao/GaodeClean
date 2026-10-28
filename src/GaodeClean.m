@@ -975,6 +975,8 @@ static void GCKillWhiteOverlay(UIView *bar) {
 static CADisplayLink *GCPinLink;
 static BOOL GCPinWidget(UIWindow *win, NSString *clsName, CGFloat centerX, CGFloat centerY, const char *tag);
 static void GCPinLogoWidget(UIWindow *win);
+static BOOL GCPinWidgetGeom(UIWindow *win, BOOL leftSide, CGFloat centerX, CGFloat centerY, const char *tag);
+static UIView *GCFindFloatingWidget(UIWindow *win, BOOL wantLeft);
 static NSArray<UIView *> *GCFindWidgetsByClass(UIWindow *win, NSString *clsName, int maxDepth);
 
 
@@ -996,8 +998,9 @@ static void GCPinTick(void) {
     if (!win) return;
     CGFloat W = win.bounds.size.width;
     if (!isfinite(W) || W < 200) return;
-    GCPinWidget(win, @"WINDeviceInterconnectWidget", 37.0, GC_WIDGET_LEFT_Y, "tick");
-    GCPinWidget(win, @"WINAJXCombinedWidgetView", W - 34.5, GC_WIDGET_RIGHT_Y, "tick");
+    // 类名不可靠（01:36 实证：两个类名都消失了），改用几何特征识别
+    GCPinWidgetGeom(win, YES, 37.0, GC_WIDGET_LEFT_Y, "left");
+    GCPinWidgetGeom(win, NO,  W - 34.5, GC_WIDGET_RIGHT_Y, "right");
 }
 
 // 水印本体 = 父类 WINScaleLineLogoMapWidget 下的 UIImageView（约 76x16）。
@@ -1144,6 +1147,89 @@ static NSArray<UIView *> *GCFindWidgetsByClass(UIWindow *win, NSString *clsName,
 }
 
 // 把控件固定到窗口层指定坐标。返回 YES 表示本轮做了搬移/校正。
+// 按几何特征固定控件（替代 GCPinWidget 的类名路径）
+// 策略与 0.4.28 一致：窗口层有就锁坐标；没有就把几何命中的那颗搬到窗口层。
+// 绝不写 hidden/alpha（0.4.27 事故教训）。
+static BOOL GCPinWidgetGeom(UIWindow *win, BOOL leftSide, CGFloat centerX, CGFloat centerY, __unused const char *tag) {
+    if (!win) return NO;
+    CGFloat W = win.bounds.size.width;
+    // ① 先看窗口层是否已有我们搬过的（左/右分区判定）
+    for (UIView *v in win.subviews) {
+        CGRect r = v.frame;
+        if (!isfinite(r.size.width) || !isfinite(r.size.height)) continue;
+        if (r.size.width < 38 || r.size.width > 60 || r.size.height < 38 || r.size.height > 60) continue;
+        BOOL isLeft = CGRectGetMidX(r) < W * 0.35;
+        if (isLeft != leftSide) continue;
+        CGPoint want = CGPointMake(centerX, centerY);
+        if (fabs(v.center.x - want.x) > 0.5 || fabs(v.center.y - want.y) > 0.5) v.center = want;
+        return YES;
+    }
+    // ② 窗口层没有 → 按几何特征从容器里接管
+    UIView *v = GCFindFloatingWidget(win, leftSide);
+    if (!v) return NO;
+    CGRect inWin = [v convertRect:v.bounds toView:win];
+    [v removeFromSuperview];
+    [win addSubview:v];
+    v.frame = inWin;
+    v.center = CGPointMake(centerX, centerY);
+    GCLog(@"[WIDGET] %s 几何接管 %@ {%.0f,%.0f}", tag,
+          NSStringFromClass([v class]), inWin.size.width, inWin.size.height);
+    return YES;
+}
+
+// ===== T1: 按几何特征找地图浮动控件（类名不可靠）=====
+//
+// 01:36 真机实证：[WIDGET] 扫到的是 AJXContainerView {34,727,63,48}
+// —— WINDeviceInterconnectWidget / WINAJXCombinedWidgetView 这两个类名
+// 在这一轮里根本不存在（App 换了实现）。而水印 WINScaleLineLogoMapWidget
+// 类名一直稳定。结论：控件不能靠类名找，必须用几何+内容特征。
+//
+// 判据：
+//   ① 尺寸 40~58pt 见方（按钮本体 44x44，留容差）
+//   ② 中心落在屏幕左下角或右下角（x<30% 或 x>70%，y>70%）
+//   ③ 非 AJX 类（排除页面元素 —— AJXContainerView 63x48 就是被这条挡掉的）
+//   ④ 子树里有 UIImageView（按钮必有图标）
+//   ⑤ 已在窗口层的跳过（那是我们搬的，由别的分支处理）
+static UIView *GCFindFloatingWidget(UIWindow *win, BOOL wantLeft) {
+    if (!win) return nil;
+    CGFloat W = win.bounds.size.width, H = win.bounds.size.height;
+    if (W < 200 || H < 200) return nil;
+    NSMutableArray<UIView *> *stack = [NSMutableArray arrayWithObject:win];
+    NSUInteger guard = 0;
+    UIView *best = nil;
+    while (stack.count && guard++ < 4000) {
+        UIView *v = stack.lastObject;
+        [stack removeLastObject];
+        for (UIView *sub in v.subviews) [stack addObject:sub];
+        if (v == win || v.hidden || v.alpha < 0.05) continue;
+        if (v.superview == win) continue;                 // 我们搬出去的，跳过
+        NSString *cn = NSStringFromClass([v class]);
+        if ([cn hasPrefix:@"AJX"]) continue;              // 页面元素
+        CGRect r = [v convertRect:v.bounds toView:win];
+        if (!isfinite(r.size.width) || !isfinite(r.size.height)) continue;
+        CGFloat w = r.size.width, h = r.size.height;
+        if (w < 38 || w > 60 || h < 38 || h > 60) continue;
+        if (fabs(w - h) > 8) continue;                     // 近似正方
+        CGFloat cx = CGRectGetMidX(r), cy = CGRectGetMidY(r);
+        if (wantLeft) { if (cx > W * 0.32) continue; }
+        else          { if (cx < W * 0.68) continue; }
+        if (cy < H * 0.68) continue;                       // 下半屏
+        // 内容：子树里必须有 UIImageView（图标）
+        BOOL hasImage = NO;
+        NSMutableArray<UIView *> *st2 = [NSMutableArray arrayWithObject:v];
+        NSUInteger g2 = 0;
+        while (st2.count && g2++ < 40) {
+            UIView *x = st2.lastObject;
+            [st2 removeLastObject];
+            if ([x isKindOfClass:[UIImageView class]]) { hasImage = YES; break; }
+            for (UIView *sub in x.subviews) [st2 addObject:sub];
+        }
+        if (!hasImage) continue;
+        best = v;    // 取最后一个（最内层/最上层）
+    }
+    return best;
+}
+
 static BOOL GCPinWidget(UIWindow *win, NSString *clsName, CGFloat centerX, CGFloat centerY, __unused const char *tag) {
     if (!win) return NO;
     NSArray<UIView *> *all = GCFindWidgetsByClass(win, clsName, 40);
@@ -2485,6 +2571,6 @@ __attribute__((constructor)) static void Initialize(void) {
             }];
 #endif
         });
-        GCLog(@"[INIT] loaded 0.4.43 appVer=%@", appVersion);
+        GCLog(@"[INIT] loaded 0.4.44 appVer=%@", appVersion);
     }
 }
