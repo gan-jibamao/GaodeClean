@@ -956,8 +956,13 @@ static void GCKillWhiteOverlay(UIView *bar) {
 //
 // 修法：把控件从地图容器搬到 UIWindow（窗口级固定层），坐标锁死；
 // 每 100ms 校验一次 —— 地图容器若把它收回去（重新 addSubview），再搬出来。
-#define GC_WIDGET_LEFT_Y  700.0    // 左下车机钮固定 center.y
-#define GC_WIDGET_RIGHT_Y 700.0    // 右下定位钮固定 center.y
+// 0.4.42 坐标定案（避免遮挡）：
+//   车机钮 y=660（44pt 高 → 占 638~682）
+//   水印   y=745（16pt 高 → 占 737~753）
+//   间距 682→737 = 55pt，绝不遮挡
+//   三圆钮 y≈800，与水印间距 47pt
+#define GC_WIDGET_LEFT_Y  660.0    // 左下车机钮固定 center.y
+#define GC_WIDGET_RIGHT_Y 660.0    // 右下定位钮固定 center.y
 // 21:50 取证：[LOGO] UIImageView {10,792,76,16} c=(48,800)
 //            < WINScaleLineLogoMapWidget < MapWidgetContainerView < NMMoveContentView
 // 水印（高德 logo + 比例尺）同样挂在地图容器下，随地图飘。
@@ -974,20 +979,31 @@ static NSArray<UIView *> *GCFindWidgetsByClass(UIWindow *win, NSString *clsName,
 
 
 static void GCPinTick(void) {
-    // 0.4.41 方向修正（用户 01:20 明确）：
-    //   「车机和定位还有LOGO我要的不是固定死位置，而是像原生一样在合适的位置」
-    // 原实现把三个控件搬到 UIWindow 并锁死坐标 —— 那是「固定死」，不是用户要的。
-    // 用户要的是【保持原生布局】。所以整个强锁通道停用，让控件跟随 App 自己的
-    // 地图布局规则排布（原生位置：车机钮左下、定位钮右下、水印贴底）。
-    //
-    // 保留函数与 display link 结构（空跑，开销接近于零），
-    // 便于将来若要改「微调」而不是「锁死」时直接在这里实现。
+    // 0.4.42 恢复固定（用户 01:22 确认「还是要固定」）。
+    // 采用 0.4.28 已验证的安全策略：
+    //   ① 窗口层已有实例 → 只锁坐标
+    //   ② 窗口层没有 → 只接管「屏幕边缘 + 44pt 方块」的容器实例（位置+尺寸双过滤）
+    //   ③ 绝不写任何实例的 hidden/alpha（0.4.27 事故教训）
+    // 顶部留出安全区：车机钮/定位钮 y=700，高于水印与三圆钮，互不遮挡。
+    UIWindow *win = nil;
+    for (UIScene *sc in UIApplication.sharedApplication.connectedScenes) {
+        if (![sc isKindOfClass:UIWindowScene.class]) continue;
+        for (UIWindow *w in ((UIWindowScene *)sc).windows) {
+            if (w.isKeyWindow) { win = w; break; }
+        }
+        if (win) break;
+    }
+    if (!win) return;
+    CGFloat W = win.bounds.size.width;
+    if (!isfinite(W) || W < 200) return;
+    GCPinWidget(win, @"WINDeviceInterconnectWidget", 37.0, GC_WIDGET_LEFT_Y, "tick");
+    GCPinWidget(win, @"WINAJXCombinedWidgetView", W - 34.5, GC_WIDGET_RIGHT_Y, "tick");
 }
 
 // 水印本体 = 父类 WINScaleLineLogoMapWidget 下的 UIImageView（约 76x16）。
 // 找不到时打一条日志（节流），下轮日志能区分「没实例」vs「没找到」。
 // 0.4.41: 水印不再固定（用户要求保持原生布局）。函数保留但不参与调用。
-__attribute__((unused)) static void GCPinLogoWidget(UIWindow *win) {
+static void GCPinLogoWidget(UIWindow *win) {
     if (!win) return;
     // 00:34 真机铁证（两次会话一致）：
     //   UIImageView {10,792,76,16} c=(48,800)
@@ -1194,8 +1210,6 @@ static BOOL GCPinWidget(UIWindow *win, NSString *clsName, CGFloat centerX, CGFlo
 }
 
 static void GCPinMapWidgets(void) {
-    // 0.4.41: 同上，停用搬移。控件回到 App 原生布局。
-    return;
     UIWindow *win = nil;
     for (UIScene *sc in UIApplication.sharedApplication.connectedScenes) {
         if (![sc isKindOfClass:UIWindowScene.class]) continue;
@@ -1212,8 +1226,8 @@ static void GCPinMapWidgets(void) {
     GCPinWidget(win, @"WINDeviceInterconnectWidget", 37.0, GC_WIDGET_LEFT_Y, "车机钮");
     // 右下：定位+路线组合胶囊（整颗搬，保持两者相对位置）
     GCPinWidget(win, @"WINAJXCombinedWidgetView", W - 34.5, GC_WIDGET_RIGHT_Y, "定位钮");
-    // 高德水印走专用函数 GCPinLogoWidget（动态算中心 x，且按页面显隐），
-    // 不能走 GCPinWidget —— 那条路径会用固定 GC_LOGO_X 摆放，把 logo 推出屏幕。
+    // 水印也固定（用户要求「车机和LOGO上调一点」→ 两者都要固定且不互相遮挡）
+    GCPinLogoWidget(win);
 
     // 60fps 强锁通道（首次调用时启动）
     static dispatch_once_t onceToken;
@@ -2437,6 +2451,6 @@ __attribute__((constructor)) static void Initialize(void) {
             }];
 #endif
         });
-        GCLog(@"[INIT] loaded 0.4.41 appVer=%@", appVersion);
+        GCLog(@"[INIT] loaded 0.4.42 appVer=%@", appVersion);
     }
 }
