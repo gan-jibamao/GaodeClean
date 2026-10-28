@@ -1147,19 +1147,53 @@ static NSArray<UIView *> *GCFindWidgetsByClass(UIWindow *win, NSString *clsName,
 static BOOL GCPinWidget(UIWindow *win, NSString *clsName, CGFloat centerX, CGFloat centerY, __unused const char *tag) {
     if (!win) return NO;
     NSArray<UIView *> *all = GCFindWidgetsByClass(win, clsName, 40);
+    // 0.4.43 诊断：切页回来后控件消失/跑位，需要知道是「找不到实例」还是「找到了没搬」
+    {
+        static NSUInteger lastCount[2] = {999, 999};
+        int slot = [clsName isEqualToString:@"WINDeviceInterconnectWidget"] ? 0 : 1;
+        if (lastCount[slot] != all.count) {
+            lastCount[slot] = all.count;
+            GCLog(@"[WIDGET] %@ 实例数=%lu", clsName, (unsigned long)all.count);
+        }
+    }
     if (!all.count) return NO;
 
     // 0.4.39: 非首页（我的/探索）时隐藏已固定的控件 —— 它们只属于地图。
     // 之前搬到 UIWindow 后会一直显示，切页也留着（用户反馈：我的页看到高德 logo，
     // 同理两颗浮动钮也会残留）。
+    // 0.4.43: 首页判定加兜底 —— 只看 selectedViewControl 类名不可靠，
+    // 切页瞬间它可能短暂不是 WINAmapHomeControl，导致我们连续几帧判成"非首页"
+    // 而把控件藏起来，之后又没恢复。
     BOOL onHome = NO;
     for (id tabs in TabControllers.allObjects) {
         id sv = ObjectGetter(tabs, @"selectedViewControl");
         if ([NSStringFromClass([sv class]) isEqualToString:@"WINAmapHomeControl"]) { onHome = YES; break; }
+        // 兜底：底栏 tabBar 的 selectIndex == 0 也视为首页
+        UIView *tb = ObjectGetter(tabs, @"tabBar");
+        if ([tb isKindOfClass:UIView.class]) {
+            SEL siSel = NSSelectorFromString(@"selectIndex");
+            if ([tb respondsToSelector:siSel]) {
+                @try {
+                    NSMethodSignature *sig = [tb methodSignatureForSelector:siSel];
+                    const char *rt = sig.methodReturnType;
+                    if (rt[0] == 'Q' || rt[0] == 'q' || rt[0] == 'I' || rt[0] == 'i') {
+                        if (((NSUInteger (*)(id, SEL))objc_msgSend)(tb, siSel) == 0) onHome = YES;
+                    } else if (rt[0] == '@') {
+                        id v = ((id (*)(id, SEL))objc_msgSend)(tb, siSel);
+                        if ([v respondsToSelector:@selector(integerValue)] && [v integerValue] == 0) onHome = YES;
+                    }
+                } @catch (NSException *e) {}
+            }
+        }
+        if (onHome) break;
     }
     if (!onHome) {
         for (UIView *v in all) {
-            if (v.superview == win && !v.hidden) v.hidden = YES;
+            if (v.superview == win && !v.hidden) {
+                v.hidden = YES;
+                static int hidLog;
+                if (hidLog++ < 4) GCLog(@"[WIDGET] 非首页，隐藏 %@", clsName);
+            }
         }
         return NO;
     }
@@ -2451,6 +2485,6 @@ __attribute__((constructor)) static void Initialize(void) {
             }];
 #endif
         });
-        GCLog(@"[INIT] loaded 0.4.42 appVer=%@", appVersion);
+        GCLog(@"[INIT] loaded 0.4.43 appVer=%@", appVersion);
     }
 }
