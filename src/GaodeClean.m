@@ -4,7 +4,7 @@
 #import "GCCGeometry.h"
 
 // This tweak changes UI only. No network interception or modification of the IPA.
-static char TextKey, StateKey, LimitKey, ForcedKindKey, ForcedPathKey, SearchDotKey;
+static char TextKey, StateKey, LimitKey, ForcedKindKey, ForcedPathKey, SearchDotKey, HandlerKey;
 static NSHashTable<UIView *> *Pages;
 static NSHashTable *NearbyControllers;
 static NSHashTable *TabControllers;
@@ -676,18 +676,65 @@ static void InstallScrollHooks(void) {
     }), method_getTypeEncoding(bounceMethod));
 }
 
-// ===== G 组：底栏圆钮只认圆内点击 =====
+// ===== H 组：底栏圆钮只认圆内点击 =====
 //
-// 问题（用户反馈 2026-10-28）：三个圆钮「点周边也会切换」，只要落在原来
-// 84x54 的 item 区域内就会触发，手感上就是整个底栏都能点。
-// 根因：WINTabBarItem 的 frame 被保留为原生 84x54（我们只改了 bounds 视觉），
-// 但命中测试走的是 pointInside:，它按 frame 判断，所以圆外四角仍然命中。
-// 修法：给 WINTabBarItem 单独装 hitTest:，圆外一律返回 nil，
-// 让触摸穿到底下的地图，而不是落到 tab item 上。
+// 迭代记录（三轮才定案，写清楚避免重走）：
+//   v1(0.4.10) 只调 item.bounds/center → 视觉变了，但点击范围还是原 84x54。
+//   v2(0.4.13) 只钩 WINTabBarItem.hitTest: → 仍然能点圆外切换。
+//
+// v2 失败的根本原因（用户 2026-10-28 反馈："点首页圆钮左边还是能切换"）：
+//   点圆外空白时，WINTabBar.hitTest: 在自己的 bounds 内直接返回 self，
+//   App 内部按坐标算"最近 item"就切页 —— 这条路径根本不进子视图的 hitTest:，
+//   所以只钩子视图永远无效。
+//
+// v3 正确做法：把网关提到 WINTabBar 这一层。接到点后先判断
+//   「是否落在三个圆心的 52pt 圆内」，不在圆内就 return nil（穿透到地图）。
+static BOOL GCPointInAnyTabDot(UIView *bar, CGPoint point) {
+    if (![bar isKindOfClass:UIView.class]) return NO;
+    UIWindow *win = bar.window;
+    CGFloat W = win ? win.bounds.size.width : bar.bounds.size.width;
+    if (!isfinite(W) || W < 200) W = bar.bounds.size.width;
+    CGFloat midY = bar.bounds.size.height / 2.0;
+    CGFloat cx[3] = { W / 2.0 - GC_PITCH, W / 2.0, W / 2.0 + GC_PITCH };
+    CGFloat r = GC_DOT / 2.0 + 1.0;         // 1pt 容差，防亚像素抖动
+    CGFloat r2 = r * r;
+    for (int i = 0; i < 3; i++) {
+        CGFloat dx = point.x - cx[i];
+        CGFloat dy = point.y - midY;
+        if (isfinite(dx) && isfinite(dy) && dx * dx + dy * dy <= r2) return YES;
+    }
+    return NO;
+}
+
 static void InstallTabDotHitTest(void) {
+    // ① WINTabBar 层网关（关键）
+    Class barCls = NSClassFromString(@"WINTabBar");
+    if (barCls) {
+        SEL sel = @selector(hitTest:withEvent:);
+        Method m = class_getInstanceMethod(barCls, sel);
+        if (m) {
+            IMP original = method_getImplementation(m);
+            Replace(barCls, sel, imp_implementationWithBlock(^UIView *(UIView *self, CGPoint point, UIEvent *event) {
+                UIView *hit = ((UIView *(*)(id, SEL, CGPoint, id))original)(self, sel, point, event);
+                if (!hit) return nil;
+                // 只拦「落在本底栏上」的命中；点到别处（比如外部控件）不干预
+                if (hit != self && ![hit isDescendantOfView:self]) return hit;
+                BOOL inDot = GCPointInAnyTabDot(self, point);
+                NSLog(@"[GaodeClean][HIT] bar hit=(%.1f,%.1f) inDot=%d hit=%@ -> %@",
+                      point.x, point.y, inDot, NSStringFromClass(hit.class),
+                      inDot ? @"PASS" : @"nil(穿透)");
+                return inDot ? hit : nil;
+            }), method_getTypeEncoding(m));
+            NSLog(@"[GaodeClean] WINTabBar 圆钮网关已生效");
+        }
+    } else {
+        NSLog(@"[GaodeClean] WINTabBar 不存在");
+    }
+
+    // ② WINTabBarItem 层双保险（有些路径会直接命中子视图）
     Class cls = NSClassFromString(@"WINTabBarItem");
     if (!cls) {
-        NSLog(@"[GaodeClean] WINTabBarItem 不存在，圆钮热区限制跳过");
+        NSLog(@"[GaodeClean] WINTabBarItem 不存在，子层热区跳过");
         return;
     }
     SEL sel = @selector(hitTest:withEvent:);
@@ -695,18 +742,18 @@ static void InstallTabDotHitTest(void) {
     if (!m) return;
     IMP original = method_getImplementation(m);
     Replace(cls, sel, imp_implementationWithBlock(^UIView *(UIView *self, CGPoint point, UIEvent *event) {
-        CGRect b = self.bounds;
-        CGFloat w = b.size.width, h = b.size.height;
-        // 只有被我们改成圆钮的 item 才限制（w≈h≈GC_DOT）；否则原样交给父类
-        if (isfinite(w) && isfinite(h) && w > 1 && h > 1 &&
-            fabs(w - GC_DOT) < 3 && fabs(h - GC_DOT) < 3) {
-            CGFloat cx = CGRectGetMidX(b), cy = CGRectGetMidY(b);
-            CGFloat dx = point.x - cx, dy = point.y - cy;
-            CGFloat r = GC_DOT / 2.0;
-            // 留 1pt 容差，避免圆边缘因亚像素抖动点不中
-            if (dx * dx + dy * dy > (r + 1.0) * (r + 1.0)) return nil;
-        }
-        return ((UIView *(*)(id, SEL, CGPoint, id))original)(self, sel, point, event);
+        UIView *hit = ((UIView *(*)(id, SEL, CGPoint, id))original)(self, sel, point, event);
+        if (!hit) return nil;
+        // 换算到所在 WINTabBar 的坐标系再判断圆内
+        UIView *ancestor = self.superview;
+        while (ancestor && ![NSStringFromClass(ancestor.class) isEqualToString:@"WINTabBar"]) ancestor = ancestor.superview;
+        if (!ancestor) return hit;
+        CGPoint p = [self convertPoint:point toView:ancestor];
+        BOOL inDot = GCPointInAnyTabDot(ancestor, p);
+        NSLog(@"[GaodeClean][HIT] item %@ p=(%.1f,%.1f)->bar(%.1f,%.1f) inDot=%d %@",
+              NSStringFromClass(self.class), point.x, point.y, p.x, p.y, inDot,
+              inDot ? @"PASS" : @"nil");
+        return inDot ? hit : nil;
     }), method_getTypeEncoding(m));
     NSLog(@"[GaodeClean] WINTabBarItem 圆钮热区已生效");
 }
@@ -758,19 +805,31 @@ static UIView *GCLiveSearchBar;
 
 static void GCFireSearchClick(void) {
     UIView *bar = GCLiveSearchBar;
-    if (!bar) return;
+    if (!bar) { NSLog(@"[GaodeClean][TAP] liveBar 为空"); return; }
+
+    // 路径1：clickAction block（0.3.5 在 17.00.2 实测有效）
     @try {
         id blk = [bar valueForKey:@"clickAction"];
+        NSLog(@"[GaodeClean][TAP] path1 clickAction=%@", blk ? NSStringFromClass([blk class]) : @"nil");
         if (blk) { void (^cb)(void) = blk; cb(); return; }
-    } @catch (NSException *e) {}
+    } @catch (NSException *e) {
+        NSLog(@"[GaodeClean][TAP] path1 exception %@", e.reason);
+    }
+
+    // 路径2：onTapBackgound:（原生触摸回调）
     SEL s = NSSelectorFromString(@"onTapBackgound:");
-    if ([bar respondsToSelector:s]) {
+    BOOL has2 = [bar respondsToSelector:s];
+    NSLog(@"[GaodeClean][TAP] path2 onTapBackgound:=%d", has2);
+    if (has2) {
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
         [bar performSelector:s withObject:nil];
 #pragma clang diagnostic pop
         return;
     }
+
+    // 路径3：手势 target/action（私有属性，KVC）
+    NSLog(@"[GaodeClean][TAP] path3 gestures=%lu", (unsigned long)bar.gestureRecognizers.count);
     for (UIGestureRecognizer *g in bar.gestureRecognizers) {
         if (![g isKindOfClass:[UITapGestureRecognizer class]] || !g.enabled) continue;
         id tg = nil; SEL ac = NULL;
@@ -778,6 +837,9 @@ static void GCFireSearchClick(void) {
             tg = [g valueForKey:@"target"];
             ac = NSSelectorFromString([g valueForKey:@"action"] ?: @"");
         } @catch (NSException *e) { tg = nil; }
+        NSLog(@"[GaodeClean][TAP] path3 gesture target=%@ sel=%@",
+              tg ? NSStringFromClass([tg class]) : @"nil",
+              ac ? NSStringFromSelector(ac) : @"nil");
         if (tg && ac) {
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
@@ -786,7 +848,30 @@ static void GCFireSearchClick(void) {
             return;
         }
     }
-    NSLog(@"[GaodeClean] search dot tap: no action path found");
+
+    // 路径4（H3 新增）：找 GDAmapHomeHandler，直接调它的搜索入口
+    //   bar 的父链上挂着 handler（0.3.1 里 LayoutMinimalHome 就是从 handler 取的 searchBar）
+    id handler = nil;
+    for (UIView *v = bar.superview; v && !handler; v = v.superview) {
+        id cand = objc_getAssociatedObject(v, &HandlerKey);
+        if (cand) handler = cand;
+    }
+    NSLog(@"[GaodeClean][TAP] path4 handler=%@", handler ? NSStringFromClass([handler class]) : @"nil");
+    if (handler) {
+        for (NSString *name in @[@"onSearchBarTapped", @"onTapSearchBar", @"showSearchPage",
+                                 @"openSearch", @"onSearchEntryTapped", @"didTapSearchBar"]) {
+            SEL h = NSSelectorFromString(name);
+            if (![handler respondsToSelector:h]) continue;
+            NSLog(@"[GaodeClean][TAP] path4 命中 %@", name);
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+            [handler performSelector:h withObject:nil];
+#pragma clang diagnostic pop
+            return;
+        }
+    }
+
+    NSLog(@"[GaodeClean][TAP] 所有路径均未命中");
 }
 
 @interface GCTapRouter : NSObject
@@ -841,6 +926,8 @@ static void LayoutMinimalHome(id handler) {
     if (!parent.window || ![tabBar isKindOfClass:UIView.class]) return;
     LayingOutHome = YES;
     if (bar.superview != parent) [parent addSubview:bar];
+    // H3: 把 handler 挂到 parent 上，供 GCFireSearchClick 走父链找回搜索入口
+    objc_setAssociatedObject(parent, &HandlerKey, handler, OBJC_ASSOCIATION_ASSIGN);
     sheet.hidden = YES;
     UIView *mask = ObjectGetter(handler, @"maskView");
     if ([mask isKindOfClass:UIView.class]) mask.hidden = YES;
@@ -920,8 +1007,13 @@ static void GCDressSearchDot(UIView *bar) {
         if (v == back) continue;
         UIImageView *g = objc_getAssociatedObject(bar, &GlyphKey);
         if (g && v == g) continue;
-        v.hidden = YES;      // 胶囊/底图/语音/相机/滚动文字 全关
-        v.alpha = 0;
+        // H2: 原生效层视觉上必须不可见，但【不能】让它 alpha=0 ——
+        // iOS 上 alpha<0.01 的视图不参与 hitTest，原生 clickAction 的手势
+        // 就再也收不到触摸，表现就是「点搜索钮没反应」。
+        // 改为 alpha=0.01 + userInteractionEnabled=NO：看不见，但不破坏命中链。
+        v.hidden = NO;
+        v.alpha = 0.01;
+        v.userInteractionEnabled = NO;
     }
     // bar 自身不再画底色，白底由 back 负责，避免两层叠加出灰边
     bar.backgroundColor = UIColor.clearColor;
@@ -1259,6 +1351,6 @@ __attribute__((constructor)) static void Initialize(void) {
         dispatch_async(dispatch_get_main_queue(), ^{
             [NSTimer scheduledTimerWithTimeInterval:0.5 repeats:YES block:^(__unused NSTimer *timer) { Schedule(); }];
         });
-        NSLog(@"[GaodeClean] loaded 0.4.13 (universal; appVer=%@)", appVersion);
+        NSLog(@"[GaodeClean] loaded 0.4.14 (universal; appVer=%@)", appVersion);
     }
 }

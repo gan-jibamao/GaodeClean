@@ -98,6 +98,22 @@ jobs:
           done
           ls -l out/
 
+      - name: Build PROBE rootless arm64
+        run: |
+          set -e
+          export THEOS=$HOME/theos
+          make clean >/dev/null 2>&1 || true
+          sed -i '' 's/^Package: com.jibamao.gaodeclean/Package: probe.gaodeclean/' control
+          make package FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=rootless ARCHS=arm64 GCC_DEVICE_TEST=1 2>&1 | tail -40
+          mkdir -p out
+          for f in packages/*arm64.deb; do
+            case "$f" in
+              *arm64e*) ;;
+              *) cp "$f" "out/probe-$(basename $f | sed 's/^com\.jibamao\.gaodeclean/probe.gaodeclean/')" ;;
+            esac
+          done
+          ls -l out/ || true
+
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
