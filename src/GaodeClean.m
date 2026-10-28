@@ -11,9 +11,12 @@
 
 #import <UIKit/UIKit.h>
 
+static void GCProbeWhiteFog(const char *tag);
+
 @interface GCHUDView : UIView
 @property(nonatomic, strong) NSMutableArray<NSString *> *lines;
 @property(nonatomic, strong) UILabel *label;
+@property(nonatomic, strong) UIButton *fogButton;
 @end
 
 static GCHUDView *GCHUD;
@@ -25,7 +28,7 @@ static GCHUDView *GCHUD;
     dispatch_once(&once, ^{
         GCHUD = [[GCHUDView alloc] initWithFrame:CGRectZero];
         GCHUD.lines = [NSMutableArray array];
-        GCHUD.userInteractionEnabled = NO;
+        GCHUD.userInteractionEnabled = YES;
         GCHUD.backgroundColor = [UIColor colorWithWhite:0 alpha:0.72];
         GCHUD.layer.cornerRadius = 8;
         GCHUD.layer.masksToBounds = YES;
@@ -37,6 +40,20 @@ static GCHUDView *GCHUD;
         l.userInteractionEnabled = NO;
         GCHUD.label = l;
         [GCHUD addSubview:l];
+
+        // N1: 「查白雾」按钮 —— 用户看到白雾的瞬间点它，立刻全窗扫描报真身。
+        // 面板整体 userInteractionEnabled 已改为 YES，但 hitTest 做了穿透：
+        // 只有按钮可点，面板其余区域触摸照常穿到地图。
+        UIButton *fb = [UIButton buttonWithType:UIButtonTypeSystem];
+        [fb setTitle:@"查白雾" forState:UIControlStateNormal];
+        fb.titleLabel.font = [UIFont boldSystemFontOfSize:11];
+        [fb setTitleColor:UIColor.whiteColor forState:UIControlStateNormal];
+        fb.backgroundColor = [UIColor colorWithWhite:1 alpha:0.22];
+        fb.layer.cornerRadius = 4;
+        fb.userInteractionEnabled = YES;
+        [fb addTarget:GCHUD action:@selector(fogTap) forControlEvents:UIControlEventTouchUpInside];
+        GCHUD.fogButton = fb;
+        [GCHUD addSubview:fb];
     });
     return GCHUD;
 }
@@ -84,7 +101,20 @@ static GCHUDView *GCHUD;
     self.frame = CGRectMake(8, 60, w, fit.height + pad * 2);
     self.label.frame = CGRectMake(pad, pad, w - pad * 2, fit.height);
     self.label.text = [self.lines componentsJoinedByString:@"\n"];
+    self.fogButton.frame = CGRectMake(w - 76, 4, 68, 22);
     [win bringSubviewToFront:self];
+}
+
+// 只有按钮可点，面板本体触摸穿透（否则会挡住底下地图）
+- (UIView *)hitTest:(CGPoint)point withEvent:(UIEvent *)event {
+    UIView *v = [super hitTest:point withEvent:event];
+    return (v && v != self) ? v : nil;
+}
+
+- (void)fogTap {
+    // GCLog 宏在此处尚未定义（定义顺序在文件更靠后），直接走 log: 方法
+    [GCHUDView log:@"[FOG] —— 手动触发 ——"];
+    GCProbeWhiteFog("manual");
 }
 
 @end
@@ -712,7 +742,9 @@ static void GCKillWhiteOverlay(UIView *bar) {
         if ([v isKindOfClass:UINavigationBar.class] || [v isKindOfClass:UITabBar.class]) continue;
         CGRect r = [v convertRect:v.bounds toView:win];
         if (!isfinite(r.size.width) || !isfinite(r.size.height)) continue;
-        if (r.size.width * r.size.height < area * 0.55) continue;
+        if (r.size.width * r.size.height < area * 0.60) continue;
+        // 页面根视图（占满全屏、cover 整个 VC）是正常背景，不压
+        if (r.size.width >= win.bounds.size.width * 0.98 && r.size.height >= win.bounds.size.height * 0.98) continue;
         CGFloat rr = 0, gg = 0, bb = 0, aa = 0;
         BOOL whiteish = NO;
         if ([v.backgroundColor getRed:&rr green:&gg blue:&bb alpha:&aa] && aa > 0.02)
@@ -753,10 +785,21 @@ static void Schedule(void) {
             // L1: 遮罩常驻压制（再点首页时 App 会重新显示 maskView）
             GCSuppressHomeMask(handler);
         }
-        // M3: 大面积白层兜底（首页出现异常白雾时压掉）
-        for (id tabs in TabControllers.allObjects) {
-            UIView *tb = ObjectGetter(tabs, @"tabBar");
-            if ([tb isKindOfClass:UIView.class]) { GCKillWhiteOverlay(tb); break; }
+        // M3: 大面积白层兜底 —— 只在首页执行。
+        // 0.4.21 的隐患（本轮拆除）：原来无条件每 100ms 扫全窗，
+        // 而「我的」页本身就是大面积白底，会被误压成透明。
+        {
+            BOOL onHome = NO;
+            for (id tabs in TabControllers.allObjects) {
+                id sv = ObjectGetter(tabs, @"selectedViewControl");
+                if ([NSStringFromClass([sv class]) isEqualToString:@"WINAmapHomeControl"]) { onHome = YES; break; }
+            }
+            if (onHome) {
+                for (id tabs in TabControllers.allObjects) {
+                    UIView *tb = ObjectGetter(tabs, @"tabBar");
+                    if ([tb isKindOfClass:UIView.class]) { GCKillWhiteOverlay(tb); break; }
+                }
+            }
         }
 #if GCC_DEVICE_TEST
         RunDeviceCheck();
@@ -1599,12 +1642,16 @@ static void GCProbeWhiteFog(__unused const char *tag) {
                 }
             }
         }
-        if (!whiteish) continue;
+        // 毛玻璃（UIVisualEffectView）backgroundColor 为 nil，必须单独识别 ——
+        // "白雾状"极可能就是一层 blur。
+        BOOL isEffect = [v isKindOfClass:[UIVisualEffectView class]];
+        if (!whiteish && !isEffect) continue;
         hits++;
         if (hits > 12) continue;
-        GCLog(@"[FOG %s] %@ {%.0f,%.0f,%.0f,%.0f} a=%.2f bg=%.2f,%.2f,%.2f,%.2f",
+        GCLog(@"[FOG %s] %@ {%.0f,%.0f,%.0f,%.0f} a=%.2f bg=%.2f,%.2f,%.2f,%.2f%@",
               tag, NSStringFromClass([v class]), r.origin.x, r.origin.y,
-              r.size.width, r.size.height, v.alpha, rr, gg, bb, aa);
+              r.size.width, r.size.height, v.alpha, rr, gg, bb, aa,
+              isEffect ? @" ←毛玻璃" : @"");
     }
     GCLog(@"[FOG %s] 命中 %d 个", tag, hits);
 #endif
@@ -1840,6 +1887,11 @@ __attribute__((constructor)) static void Initialize(void) {
                 if (subs.lastObject != bar) [p bringSubviewToFront:bar];
             }];
 #ifdef GCC_DEVICE_TEST
+            // N2: 启动后自动取证两次（白雾不一定需要点击才出现）
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)),
+                           dispatch_get_main_queue(), ^{ GCProbeWhiteFog("startup3s"); });
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(8.0 * NSEC_PER_SEC)),
+                           dispatch_get_main_queue(), ^{ GCProbeWhiteFog("startup8s"); });
             // HUD 会被 App 的重布局压到下面，1 秒拉回一次
             [NSTimer scheduledTimerWithTimeInterval:1.0 repeats:YES block:^(__unused NSTimer *timer) {
                 [(GCHUDView *)[GCHUDView shared] refresh];
@@ -1847,6 +1899,6 @@ __attribute__((constructor)) static void Initialize(void) {
             }];
 #endif
         });
-        GCLog(@"[INIT] loaded 0.4.21 appVer=%@", appVersion);
+        GCLog(@"[INIT] loaded 0.4.22 appVer=%@", appVersion);
     }
 }
