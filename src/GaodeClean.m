@@ -959,6 +959,31 @@ static void GCKillWhiteOverlay(UIView *bar) {
 #define GC_WIDGET_LEFT_Y  700.0    // 左下车机钮固定 center.y
 #define GC_WIDGET_RIGHT_Y 700.0    // 右下定位钮固定 center.y
 
+// 21:05 真机实证：App 进入某浏览态时连窗口层实例的 center.y 都直接改
+//（车机钮被改到 (32,364)、定位钮 (368,396)），100ms 校验盖不过动画。
+// 升级为 CADisplayLink 60fps 强锁 —— 0.9.99 probe47 已验证此通道可用。
+static CADisplayLink *GCPinLink;
+static NSMutableArray<NSValue *> *GCPinTargets;   // [clsName, centerX, centerY] 三元组
+static BOOL GCPinWidget(UIWindow *win, NSString *clsName, CGFloat centerX, CGFloat centerY, const char *tag);
+
+
+static void GCPinTick(void) {
+    UIWindow *win = nil;
+    for (UIScene *sc in UIApplication.sharedApplication.connectedScenes) {
+        if (![sc isKindOfClass:UIWindowScene.class]) continue;
+        for (UIWindow *w in ((UIWindowScene *)sc).windows) {
+            if (w.isKeyWindow) { win = w; break; }
+        }
+        if (win) break;
+    }
+    if (!win) return;
+    for (NSValue *v in GCPinTargets) {
+        NSArray *a = [v nonretainedObjectValue];
+        if (a.count < 3) continue;
+        GCPinWidget(win, a[0], [a[1] floatValue], [a[2] floatValue], "tick");
+    }
+}
+
 // 按类名在整棵窗口树里找【全部实例】（限深度，防异常树）。
 // 0.4.27 修正：0.4.26 只返回第一颗 —— 广度遍历先扫到窗口层那颗（我们自己搬的），
 // App 在地图容器里重建的新实例完全没人管，继续随地图飘（20:20 截图实证）。
@@ -1047,6 +1072,22 @@ static void GCPinMapWidgets(void) {
     GCPinWidget(win, @"WINDeviceInterconnectWidget", 37.0, GC_WIDGET_LEFT_Y, "车机钮");
     // 右下：定位+路线组合胶囊（整颗搬，保持两者相对位置）
     GCPinWidget(win, @"WINAJXCombinedWidgetView", W - 34.5, GC_WIDGET_RIGHT_Y, "定位钮");
+
+    // 60fps 强锁通道（首次调用时启动）
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        GCPinTargets = [NSMutableArray array];
+        [GCPinTargets addObject:[NSValue valueWithNonretainedObject:@[
+            @"WINDeviceInterconnectWidget", @37.0, @(GC_WIDGET_LEFT_Y)]]];
+        [GCPinTargets addObject:[NSValue valueWithNonretainedObject:@[
+            @"WINAJXCombinedWidgetView", @(W - 34.5), @(GC_WIDGET_RIGHT_Y)]]];
+        Class routerCls = NSClassFromString(@"GCTapRouter");
+        GCPinLink = [CADisplayLink displayLinkWithTarget:routerCls
+                                                selector:@selector(pinTick)];
+        // 30fps 足够盖住动画，CPU 减半
+        GCPinLink.preferredFramesPerSecond = 30;
+        [GCPinLink addToRunLoop:NSRunLoop.mainRunLoop forMode:NSRunLoopCommonModes];
+    });
 }
 
 // ===== U1: 高德 logo 水印探针 =====
@@ -1597,6 +1638,7 @@ static void GCFireSearchViaService(void) {
 @end
 static GCTapRouter *GCSharedRouter;
 @implementation GCTapRouter
++ (void)pinTick { GCPinTick(); }
 - (void)gcTap:(UITapGestureRecognizer *)gr {
     if (gr.state != UIGestureRecognizerStateEnded) return;
     // G: 只认圆内。bar 若是 393x54 的搜索条形态，点在两端也不该触发
@@ -2258,6 +2300,6 @@ __attribute__((constructor)) static void Initialize(void) {
             }];
 #endif
         });
-        GCLog(@"[INIT] loaded 0.4.29 appVer=%@", appVersion);
+        GCLog(@"[INIT] loaded 0.4.30 appVer=%@", appVersion);
     }
 }
