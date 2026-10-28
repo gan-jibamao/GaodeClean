@@ -3,6 +3,103 @@
 #import <objc/message.h>
 #import "GCCGeometry.h"
 
+// ===== 屏幕日志面板（仅 GCC_DEVICE_TEST 编译）=====
+// 为什么需要它：iOS 上普通用户拿不到 NSLog 输出（要去 Xcode / Console.app），
+// 前几轮让用户"发日志"实际都拿不到。改成直接把诊断信息画在屏幕上，截图就行。
+// 面板常驻在最上层窗口，不拦截触摸（userInteractionEnabled=NO）。
+#ifdef GCC_DEVICE_TEST
+
+#import <UIKit/UIKit.h>
+
+@interface GCHUDView : UIView
+@property(nonatomic, strong) NSMutableArray<NSString *> *lines;
+@property(nonatomic, strong) UILabel *label;
+@end
+
+static GCHUDView *GCHUD;
+
+@implementation GCHUDView
+
++ (instancetype)shared {
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        GCHUD = [[GCHUDView alloc] initWithFrame:CGRectZero];
+        GCHUD.lines = [NSMutableArray array];
+        GCHUD.userInteractionEnabled = NO;
+        GCHUD.backgroundColor = [UIColor colorWithWhite:0 alpha:0.72];
+        GCHUD.layer.cornerRadius = 8;
+        GCHUD.layer.masksToBounds = YES;
+
+        UILabel *l = [UILabel new];
+        l.numberOfLines = 0;
+        l.font = [UIFont monospacedSystemFontOfSize:10 weight:UIFontWeightRegular];
+        l.textColor = UIColor.whiteColor;
+        l.userInteractionEnabled = NO;
+        GCHUD.label = l;
+        [GCHUD addSubview:l];
+    });
+    return GCHUD;
+}
+
++ (void)log:(NSString *)fmt, ... {
+    va_list ap;
+    va_start(ap, fmt);
+    NSString *s = [[NSString alloc] initWithFormat:fmt arguments:ap];
+    va_end(ap);
+    NSLog(@"[GaodeClean] %@", s);
+    dispatch_async(dispatch_get_main_queue(), ^{
+        GCHUDView *hud = [GCHUDView shared];
+        NSDateFormatter *df = [NSDateFormatter new];
+        df.dateFormat = @"HH:mm:ss";
+        [hud.lines addObject:[NSString stringWithFormat:@"%@ %@", [df stringFromDate:[NSDate date]], s]];
+        while (hud.lines.count > 16) [hud.lines removeObjectAtIndex:0];
+        [hud refresh];
+    });
+}
+
+- (void)refresh {
+    UIWindow *win = nil;
+    for (UIScene *sc in UIApplication.sharedApplication.connectedScenes) {
+        if (![sc isKindOfClass:UIWindowScene.class]) continue;
+        for (UIWindow *w in ((UIWindowScene *)sc).windows) {
+            if (w.isKeyWindow) { win = w; break; }
+        }
+        if (win) break;
+    }
+    if (!win) {
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+        win = UIApplication.sharedApplication.windows.firstObject;
+#pragma clang diagnostic pop
+    }
+    if (!win) return;
+    if (self.superview != win) {
+        [win addSubview:self];
+        [win bringSubviewToFront:self];
+    }
+    CGFloat W = win.bounds.size.width;
+    CGFloat pad = 6;
+    CGFloat w = MIN(W - 16, 370);
+    CGSize fit = [self.label sizeThatFits:CGSizeMake(w - pad * 2, CGFLOAT_MAX)];
+    self.frame = CGRectMake(8, 60, w, fit.height + pad * 2);
+    self.label.frame = CGRectMake(pad, pad, w - pad * 2, fit.height);
+    self.label.text = [self.lines componentsJoinedByString:@"\n"];
+    [win bringSubviewToFront:self];
+}
+
+@end
+
+// 让宏可以像 NSLog 一样用
+#define GCLog(fmt, ...) [GCHUDView log:fmt, ##__VA_ARGS__]
+
+#else  // !GCC_DEVICE_TEST —— 正式包里 GCLog 是空操作
+
+#define GCLog(fmt, ...) do { } while (0)
+
+#endif
+
+
+
 // This tweak changes UI only. No network interception or modification of the IPA.
 static char TextKey, StateKey, LimitKey, ForcedKindKey, ForcedPathKey, SearchDotKey, HandlerKey;
 static NSHashTable<UIView *> *Pages;
@@ -720,21 +817,21 @@ static void InstallTabDotHitTest(void) {
                 // 只拦「落在本底栏上」的命中；点到别处（比如外部控件）不干预
                 if (hit != self && ![hit isDescendantOfView:self]) return hit;
                 BOOL inDot = GCPointInAnyTabDot(self, point);
-                NSLog(@"[GaodeClean][HIT] bar hit=(%.1f,%.1f) inDot=%d hit=%@ -> %@",
+                GCLog(@"[HIT] bar hit=(%.1f,%.1f) inDot=%d hit=%@ -> %@",
                       point.x, point.y, inDot, NSStringFromClass(hit.class),
                       inDot ? @"PASS" : @"nil(穿透)");
                 return inDot ? hit : nil;
             }), method_getTypeEncoding(m));
-            NSLog(@"[GaodeClean] WINTabBar 圆钮网关已生效");
+            GCLog(@"[INIT] WINTabBar 网关已装");
         }
     } else {
-        NSLog(@"[GaodeClean] WINTabBar 不存在");
+        GCLog(@"[INIT] ！！WINTabBar 不存在");
     }
 
     // ② WINTabBarItem 层双保险（有些路径会直接命中子视图）
     Class cls = NSClassFromString(@"WINTabBarItem");
     if (!cls) {
-        NSLog(@"[GaodeClean] WINTabBarItem 不存在，子层热区跳过");
+        GCLog(@"[INIT] ！！WINTabBarItem 不存在");
         return;
     }
     SEL sel = @selector(hitTest:withEvent:);
@@ -750,12 +847,12 @@ static void InstallTabDotHitTest(void) {
         if (!ancestor) return hit;
         CGPoint p = [self convertPoint:point toView:ancestor];
         BOOL inDot = GCPointInAnyTabDot(ancestor, p);
-        NSLog(@"[GaodeClean][HIT] item %@ p=(%.1f,%.1f)->bar(%.1f,%.1f) inDot=%d %@",
+        GCLog(@"[HIT] item %@ p=(%.1f,%.1f)->bar(%.1f,%.1f) inDot=%d %@",
               NSStringFromClass(self.class), point.x, point.y, p.x, p.y, inDot,
               inDot ? @"PASS" : @"nil");
         return inDot ? hit : nil;
     }), method_getTypeEncoding(m));
-    NSLog(@"[GaodeClean] WINTabBarItem 圆钮热区已生效");
+    GCLog(@"[INIT] WINTabBarItem 热区已装");
 }
 
 static void HookHitTest(Class cls) {
@@ -805,21 +902,21 @@ static UIView *GCLiveSearchBar;
 
 static void GCFireSearchClick(void) {
     UIView *bar = GCLiveSearchBar;
-    if (!bar) { NSLog(@"[GaodeClean][TAP] liveBar 为空"); return; }
+    if (!bar) { GCLog(@"[TAP] liveBar 为空"); return; }
 
     // 路径1：clickAction block（0.3.5 在 17.00.2 实测有效）
     @try {
         id blk = [bar valueForKey:@"clickAction"];
-        NSLog(@"[GaodeClean][TAP] path1 clickAction=%@", blk ? NSStringFromClass([blk class]) : @"nil");
+        GCLog(@"[TAP] path1 clickAction=%@", blk ? NSStringFromClass([blk class]) : @"nil");
         if (blk) { void (^cb)(void) = blk; cb(); return; }
     } @catch (NSException *e) {
-        NSLog(@"[GaodeClean][TAP] path1 exception %@", e.reason);
+        GCLog(@"[TAP] path1 exception %@", e.reason);
     }
 
     // 路径2：onTapBackgound:（原生触摸回调）
     SEL s = NSSelectorFromString(@"onTapBackgound:");
     BOOL has2 = [bar respondsToSelector:s];
-    NSLog(@"[GaodeClean][TAP] path2 onTapBackgound:=%d", has2);
+    GCLog(@"[TAP] path2 onTapBackgound:=%d", has2);
     if (has2) {
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
@@ -829,7 +926,7 @@ static void GCFireSearchClick(void) {
     }
 
     // 路径3：手势 target/action（私有属性，KVC）
-    NSLog(@"[GaodeClean][TAP] path3 gestures=%lu", (unsigned long)bar.gestureRecognizers.count);
+    GCLog(@"[TAP] path3 gestures=%lu", (unsigned long)bar.gestureRecognizers.count);
     for (UIGestureRecognizer *g in bar.gestureRecognizers) {
         if (![g isKindOfClass:[UITapGestureRecognizer class]] || !g.enabled) continue;
         id tg = nil; SEL ac = NULL;
@@ -837,7 +934,7 @@ static void GCFireSearchClick(void) {
             tg = [g valueForKey:@"target"];
             ac = NSSelectorFromString([g valueForKey:@"action"] ?: @"");
         } @catch (NSException *e) { tg = nil; }
-        NSLog(@"[GaodeClean][TAP] path3 gesture target=%@ sel=%@",
+        GCLog(@"[TAP] path3 gesture target=%@ sel=%@",
               tg ? NSStringFromClass([tg class]) : @"nil",
               ac ? NSStringFromSelector(ac) : @"nil");
         if (tg && ac) {
@@ -856,13 +953,13 @@ static void GCFireSearchClick(void) {
         id cand = objc_getAssociatedObject(v, &HandlerKey);
         if (cand) handler = cand;
     }
-    NSLog(@"[GaodeClean][TAP] path4 handler=%@", handler ? NSStringFromClass([handler class]) : @"nil");
+    GCLog(@"[TAP] path4 handler=%@", handler ? NSStringFromClass([handler class]) : @"nil");
     if (handler) {
         for (NSString *name in @[@"onSearchBarTapped", @"onTapSearchBar", @"showSearchPage",
                                  @"openSearch", @"onSearchEntryTapped", @"didTapSearchBar"]) {
             SEL h = NSSelectorFromString(name);
             if (![handler respondsToSelector:h]) continue;
-            NSLog(@"[GaodeClean][TAP] path4 命中 %@", name);
+            GCLog(@"[TAP] path4 命中 %@", name);
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
             [handler performSelector:h withObject:nil];
@@ -871,7 +968,7 @@ static void GCFireSearchClick(void) {
         }
     }
 
-    NSLog(@"[GaodeClean][TAP] 所有路径均未命中");
+    GCLog(@"[TAP] 所有路径均未命中");
 }
 
 @interface GCTapRouter : NSObject
@@ -1166,13 +1263,13 @@ static void GCLogBarTree(__unused UIView *bar, __unused CGFloat winW) {
     loggedFrames++;
     NSArray *titems = ObjectGetter(bar, @"tabBarItems");
     NSUInteger icount = [titems isKindOfClass:NSArray.class] ? titems.count : 0;
-    NSLog(@"[GaodeClean][BAR] #%d bar={%.1f,%.1f,%.1f,%.1f} winW=%.1f items=%lu",
+    GCLog(@"[BAR] #%d bar={%.1f,%.1f,%.1f,%.1f} winW=%.1f items=%lu",
           loggedFrames, bar.frame.origin.x, bar.frame.origin.y,
           bar.frame.size.width, bar.frame.size.height, winW, (unsigned long)icount);
     int i = 0;
     for (UIView *v in bar.subviews) {
         if (i++ > 40) break;
-        NSLog(@"[GaodeClean][BAR]   sub[%d] %@ {%.1f,%.1f,%.1f,%.1f} hid=%d a=%.2f txt=%@",
+        GCLog(@"[BAR] sub[%d] %@ {%.1f,%.1f,%.1f,%.1f} hid=%d a=%.2f txt=%@",
               i, NSStringFromClass(v.class), v.frame.origin.x, v.frame.origin.y,
               v.frame.size.width, v.frame.size.height, v.hidden, v.alpha,
               [NodeText(v) stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceCharacterSet]);
@@ -1350,7 +1447,14 @@ __attribute__((constructor)) static void Initialize(void) {
         // Recheck after asynchronous cards and cell reuse; only attached target pages are scanned.
         dispatch_async(dispatch_get_main_queue(), ^{
             [NSTimer scheduledTimerWithTimeInterval:0.5 repeats:YES block:^(__unused NSTimer *timer) { Schedule(); }];
+#ifdef GCC_DEVICE_TEST
+            // HUD 会被 App 的重布局压到下面，1 秒拉回一次
+            [NSTimer scheduledTimerWithTimeInterval:1.0 repeats:YES block:^(__unused NSTimer *timer) {
+                [(GCHUDView *)[GCHUDView shared] refresh];
+                if (!GCHUDView.shared.superview) GCLog(@"[HUD] 等待窗口…");
+            }];
+#endif
         });
-        NSLog(@"[GaodeClean] loaded 0.4.14 (universal; appVer=%@)", appVersion);
+        GCLog(@"[INIT] loaded 0.4.15 appVer=%@", appVersion);
     }
 }
