@@ -1,6 +1,6 @@
 Package: com.jibamao.gaodeclean
 Name: Gaode Clean
-Version: 0.4.18
+Version: 0.4.19
 Architecture: iphoneos-arm64
 Description: UI-only cleanup for Amap (universal, no version lock): three floating round buttons, decluttered home.
 Maintainer: Local Developer

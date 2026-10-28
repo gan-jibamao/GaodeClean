@@ -916,6 +916,18 @@ static UIView *GCLiveSearchBar;
 static void GCFireSearchFallback(UIView *bar);
 static void GCFireSearchViaService(void);
 
+// 当前"页面签名"：主窗口 rootVC 的导航栈顶类名 + presented 链顶类名。
+// push/pop 都会改变 visibleViewController，present 会改变 presented 链。
+static NSString *GCPageSignature(UIViewController *root) {
+    if (!root) return @"(nil)";
+    UIViewController *top = root;
+    if ([top isKindOfClass:UINavigationController.class])
+        top = ((UINavigationController *)top).visibleViewController ?: top;
+    while (top.presentedViewController && !top.presentedViewController.isBeingDismissed)
+        top = top.presentedViewController;
+    return NSStringFromClass(top.class);
+}
+
 static void GCFireSearchClick(void) {
     UIView *bar = GCLiveSearchBar;
     if (!bar) { GCLog(@"[TAP] liveBar 为空"); return; }
@@ -930,27 +942,28 @@ static void GCFireSearchClick(void) {
         id blk = [bar valueForKey:@"clickAction"];
         GCLog(@"[TAP] path1 block=%@", blk ? NSStringFromClass([blk class]) : @"nil");
         if (blk) {
-            UIWindow *winBefore = nil;
+            // 页面签名：导航栈顶类名 + presented 链顶类名。
+            // 17:48 实证：搜索页在同一 AMNavigationController 里 push，
+            // rootViewController 不变、无 presented —— 旧判据(rootChanged)恒假，
+            // 开页成功也被误判"无效"而补发后续路径（双重导航风险）。
+            UIViewController *navBefore = nil;
             for (UIScene *sc in UIApplication.sharedApplication.connectedScenes)
                 if ([sc isKindOfClass:UIWindowScene.class])
                     for (UIWindow *w in ((UIWindowScene *)sc).windows)
-                        if (w.isKeyWindow) { winBefore = w; break; }
-            UIViewController *rootBefore = winBefore.rootViewController;
+                        if (w.isKeyWindow) { navBefore = w.rootViewController; break; }
+            NSString *sigBefore = GCPageSignature(navBefore);
             void (^cb)(void) = blk;
             cb();
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.4 * NSEC_PER_SEC)),
                            dispatch_get_main_queue(), ^{
-                UIWindow *winAfter = nil;
+                UIViewController *navAfter = nil;
                 for (UIScene *sc in UIApplication.sharedApplication.connectedScenes)
                     if ([sc isKindOfClass:UIWindowScene.class])
                         for (UIWindow *w in ((UIWindowScene *)sc).windows)
-                            if (w.isKeyWindow) { winAfter = w; break; }
-                UIViewController *rootAfter = winAfter.rootViewController;
-                UIViewController *top = rootAfter;
-                while (top.presentedViewController) top = top.presentedViewController;
-                pageChanged = (rootAfter != rootBefore) || (top != rootAfter);
-                GCLog(@"[TAP] path1 执行后 rootChanged=%d top=%@",
-                      rootAfter != rootBefore, NSStringFromClass(top.class));
+                            if (w.isKeyWindow) { navAfter = w.rootViewController; break; }
+                NSString *sigAfter = GCPageSignature(navAfter);
+                pageChanged = ![sigAfter isEqualToString:sigBefore];
+                GCLog(@"[TAP] path1 执行后 changed=%d top=%@", pageChanged, sigAfter);
                 if (!pageChanged) {
                     GCLog(@"[TAP] path1 无效，补发 path2/4");
                     GCFireSearchFallback(bar);
@@ -1577,6 +1590,6 @@ __attribute__((constructor)) static void Initialize(void) {
             }];
 #endif
         });
-        GCLog(@"[INIT] loaded 0.4.18 appVer=%@", appVersion);
+        GCLog(@"[INIT] loaded 0.4.19 appVer=%@", appVersion);
     }
 }
