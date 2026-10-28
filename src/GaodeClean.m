@@ -999,38 +999,34 @@ static void GCPinTick(void) {
 static void GCPinLogoWidget(UIWindow *win) {
     if (!win) return;
     static BOOL loggedMissing;
-    // ① 先找父容器（完整 logo+比例尺组合）
-    NSArray<UIView *> *cands = GCFindWidgetsByClass(win, @"WINScaleLineLogoMapWidget", 40);
+    // 22:33 实测：水印整体（logo+文字）129x17 @ (16~144, 790~806)，
+    // 类名跨会话不稳定（21:50 命中 WINScaleLineLogoMapWidget，22:03 缺席）。
+    // 改纯几何特征：左下角横条 宽100~160 高12~24 可见。
+    // 排除：我们自己的控件（在窗口层）；挂在窗口层的都会被排除。
     UIView *target = nil;
-    for (UIView *c in cands) {
-        if (c.hidden || c.alpha < 0.05) continue;
-        target = c;
+    NSMutableArray<UIView *> *stack = [NSMutableArray arrayWithObject:win];
+    NSUInteger guard = 0;
+    CGFloat W = win.bounds.size.width, H = win.bounds.size.height;
+    while (stack.count && guard++ < 3000) {
+        UIView *v = stack.lastObject;
+        [stack removeLastObject];
+        for (UIView *sub in v.subviews) [stack addObject:sub];
+        if (v == win || v.hidden || v.alpha < 0.05) continue;
+        if (v.superview == win) continue;          // 窗口层的都是我们自己搬的
+        CGRect r = [v convertRect:v.bounds toView:win];
+        if (!isfinite(r.size.width) || !isfinite(r.size.height)) continue;
+        CGFloat w = r.size.width, h = r.size.height;
+        if (w < 100 || w > 165 || h < 12 || h > 24) continue;
+        CGFloat cx = CGRectGetMidX(r), cy = CGRectGetMidY(r);
+        if (cx > W * 0.42 || cy < H * 0.88) continue;   // 左下角
+        // 窗口坐标里的水印特征命中
+        target = v;
         break;
-    }
-    // ② 父容器不可见/不存在 → 找内层 UIImageView（76x16 特征）
-    if (!target) {
-        NSMutableArray<UIView *> *stack = [NSMutableArray arrayWithObject:win];
-        NSUInteger guard = 0;
-        while (stack.count && guard++ < 3000) {
-            UIView *v = stack.lastObject;
-            [stack removeLastObject];
-            for (UIView *sub in v.subviews) [stack addObject:sub];
-            if (![NSStringFromClass([v class]) isEqualToString:@"UIImageView"]) continue;
-            CGSize sz = v.bounds.size;
-            if (sz.width < 60 || sz.width > 95 || sz.height < 10 || sz.height > 22) continue;
-            UIView *p = v.superview;
-            BOOL ok = NO;
-            for (int i = 0; i < 4 && p; i++, p = p.superview)
-                if ([NSStringFromClass([p class]) isEqualToString:@"WINScaleLineLogoMapWidget"]) { ok = YES; break; }
-            if (!ok) continue;
-            target = v.superview;
-            break;
-        }
     }
     if (!target) {
         if (!loggedMissing) {
             loggedMissing = YES;
-            GCLog(@"[LOGO] 未找到可见的水印实例（可能被 App 隐藏）");
+            GCLog(@"[LOGO] 未找到水印（可能被 App 隐藏或比例尺模式变化）");
         }
         return;
     }
@@ -1040,7 +1036,7 @@ static void GCPinLogoWidget(UIWindow *win) {
         [target removeFromSuperview];
         [win addSubview:target];
         target.frame = inWin;
-        GCLog(@"[LOGO] 水印已搬到窗口层");
+        GCLog(@"[LOGO] 水印已搬到窗口层 class=%@", NSStringFromClass([target class]));
     }
     CGPoint want = CGPointMake(GC_LOGO_X, GC_LOGO_Y);
     if (fabs(target.center.x - want.x) > 0.5 || fabs(target.center.y - want.y) > 0.5)
@@ -2360,6 +2356,6 @@ __attribute__((constructor)) static void Initialize(void) {
             }];
 #endif
         });
-        GCLog(@"[INIT] loaded 0.4.33 appVer=%@", appVersion);
+        GCLog(@"[INIT] loaded 0.4.34 appVer=%@", appVersion);
     }
 }
