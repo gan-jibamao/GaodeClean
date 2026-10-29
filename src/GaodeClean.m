@@ -381,11 +381,17 @@ static void UpdateMask(UIView *page) {
         }
         state.clip = nil;
         state.previousMask = nil;
+        // ===== 0.4.46：遮罩从 page 内部移到 page.superview =====
+        // 07:56 实证：boundary=295.7 命中、GCCBlankArea {0,296,393,556} a=1.00 也在，
+        // 但用户仍看到「火车票机票/代驾」等内容。
+        // 根因：blankArea 挂在 AJX3View(page) 内部，而部分卡片是 page 的
+        // **兄弟浮层**（[FOG] 里的 AJXContainerView {0,423,393,173} / {0,187,393,665}），
+        // 与 page 同级，遮罩盖不到它们。
+        // 修法：挂到 page.superview，并提到该层最前；坐标换算到父层。
+        UIView *host = page.superview ?: page;
         if (!state.blankArea) state.blankArea = [[GCCBlankArea alloc] initWithFrame:CGRectZero];
-        if (state.blankArea.superview != page) [page addSubview:state.blankArea];
-        // Q3 自愈：外部（我们自己的兜底扫描、或 App）可能把遮罩改成
-        // alpha=0 / hidden —— alpha<0.01 会同时导致视觉消失和 hitTest 失效。
-        // 每次布局都补一次，100ms 内自动恢复。
+        if (state.blankArea.superview != host) [host addSubview:state.blankArea];
+        // Q3 自愈：外部（我们自己的兜底扫描、或 App）可能把遮罩改成 alpha=0/hidden
         if (state.blankArea.alpha < 0.99) state.blankArea.alpha = 1.0;
         if (state.blankArea.hidden) state.blankArea.hidden = NO;
         UIColor *background = page.backgroundColor;
@@ -393,9 +399,29 @@ static void UpdateMask(UIView *page) {
         if (!background || ![background getRed:NULL green:NULL blue:NULL alpha:&alpha] || alpha < 0.99)
             background = UIColor.systemBackgroundColor;
         state.blankArea.backgroundColor = background;
-        state.blankArea.frame = CGRectMake(page.bounds.origin.x, page.bounds.origin.y + height,
-                                            page.bounds.size.width, MAX(0, page.bounds.size.height - height));
-        [page bringSubviewToFront:state.blankArea];
+        // 用 page 坐标算好的区域，再换算到 host 坐标系
+        CGRect areaInPage = CGRectMake(page.bounds.origin.x, page.bounds.origin.y + height,
+                                       page.bounds.size.width,
+                                       MAX(0, page.bounds.size.height - height));
+        CGRect areaInHost = [page convertRect:areaInPage toView:host];
+        if (!isfinite(areaInHost.size.width) || !isfinite(areaInHost.size.height)) {
+            areaInHost = areaInPage;
+        }
+        state.blankArea.frame = areaInHost;
+        [host bringSubviewToFront:state.blankArea];
+        // 诊断：层级变化时报一次（确认 host 是不是足够大的容器）
+        {
+            static __weak UIView *lastHost;
+            if (lastHost != host) {
+                lastHost = host;
+                GCLog(@"[MASK] 遮罩挂到 %@ {%.0f,%.0f,%.0f,%.0f} 区域={%.0f,%.0f,%.0f,%.0f}",
+                      NSStringFromClass([host class]),
+                      host.bounds.origin.x, host.bounds.origin.y,
+                      host.bounds.size.width, host.bounds.size.height,
+                      areaInHost.origin.x, areaInHost.origin.y,
+                      areaInHost.size.width, areaInHost.size.height);
+            }
+        }
         [CATransaction commit];
         return;
     }
@@ -2638,6 +2664,6 @@ __attribute__((constructor)) static void Initialize(void) {
             }];
 #endif
         });
-        GCLog(@"[INIT] loaded 0.4.45 appVer=%@", appVersion);
+        GCLog(@"[INIT] loaded 0.4.46 appVer=%@", appVersion);
     }
 }
