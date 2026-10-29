@@ -489,6 +489,59 @@ static void ApplyLimits(GCCState *state) {
     UpdateMask(state.page);
 }
 
+// ===== W1: 「我的」页删除式清理（借鉴 GDDTHookByX 的思路）=====
+//
+// 为什么改用"删"而不是"盖"：
+//   我们卡了 4 版（0.4.23→0.4.46）在遮罩上 —— GCCBlankArea 挂 page 内不行、
+//   挂父层不行、挂窗口层也不行，因为「我的」页的卡片是 App 用 AJX 动态生成的
+//   多层容器，遮罩很难找到正确的层级。
+//   GDDTHookByX.dylib（逆向实证）用的是最朴素的方案：直接 removeFromSuperview
+//   把不需要的视图删掉，根本不需要遮罩。
+//
+// 判据：在 boundary 以下、且是「卡片级」的视图（尺寸够大、有内容），删掉。
+// 保护：不删 page 本身、不删滚动容器、不删我们的遮罩/控件。
+static void GCStripBelowBoundary(UIView *page, CGFloat boundary) {
+    if (!page || !isfinite(boundary) || boundary <= 0) return;
+    NSMutableArray<UIView *> *victims = [NSMutableArray array];
+    NSMutableArray<UIView *> *queue = [NSMutableArray arrayWithObject:page];
+    NSUInteger guard = 0;
+    while (queue.count && guard++ < 3000) {
+        UIView *v = queue.lastObject;
+        [queue removeLastObject];
+        for (UIView *sub in v.subviews) [queue addObject:sub];
+        if (v == page || !v.superview) continue;
+        if ([v isKindOfClass:[GCCBlankArea class]]) continue;      // 别删自己的遮罩
+        if (v.superview == page.window) continue;                   // 窗口层的东西不碰
+        if ([v isKindOfClass:[UIScrollView class]]) continue;       // 滚动容器本体
+        if ([v isKindOfClass:[UINavigationBar class]] || [v isKindOfClass:[UITabBar class]]) continue;
+        CGRect r = [v convertRect:v.bounds toView:page];
+        if (!isfinite(r.origin.y) || !isfinite(r.size.height)) continue;
+        // 完全落在 boundary 以下，且尺寸像"卡片/行"（不是像素级小元素）
+        if (r.origin.y < boundary - 1) continue;
+        if (r.size.height < 20 || r.size.width < page.bounds.size.width * 0.5) continue;
+        [victims addObject:v];
+    }
+    if (!victims.count) return;
+    // 只删最外层：如果某受害者的祖先也在名单里，跳过它（跟着祖先一起消失）
+    NSMutableArray<UIView *> *top = [NSMutableArray array];
+    for (UIView *v in victims) {
+        BOOL covered = NO;
+        for (UIView *a = v.superview; a && a != page; a = a.superview) {
+            if ([victims containsObject:a]) { covered = YES; break; }
+        }
+        if (!covered) [top addObject:v];
+    }
+    int n = 0;
+    for (UIView *v in top) {
+        [v removeFromSuperview];
+        n++;
+        if (n <= 4) {
+            GCLog(@"[MINE] 删除视图 %@", NSStringFromClass([v class]));
+        }
+    }
+    if (n) GCLog(@"[MINE] boundary=%.0f 以下删除 %d 个视图", boundary, n);
+}
+
 static void BindBoundary(UIView *page, UIView *anchor, UIView *peer, CGFloat boundary, GCCState *state) {
     // Persist the boundary in content coordinates, not screen coordinates. Cell reuse no
     // longer removes the boundary, and scrolling cannot move new cards into the visible area.
@@ -713,6 +766,8 @@ static void CleanPage(UIView *page) {
         if (fabs([cached[@"bottom"] doubleValue] - boundary) > 0.5 || fabs([cached[@"width"] doubleValue] - page.bounds.size.width) > 0.5)
             [NSUserDefaults.standardUserDefaults setObject:@{@"width":@(page.bounds.size.width), @"bottom":@(boundary)} forKey:@"GaodeClean.MineBoundary.17.00.2"];
     }
+    // 删除式清理：boundary 以下的卡片直接删掉（不留遮罩）
+    if (kind == 3) GCStripBelowBoundary(page, boundary);
     BindBoundary(page, anchor, peer, boundary, state);
     if (!state.reportedMatch) {
         GCLog(@"[MINE] kind=%ld anchor=命中 boundary=%.1f scrolls=%lu pageH=%.0f",
@@ -1530,7 +1585,15 @@ static void Schedule(void) {
             }
         }
         for (id controller in NearbyControllers.allObjects) RegisterNearby(controller);
-        for (UIView *page in Pages.allObjects) CleanPage(page);
+        for (UIView *page in Pages.allObjects) {
+            CleanPage(page);
+            // W1: 补删 —— App 可能重建被删的卡片，这里持续清理
+            GCCState *st = objc_getAssociatedObject(page, &StateKey);
+            if (st && st.matched && Kind(page) == 3) {
+                CGPoint edge = [st.reference convertPoint:st.boundaryPoint toView:page];
+                if (isfinite(edge.y) && edge.y > 0) GCStripBelowBoundary(page, edge.y);
+            }
+        }
         for (id handler in HomeHandlers.allObjects) {
             LayoutMinimalHome(handler);
             // L1: 遮罩常驻压制（再点首页时 App 会重新显示 maskView）
@@ -2698,6 +2761,6 @@ __attribute__((constructor)) static void Initialize(void) {
             }];
 #endif
         });
-        GCLog(@"[INIT] loaded 0.4.47 appVer=%@", appVersion);
+        GCLog(@"[INIT] loaded 0.4.48 appVer=%@", appVersion);
     }
 }
