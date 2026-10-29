@@ -18,7 +18,7 @@
 // ---- jibamao 个人标识（编译进 dylib，可用 strings 核对）----
 static NSString *const kGCAuthor      = @"jibamao";
 static NSString *const kGCRepo        = @"https://gan-jibamao.github.io/";
-static NSString *const kGCVersion     = @"0.9.98";
+static NSString *const kGCVersion     = @"0.9.98+trial56";
 
 // 0.9.18（A1）：底边间隙**按控件分开**，对表原生（搜索栏白底顶边 = 702.6pt）
 //   车机钮（连接车机 · WINDeviceInterconnectWidget）：原生底 652 → 间隙 50.6 → 取 50
@@ -1443,6 +1443,7 @@ static void GCCArmTick(void); // 0.7.4(A3)：按前台/后台动态整备 tick �
 static NSMutableDictionary<NSString *, NSNumber *> *AjxCache;  // 0.7.2：类名→是否 AJX
 static void InstallSplashAdGuard(void);
 static void SplashAdTick(void);
+static void GCTopBannerTick(void);                   // 0.9.98（E）：顶部浮动横幅广告
 static void AlignOneWidget(UIView *bar, UIView *w, CGFloat barTop, CGFloat gap);
 
 @class GCCState;
@@ -2045,6 +2046,8 @@ static void Schedule(void) {
         }
         // 0.7.0：开屏广告兜底（有界窗口内）
         SplashAdTick();
+        // 0.9.98（E）：顶部浮动横幅广告（天猫双11 等）—— 2.5Hz 复核，命中即压回
+        GCTopBannerTick();
         // 0.6.7：底栏「上拉发现」提示的周期通道 —— 引导态常常晚于最后一次布局才落地，
         // 只挂 layout 就是这个 bug 偶发的根因。扫描范围只有底栏子树，开销可忽略。
         // 0.7.4(A6)：「上拉发现」是 200ms~1s 级的异步引导态，5Hz 采样过剩，降到 2.5Hz。
@@ -5867,6 +5870,120 @@ static void SplashAdTick(void) {
 static void ReArmSplashGuard(void) {
     GCCSplashTicks = 75;          // 75 × 200ms ≈ 15s
     SplashAdTick();
+}
+
+// ===========================================================================
+//  0.9.98（E）：顶部浮动横幅广告（如「天猫双11，官方立减」）—— 全版本自适应移除
+//
+//  现象（真机 393×852pt 截图逐像素实测）：
+//    灵动岛下方 y≈74.7..107.0 悬浮一条淡紫满圆角卡片，宽≈282.7pt、高≈32.3pt，
+//    右侧带「广告」徽标与 × 关闭钮。
+//
+//  为什么 0.9.98 完全抓不到（源码逻辑破绽）：
+//    GCCHasAdKeyword + GCCIsFullScreen 这套只认「覆盖窗口 ≥60% 面积」的开屏广告。
+//    本条横幅 高 32.3 / 852 = 3.8%  ⇒ GCCIsFullScreen 的首行高度判据即判死，
+//    SplashAdTick 三条通道（窗口 addSubview / presentViewController / 窗口枚举）
+//    对它 0 命中。IsHiddenMapPromo 只认 template_oparate_icon / template_rank /
+//    扫街榜，同样不覆盖。⇒ 这条横幅在 0.9.98 里**从未被任何代码处理过**。
+//
+//  做法（不猜类名，按「徽标文本 + 卡片几何」双证，延续 0.9.19 的发现式思路）：
+//    ① 只扫主窗口顶部 40% 带，BFS 剪枝（整块落在带外的子树直接跳过），上限 400 节点；
+//    ② 命中「自身文本含【广告】」的可见节点；
+//    ③ 由它向上爬到卡片容器：宽 ∈[45%,95%] 窗宽、高 ∈[18,80]、整块落在顶部带内；
+//    ④ 卡片内必须另有正文（≥2 个文本节点且最长 ≥6 字）—— 排除「XX广告公司」店名；
+//    ⑤ 命中即 hidden 并记账；此后每拍复核，App 若改回显示立即压回。
+//
+//  安全边界（全部来自本仓库踩过的坑）：
+//    · 滚动列表（UIScrollView）子树一律不碰 —— 0.4.32/0.4.33 教训：按位置隐藏会误伤
+//      搜索输入区；搜索页结果卡片同样带「广告」徽标，不该被这条规则波及。
+//    · 全宽控件排除（搜索栏 100% 窗宽 > 95% 上限）。
+//    · 几何不符即放弃，宁可漏一个广告，也绝不误伤 App 自身。
+// ===========================================================================
+static __weak UIView *GCTopAdCard;      // 已定性的顶部广告卡
+
+// 该节点或其任一祖先是滚动列表 → 不碰
+static BOOL GCTopAdInScroll(UIView *v) {
+    for (UIView *p = v; p; p = p.superview) {
+        if ([p isKindOfClass:UIScrollView.class]) return YES;
+    }
+    return NO;
+}
+
+// 由徽标节点向上爬：取最后一个仍满足「卡片几何」的祖先
+static UIView *GCTopAdCardFromBadge(UIView *badge, UIWindow *win) {
+    CGFloat winW = win.bounds.size.width, winH = win.bounds.size.height;
+    UIView *best = nil;
+    for (UIView *v = badge; v && v != win && v.superview; v = v.superview) {
+        if (v.hidden || v.alpha < 0.05f) break;
+        CGRect r = [v convertRect:v.bounds toView:win];
+        if (r.size.width > winW * 0.95 || r.size.height > 80) break;   // 出界即停
+        if (r.size.width < winW * 0.45 || r.size.height < 18) break;   // 太窄太薄即停
+        if (r.origin.y < -2 || CGRectGetMaxY(r) > winH * 0.40) break;  // 不在顶部带即停
+        best = v;
+    }
+    return best;
+}
+
+// 卡片里必须还有正文 —— 排除「XX广告公司」这类店名
+static BOOL GCTopAdHasCopy(UIView *card) {
+    NSArray<UIView *> *all = Flatten(card);
+    if (!all) return NO;
+    NSUInteger nodes = 0, longest = 0;
+    for (UIView *v in all) {
+        NSString *t = NodeText(v);
+        if (!t.length) continue;
+        nodes++;
+        if (t.length > longest) longest = t.length;
+    }
+    return (nodes >= 2 && longest >= 6);
+}
+
+// 顶部带 BFS：整块落在 40% 线以下的子树直接剪掉
+static void GCTopBandScan(UIWindow *win, NSMutableArray<UIView *> *out, NSUInteger cap) {
+    CGFloat winH = win.bounds.size.height;
+    NSMutableArray<UIView *> *q = [NSMutableArray arrayWithObject:win];
+    for (NSUInteger i = 0; i < q.count && out.count < cap; i++) {
+        UIView *v = q[i];
+        if (v != win) {
+            if (v.hidden || v.alpha < 0.05f) continue;
+            CGRect r = [v convertRect:v.bounds toView:win];
+            if (r.size.width < 1 || r.size.height < 1) continue;
+            if (r.origin.y > winH * 0.40) continue;      // 剪枝
+            [out addObject:v];
+        }
+        if (v.subviews.count) [q addObjectsFromArray:v.subviews];
+    }
+}
+
+static void GCTopBannerTick(void) {
+    UIWindow *win = GCCMainWindow;
+    if (!win) return;                       // 主窗口未定 = 首页还没起来，什么都不做
+
+    // 已记账：还在同一窗口就持续按住；换了窗口就重新认
+    if (GCTopAdCard) {
+        if (GCTopAdCard.window == win) {
+            if (!GCTopAdCard.hidden) GCTopAdCard.hidden = YES;
+            return;
+        }
+        GCTopAdCard = nil;
+    }
+
+    if (TickCount % 2) return;              // 2.5Hz，与 SweepTabBarHints 同档
+
+    NSMutableArray<UIView *> *band = [NSMutableArray array];
+    GCTopBandScan(win, band, 400);
+
+    for (UIView *v in band) {
+        if (v.hidden || v.alpha < 0.05f) continue;
+        if (GCTopAdInScroll(v)) continue;                       // 滚动列表不碰
+        NSString *text = NodeText(v);
+        if (!text.length || ![text containsString:GCStrAt(295)]) continue;  // 「广告」徽标
+        UIView *card = GCTopAdCardFromBadge(v, win);
+        if (!card || !GCTopAdHasCopy(card)) continue;
+        GCTopAdCard = card;
+        card.hidden = YES;
+        return;
+    }
 }
 
 // ---------------------------------------------------------------------------
