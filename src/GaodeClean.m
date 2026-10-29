@@ -368,7 +368,22 @@ static BOOL HasTerm(NSString *text, NSArray<NSString *> *terms) {
 
 static void UpdateMask(UIView *page) {
     GCCState *state = objc_getAssociatedObject(page, &StateKey);
-    if (!state.matched || !state.reference || !page.window) return;
+    // 0.4.47 诊断：08:06 真机无 [MASK] 遮罩挂到 日志，且 FOG 8 个白层里没有
+    // GCCBlankArea —— 说明这里提前 return 了。逐条报原因（状态变化才报）。
+    {
+        static char DbgKey;
+        NSString *why = nil;
+        if (!state) why = @"无state";
+        else if (!state.matched) why = @"未命中";
+        else if (!state.reference) why = @"无reference";
+        else if (!page.window) why = @"page无window";
+        NSString *last = objc_getAssociatedObject(page, &DbgKey);
+        if (![why ?: @"ok" isEqualToString:last ?: @""]) {
+            objc_setAssociatedObject(page, &DbgKey, (why ?: @"ok"), OBJC_ASSOCIATION_COPY_NONATOMIC);
+            GCLog(@"[MASK] UpdateMask 状态=%@ kind=%ld", why ?: @"继续", (long)Kind(page));
+        }
+        if (why) return;
+    }
     CGPoint edge = [state.reference convertPoint:state.boundaryPoint toView:page];
     CGFloat height = MAX(0, MIN(page.bounds.size.height, edge.y - page.bounds.origin.y));
     if (!isfinite(height)) return;
@@ -2407,7 +2422,26 @@ static void GCProbeWhiteFog(__unused const char *tag) {
               r.size.width, r.size.height, v.alpha, rr, gg, bb, aa,
               isEffect ? @" ←毛玻璃" : @"");
     }
-    GCLog(@"[FOG %s] 命中 %d 个", tag, hits);
+    // 0.4.47: 专门统计我们自己的遮罩（不受尺寸/颜色阈值影响）
+    {
+        int blanks = 0;
+        NSMutableArray<UIView *> *st = [NSMutableArray arrayWithObject:win];
+        NSUInteger g2 = 0;
+        while (st.count && g2++ < 4000) {
+            UIView *v = st.lastObject;
+            [st removeLastObject];
+            for (UIView *sub in v.subviews) [st addObject:sub];
+            if (![v isKindOfClass:[GCCBlankArea class]]) continue;
+            blanks++;
+            if (blanks <= 3) {
+                CGRect r = [v convertRect:v.bounds toView:win];
+                GCLog(@"[FOG %s] GCCBlankArea {%.0f,%.0f,%.0f,%.0f} hid=%d a=%.2f super=%@",
+                      tag, r.origin.x, r.origin.y, r.size.width, r.size.height,
+                      v.hidden, v.alpha, NSStringFromClass([v.superview class]));
+            }
+        }
+        GCLog(@"[FOG %s] 命中 %d 个, BlankArea=%d", tag, hits, blanks);
+    }
 #endif
 }
 
@@ -2664,6 +2698,6 @@ __attribute__((constructor)) static void Initialize(void) {
             }];
 #endif
         });
-        GCLog(@"[INIT] loaded 0.4.46 appVer=%@", appVersion);
+        GCLog(@"[INIT] loaded 0.4.47 appVer=%@", appVersion);
     }
 }
