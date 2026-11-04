@@ -18,7 +18,7 @@
 // ---- jibamao 个人标识（编译进 dylib，可用 strings 核对）----
 static NSString *const kGCAuthor      = @"jibamao";
 static NSString *const kGCRepo        = @"https://gan-jibamao.github.io/";
-static NSString *const kGCVersion     = @"0.9.113";
+static NSString *const kGCVersion     = @"0.9.114";
 
 // 0.9.18（A1）：底边间隙**按控件分开**，对表原生（搜索栏白底顶边 = 702.6pt）
 //   车机钮（连接车机 · WINDeviceInterconnectWidget）：原生底 652 → 间隙 50.6 → 取 50
@@ -5689,6 +5689,31 @@ static BOOL GCCViewIsUnder(UIView *v, UIView *anc) {   // v == anc 或其后代�
     return NO;
 }
 
+// ★0.9.114（A3）：右上胶囊几何区硬豁免 —— 不依赖任何缓存。
+//   背景：A1/A2 修掉的闪烁，直接诱因是「+」号被当成 2D/3D 搬走。但根子上还有一处
+//   脆弱点：GCCIsClaimedWidget 的豁免依赖 CachedLiteGroup 这个 **弱引用**，
+//   而胶囊在冷启动 0.83s 才出现 —— 在那之前它是 nil，豁免整条失效，
+//   胶囊里的视图就裸露在所有识别器的视野里（不止 2D/3D，任何按几何找控件的逻辑
+//   都可能抓到它）。这里补一条纯几何判据，永远有效。
+//
+//   区域定义（对表真机 1179×2556 @3x ⇒ 393×852 逻辑像素）：
+//     · 右列：视图中心 x ≥ 屏宽 70%
+//     · 顶部：视图 maxY ≤ 屏高 35%
+//   这正好框住右上「+/图层」胶囊，而右下 ⊙/↰ 胶囊（y≈600pt，70%）与底栏（y≈760pt）
+//   都在框外，不会被误判成「胶囊内」。中部裸露的 LiteGroup（y>25% 且居中）也不受影响。
+static BOOL GCCIsInTopRightCapsuleZone(UIView *v) {
+    if (!v) return NO;
+    UIWindow *win = v.window;
+    if (!win) return NO;
+    CGFloat ww = win.bounds.size.width, wh = win.bounds.size.height;
+    if (ww < 1 || wh < 1) return NO;
+    CGRect r = [v convertRect:v.bounds toView:win];
+    if (!isfinite(r.origin.x) || !isfinite(r.origin.y)) return NO;
+    if (CGRectGetMidX(r) < ww * 0.70) return NO;
+    if (CGRectGetMaxY(r) > wh * 0.35 || CGRectGetMaxY(r) <= 0) return NO;
+    return YES;
+}
+
 // 已被我们认领的控件（车机钮 / ⊙↰ 胶囊 / 原生组容器）及其祖先后代 —— 一律不碰
 static BOOL GCCIsClaimedWidget(UIView *v) {
     UIView *cs[3] = { CachedCar, CachedRight, CachedLiteGroup };
@@ -5697,6 +5722,8 @@ static BOOL GCCIsClaimedWidget(UIView *v) {
         if (!c) continue;
         if (v == c || GCCViewIsUnder(v, c) || GCCViewIsUnder(c, v)) return YES;
     }
+    // 0.9.114（A3）：几何兜底 —— 缓存全 nil 时也认得出「右上胶囊里的东西」
+    if (GCCIsInTopRightCapsuleZone(v)) return YES;
     return NO;
 }
 
@@ -5731,14 +5758,12 @@ static UIView *GCCFindMapTypeButton(UIWindow *win, UIView *capsule) {
             return v;
         }
     }
-    // ③ 兜底：BFS 序里第一个 40..48 方形（最外层容器）
-    for (UIView *v in cands) {
-        CGSize sz = v.bounds.size;
-        if (sz.width >= 40 && sz.width <= 48 && sz.height >= 40 && sz.height <= 48) {
-            GCReportedMapTypeTier = 3;
-            return v;
-        }
-    }
+    // ★0.9.114（A2）：原 ③「BFS 序里第一个 40..48 方形」兜底整段删除。
+    //   2D/3D 钮在 0.9.99 已常驻隐藏，这条兜底找不到真目标时，唯一能匹配上的就是
+    //   右上胶囊里那个 44×44 的「+」号 —— 抓住就往「胶囊顶 − 13.3」搬，与 App 布局
+    //   反复拉锯，造成冷启动 1.0~1.5s 的闪烁（详见 A1 注释里的逐帧时间线）。
+    //   ① 文本判据 与 ② 类名判据 已足够：真 2D/3D 回来后，WINPermanentCompassView
+    //   会直接被 ② 命中，不依赖任何几何兜底。
     return nil;
 }
 
@@ -7347,12 +7372,17 @@ static void InstallPromoAndWidgetHooks(void) {
     //   ⇒ 按钮被摆到 y=283（原生 536.7），与「胶囊顶 − 57.3」的原生关系刚好差 254pt。
     // 这里在它每次布局/上窗后立刻按「胶囊顶 − GCGapMapType」纠正，不必等 200ms 轮询；
     //   未定格期间由 AlignMapTypeButton 内部判空返回（绝不拿瞬态位当锚）。
-    HookVoid(GCStrAt(276), GCStrAt(91), ^(UIView *v) {
-        AlignMapTypeButton(CachedRight);
-    });
-    HookVoid(GCStrAt(276), GCStrAt(123), ^(UIView *v) {
-        AlignMapTypeButton(CachedRight);
-    });
+    // ★0.9.114（A1）：这两个钩子整段删除。
+    //   它们挂在 WINPermanentCompassView（2D/3D 钮的原生类）的 layoutSubviews /
+    //   didMoveToWindow 上，回调里却去摆 AlignMapTypeButton(CachedRight)。
+    //   而 0.9.99 已把 2D/3D 钮常驻隐藏 —— 于是 GCCFindMapTypeButton 找不到真目标，
+    //   落到 ③ 兜底「BFS 序里第一个 40..48 方形」，抓到的正是右上胶囊里 44×44 的
+    //   「+」号，把它搬到「胶囊顶 − 13.3」。App 布局又把它拉回 ⇒ 两个通道拉锯。
+    //   真机录屏逐帧铁证（120fps，228 帧）：
+    //     t=1.000s +号出现 → 1.042~1.208s 消失 → 1.250s 回来
+    //     → 1.333~1.417s 再消失 → 1.458s 起稳定
+    //   即「消失→回来→再消失」闪两次，全程约 0.42s，与用户反馈完全一致。
+    //   2D/3D 既已移除，这套摆位逻辑本身也失去意义，一并停用。
     // 0.5.19：拦截天气行 setFrame:，对齐后钉死到车机钮右边
     // 0.5.1：线路按钮原生 hid=1，setHidden: 强制 NO，app 再藏也压不住
     {
