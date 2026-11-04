@@ -94,6 +94,10 @@ check:
 	@echo "check: 横幅判定单测"
 	@gcc -O2 -Wall -Wextra -o /tmp/banner_logic_test tests/banner_logic_test.c -lm \
 	  && /tmp/banner_logic_test | tail -3
+# 0.9.114（A3）：右上胶囊几何豁免 —— 锁住「+ 号不被按几何找控件的逻辑误抓」。
+	@echo "check: 胶囊豁免单测"
+	@gcc -O2 -Wall -Wextra -o /tmp/capsule_zone_test tests/capsule_zone_test.c -lm \
+	  && /tmp/capsule_zone_test | tail -3
 # 0.9.20（A2）：混淆回环自测 —— 用与运行时同一份解码数学把 295 条串解回明文，
 # 逐条比对 + 校验头内 FNV 摘要；这一步保证「加密后仍 100% 解得原串」。
 	@$(CLANG) -O2 -Wall -Wextra -I src -o /tmp/obf_selftest scripts/obf_selftest.c \
