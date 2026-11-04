@@ -18,7 +18,7 @@
 // ---- jibamao 个人标识（编译进 dylib，可用 strings 核对）----
 static NSString *const kGCAuthor      = @"jibamao";
 static NSString *const kGCRepo        = @"https://gan-jibamao.github.io/";
-static NSString *const kGCVersion     = @"0.9.98";
+static NSString *const kGCVersion     = @"0.9.99";
 
 // 0.9.18（A1）：底边间隙**按控件分开**，对表原生（搜索栏白底顶边 = 702.6pt）
 //   车机钮（连接车机 · WINDeviceInterconnectWidget）：原生底 652 → 间隙 50.6 → 取 50
@@ -1614,6 +1614,11 @@ static void GCCArmTick(void); // 0.7.4(A3)：按前台/后台动态整备 tick �
 static NSMutableDictionary<NSString *, NSNumber *> *AjxCache;  // 0.7.2：类名→是否 AJX
 static void InstallSplashAdGuard(void);
 static void SplashAdTick(void);
+static void SweepTopBannerAds(void);      // 0.9.99（A4）：顶部横幅广告常驻扫描
+static void ArmTopBannerSweep(void);      // 0.9.99（A4）：事件驱动的即时扫描
+#ifdef GAODECLEAN_PROBE
+static void GCBannerProbeDump(const char *reason);   // 0.9.99（A5）：顶部带视图树取证
+#endif
 static void AlignOneWidget(UIView *bar, UIView *w, CGFloat barTop, CGFloat gap);
 
 @class GCCState;
@@ -2216,6 +2221,22 @@ static void Schedule(void) {
         }
         // 0.7.0：开屏广告兜底（有界窗口内）
         SplashAdTick();
+        // 0.9.99（A4）：顶部横幅广告 —— 常驻通道。横幅由运营位异步拉取落地，
+        // 落点常在启动 15s 窗口之外，所以不能挂在 SplashAdTick 的有界窗口里。
+        // 冷启动头 60 拍（≈12s）每拍扫一次（运营位落地最密集的时段），
+        // 之后降到每 3 拍（600ms）—— 整趟是 6 层/900 节点上限的有界 BFS，开销可控。
+        if (TickCount < 60 || TickCount % 3 == 0) SweepTopBannerAds();
+#ifdef GAODECLEAN_PROBE
+        // 0.9.99（A5）：0.8s / 2s / 5s / 10s / 20s / 40s 各取证一次顶部带视图树
+        {
+            static const int kProbeAt[6] = {4, 10, 25, 50, 100, 200};
+            static int probeStage;
+            if (probeStage < 6 && TickCount >= kProbeAt[probeStage]) {
+                GCBannerProbeDump("tick");
+                probeStage++;
+            }
+        }
+#endif
         // 0.6.7：底栏「上拉发现」提示的周期通道 —— 引导态常常晚于最后一次布局才落地，
         // 只挂 layout 就是这个 bug 偶发的根因。扫描范围只有底栏子树，开销可忽略。
         // 0.7.4(A6)：「上拉发现」是 200ms~1s 级的异步引导态，5Hz 采样过剩，降到 2.5Hz。
@@ -5962,7 +5983,10 @@ static void WatchHomeTransition(id tabs) {
     BOOL prevHome = [NSStringFromClass([prev class]) isEqualToString:GCStrAt(122)];
     if (home && !prevHome && ColdTicks >= 15) KickBarFixFor(0.32);
     // 0.7.2：切页 = 内容必然重排 → 强制全量 CleanPage
-    if (prevHome != home) { CleanForce = YES; GCCActiveUntil = TickCount + 8; }
+    if (prevHome != home) { CleanForce = YES; GCCActiveUntil = TickCount + 8;
+        // 0.9.99（A4）：回到首页的瞬间运营位会重建，立刻扫一次（不等下一拍）
+        if (home) ArmTopBannerSweep();
+    }
 }
 
 // 只走底栏子树：节点数 20-40，无 convertRect:，无窗口遍历。200ms 一次也无所谓。
@@ -6418,6 +6442,266 @@ static void ReArmSplashGuard(void) {
     SplashAdTick();
 }
 
+// ===========================================================================
+//  0.9.99（A1-A5）：顶部横幅广告守卫
+//
+//  症状：首页顶部常驻一条「天猫双11 · 拍我→直降再叠券 7.2折起 [广告] ×」横幅，
+//        0.9.98 全版本拦不掉。
+//  根因（三重叠加，全部在开屏通道里）：
+//    ① GCCIsSplashAd 最后一句是 GCCIsFullScreen —— 要求宽、高都 ≥ 窗口 60%。
+//       真机截图实测该横幅 312.7×56.3pt / 屏 393×852pt：宽 79.6%、高 6.6%
+//       ⇒ 高度这一条永远不满足，函数直接 return NO。
+//    ② SplashAdTick 只在启动后 75 拍(≈15s) 有界窗口内跑；横幅是进首页后由
+//       运营位异步拉取落地的，落地时刻经常落在窗口之外。
+//    ③ 主窗口那条兜底只遍历 GCCMainWindow.subviews（第一层），横幅挂在更深处。
+//
+//  口径（宁可漏，绝不误伤）：
+//    · 必须**同时**命中「独立广告角标」与「真实关闭控件」两项才动手 ——
+//      这是《广告法》对信息流广告的强制标识，运营位之外几乎没有这种组合。
+//    · 子树里出现任何输入控件（搜索框/搜索栏）⇒ 立即判否。首页搜索栏是最大误伤源。
+//    · 与已识别的首页原生控件（搜索栏/底栏/天气行/右下控件/各容器）同祖 ⇒ 判否。
+//    · 只在**顶部带**（minY ≤ 窗高 33%）内寻找，绝不碰内容区。
+//    · 只隐藏，不 removeFromSuperview —— 运营位多半是 AutoLayout 容器的一员，
+//      抽掉子视图会牵连整条约束链。
+// ===========================================================================
+
+// 广告角标的候选文案。全角/半角空格、全角括号都列入，运营位写法不统一。
+// 注意：这些都是**通用词**（不是高德内部类名），故不进混淆表。
+static NSArray<NSString *> *GCAdBadgeTexts(void) {
+    static NSArray<NSString *> *a;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        a = @[@"广告", @"广告 ", @" 广告", @"广告推广", @"赞助", @"推广"];
+    });
+    return a;
+}
+
+// 关闭控件：类名/无障碍标签里带 close/dismiss（含中文）。AdCloseButton 直接命中。
+static BOOL GCCLooksLikeCloseControl(UIView *v) {
+    if (!v || !v.userInteractionEnabled) return NO;
+    NSString *cn = NSStringFromClass(v.class);
+    NSString *low = cn.lowercaseString;
+    if ([low containsString:@"close"] || [low containsString:@"dismiss"]) return YES;
+    NSString *al = v.accessibilityLabel;
+    if (al.length) {
+        if ([al containsString:@"关闭"] || [al containsString:@"不感兴趣"]) return YES;
+        NSString *all = al.lowercaseString;
+        if ([all containsString:@"close"] || [all containsString:@"dismiss"]) return YES;
+    }
+    if ([v isKindOfClass:UIControl.class]) {
+        NSString *desc = v.accessibilityHint ?: @"";
+        if ([desc containsString:@"关闭"]) return YES;
+    }
+    return NO;
+}
+
+// 已识别的首页原生控件 —— 与它们同祖的容器一律不动（本插件自己盯的几条路径）。
+static BOOL GCCIsPinnedHomeView(UIView *v) {
+    if (!v) return NO;
+    if (v == SearchBarView || v == CachedTabBar || v == CachedCar || v == CachedRight ||
+        v == CachedRoute || v == CachedLiteGroup || v == Cached2D) return YES;
+    if (IsWeatherRowClass(NSStringFromClass(v.class))) return YES;
+    return NO;
+}
+
+// 祖先链上出现被钉位控件 ⇒ 这是首页原生布局的一部分，不是广告。
+static BOOL GCCAncestryIsPinnedHome(UIView *v) {
+    UIView *p = v;
+    for (int i = 0; i < 12 && p; i++, p = p.superview) {
+        if (GCCIsPinnedHomeView(p)) return YES;
+    }
+    return NO;
+}
+
+// 子树里出现输入控件 ⇒ 判否（搜索栏/搜索页的头号误伤源）。
+static BOOL GCCSubtreeHasInput(UIView *v) {
+    NSMutableArray *q = [NSMutableArray arrayWithObject:v];
+    for (NSUInteger i = 0; i < q.count && q.count < 80; i++) {
+        UIView *s = q[i];
+        if ([s isKindOfClass:UITextField.class] || [s isKindOfClass:UITextView.class] ||
+            [s isKindOfClass:UISearchBar.class] || [s isKindOfClass:UISearchTextField.class]) return YES;
+        [q addObjectsFromArray:s.subviews];
+    }
+    return NO;
+}
+
+// 形状判据：宽而扁、贴顶部。数值全部按真机截图实测（312.7×56.3 on 393×852）取边界。
+static BOOL GCCIsTopBannerShape(UIView *v, UIWindow *win) {
+    if (!v || !win) return NO;
+    CGFloat ww = win.bounds.size.width, wh = win.bounds.size.height;
+    if (ww < 1 || wh < 1) return NO;
+    CGRect r = [v convertRect:v.bounds toView:win];
+    CGFloat w = CGRectGetWidth(r), h = CGRectGetHeight(r);
+    if (!isfinite(w) || !isfinite(h)) return NO;
+    if (w < 120 || h < 28) return NO;                                  // 太小，不可能是通栏运营位
+    if (w < ww * 0.60) return NO;                                      // 实测 79.6%，留余量到 60%
+    if (h > wh * 0.18 || h > 190) return NO;                           // 实测 6.6%，上限 18%/190pt
+    if (CGRectGetMinY(r) > wh * 0.33) return NO;                       // 只在顶部带内
+    if (w >= ww * 0.6 && h >= wh * 0.6) return NO;                     // 全屏归开屏守卫管
+    return YES;
+}
+
+// 内容判据：**独立**广告角标（单独成 label）+ 真实关闭控件，二者必须同时成立。
+// 「独立」= 该 label 自身文本就是「广告」，而不是一长串文案里恰好含有这两个字 ——
+// 这一条把「搜索提示词里带广告二字」之类全部排掉。
+static BOOL GCCBannerHasLegalAdMark(UIView *v, BOOL *outClose) {
+    BOOL mark = NO, close = NO;
+    NSMutableArray *q = [NSMutableArray arrayWithObject:v];
+    for (NSUInteger i = 0; i < q.count && q.count < 80; i++) {
+        UIView *s = q[i];
+        if (GCCLooksLikeCloseControl(s)) close = YES;
+        NSString *txt = nil;
+        if ([s isKindOfClass:UILabel.class]) txt = ((UILabel *)s).text;
+        else if (s.accessibilityLabel.length) txt = s.accessibilityLabel;
+        if (txt.length && txt.length <= 6) {
+            NSString *trim = [txt stringByTrimmingCharactersInSet:
+                              [NSCharacterSet whitespaceAndNewlineCharacterSet]];
+            for (NSString *badge in GCAdBadgeTexts()) {
+                if ([trim isEqualToString:badge]) { mark = YES; break; }
+            }
+        }
+        [q addObjectsFromArray:s.subviews];
+    }
+    if (outClose) *outClose = close;
+    return mark;
+}
+
+// 完整判据。被隐藏过的一律不再重复处理（用关联对象打标，幂等）。
+static char BannerHiddenKey;
+static BOOL GCCIsTopBannerAd(UIView *v, UIWindow *win) {
+    if (!v || v.hidden || v.alpha < 0.02 || !win) return NO;
+    if (objc_getAssociatedObject(v, &BannerHiddenKey)) return NO;
+    if (GCCIsPinnedHomeView(v) || GCCAncestryIsPinnedHome(v)) return NO;
+    if (GCCSubtreeHasInput(v)) return NO;
+    if (!GCCIsTopBannerShape(v, win)) return NO;
+    BOOL hasClose = NO;
+    BOOL hasMark = GCCBannerHasLegalAdMark(v, &hasClose);
+    if (!hasMark || !hasClose) return NO;
+    return YES;
+}
+
+static long GCBannerHiddenCount;   // 诊断计数
+
+static void GCHideTopBannerAd(UIView *v, const char *why) {
+    if (!v) return;
+    objc_setAssociatedObject(v, &BannerHiddenKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    v.hidden = YES;
+    GCBannerHiddenCount++;
+    GCLog(@"[GaodeClean] top banner hidden [%s] view=%@ win=%@ frame=%@",
+          why, NSStringFromClass(v.class), NSStringFromClass(v.window.class),
+          NSStringFromCGRect([v convertRect:v.bounds toView:v.window]));
+}
+
+// 找一个「足以代表整条横幅」的祖先：从命中节点往上走，只要父视图仍落在
+// 同一顶部带、且宽度仍然接近通栏、且自身不越界成全屏，就继续往上。
+// 目的是把宽 312pt 的卡片整条收掉（而非只收里面的某个 label）。
+static UIView *GCBannerTopAncestor(UIView *v, UIWindow *win) {
+    UIView *best = v;
+    UIView *p = v.superview;
+    for (int i = 0; i < 5 && p && p != win; i++, p = p.superview) {
+        if (GCCIsPinnedHomeView(p) || GCCSubtreeHasInput(p)) break;
+        if (!GCCIsTopBannerShape(p, win)) break;
+        best = p;
+    }
+    return best;
+}
+
+// 常驻扫描：每 3 拍（600ms）一次。横幅是异步落地的，不能只在启动窗口内跑。
+static void SweepTopBannerAds(void) {
+    UIWindow *win = GCCMainWindow ?: (GCCMainWindow = [GCAllWindows() lastObject]);
+    NSArray<UIWindow *> *wins = GCAllWindows();
+    if (!win && wins.count) win = wins.lastObject;
+    if (!win) return;
+    for (UIWindow *w in wins) {
+        if (![w isKindOfClass:UIWindow.class] || w.hidden) continue;
+        if (w.bounds.size.width < 1 || w.bounds.size.height < 1) continue;
+        // 广度优先下潜 6 层、上限 900 节点。只找「顶部带 + 通栏」的候选，
+        // 命中即停（一条横幅一次只处理一个，避免同一拍重复遍历大子树）。
+        NSMutableArray *q = [NSMutableArray arrayWithObject:w];
+        NSMutableArray *depth = [NSMutableArray arrayWithObject:@0];
+        NSUInteger visited = 0;
+        for (NSUInteger i = 0; i < q.count && visited < 900; i++) {
+            UIView *v = q[i];
+            int d = [depth[i] intValue];
+            visited++;
+            if (v != w && d <= 6) {
+                if (GCCIsTopBannerAd(v, w ?: v.window)) {
+                    UIView *target = GCBannerTopAncestor(v, v.window ?: w);
+                    GCHideTopBannerAd(target, "sweep");
+                    return;
+                }
+            }
+            if (d >= 6) continue;
+            for (UIView *c in v.subviews) {
+                [q addObject:c];
+                [depth addObject:@(d + 1)];
+            }
+        }
+    }
+}
+
+// 通道②：进首页/切页瞬间的即时扫描（运营位常在这一刻重建）。
+static void ArmTopBannerSweep(void) {
+    SweepTopBannerAds();
+}
+
+#ifdef GAODECLEAN_PROBE
+// 0.9.99（A5）：顶部带视图树取证 —— 只出探针包。
+// 目的：这一版靠「广告角标 + 关闭控件」双证拦截，属于**类名未知**下的启发式。
+//      真机跑一次 probe，把顶部 33% 带内所有视图的类名/frame 落盘，
+//      下一版就能把真实类名加进词表，做成精确拦截 + 启发式双保险。
+// 输出：NSLog（Console 可见）+ 剪贴板 + Documents/GaodeClean-banner-probe.txt
+static int GCBannerProbeDumps;
+
+static void GCBannerProbeDump(const char *reason) {
+    if (GCBannerProbeDumps >= 6) return;
+    UIWindow *win = GCCMainWindow ?: [GCAllWindows() lastObject];
+    if (!win) return;
+    GCBannerProbeDumps++;
+    NSMutableString *o = [NSMutableString string];
+    [o appendFormat:@"\n===== TOPBANNER probe #%d (%s) t=%.1fs build=%@ win=%@ =====\n",
+        GCBannerProbeDumps, reason, CACurrentMediaTime(), kGCVersion, NSStringFromCGRect(win.bounds)];
+    CGFloat cut = win.bounds.size.height * 0.33;
+    NSMutableArray *q = [NSMutableArray arrayWithObject:win];
+    NSMutableArray *dep = [NSMutableArray arrayWithObject:@0];
+    NSUInteger visited = 0;
+    for (NSUInteger i = 0; i < q.count && visited < 1200; i++) {
+        UIView *v = q[i];
+        int d = [dep[i] intValue];
+        visited++;
+        CGRect r = [v convertRect:v.bounds toView:win];
+        if (v != win && CGRectGetMinY(r) <= cut && CGRectGetMaxY(r) > 0) {
+            BOOL mark = NO, close = NO;
+            NSString *txt = nil;
+            if ([v isKindOfClass:UILabel.class]) txt = ((UILabel *)v).text;
+            else if (v.accessibilityLabel.length) txt = v.accessibilityLabel;
+            if (txt.length && txt.length <= 8) {
+                NSString *tm = [txt stringByTrimmingCharactersInSet:
+                                [NSCharacterSet whitespaceAndNewlineCharacterSet]];
+                for (NSString *b in GCAdBadgeTexts()) if ([tm isEqualToString:b]) { mark = YES; break; }
+            }
+            close = GCCLooksLikeCloseControl(v);
+            [o appendFormat:@"%*s%@ f=%@ w=%@ hid=%d a=%.2f sub=%lu%@%@%@\n",
+                d * 2, "", NSStringFromClass(v.class), NSStringFromCGRect(r),
+                NSStringFromClass(v.window.class), v.hidden, v.alpha,
+                (unsigned long)v.subviews.count,
+                mark ? @" [ADMARK]" : @"", close ? @" [CLOSE]" : @"",
+                txt.length && txt.length <= 24 ? [NSString stringWithFormat:@" txt=「%@」", txt] : @""];
+        }
+        if (d >= 7) continue;
+        for (UIView *c in v.subviews) { [q addObject:c]; [dep addObject:@(d + 1)]; }
+    }
+    [o appendFormat:@"----- 判定快照：累计隐藏=%ld -----\n", GCBannerHiddenCount];
+    NSLog(@"%@", o);
+    @try { [UIPasteboard generalPasteboard].string = o; } @catch (__unused NSException *e) {}
+    @try {
+        NSString *dir = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES).firstObject;
+        [o writeToFile:[dir stringByAppendingPathComponent:@"GaodeClean-banner-probe.txt"]
+            atomically:YES encoding:NSUTF8StringEncoding error:nil];
+    } @catch (__unused NSException *e) {}
+}
+#endif
+
 // ---------------------------------------------------------------------------
 //  ❖ 决定性一层：从高德 17.00.2 的字符串表里抄出来的**真类名与真 selector**
 //
@@ -6642,6 +6926,8 @@ static void InstallSplashAdGuard(void) {
                                                 usingBlock:^(__unused NSNotification *n) {
         GCCHookAdClasses();          // 懒加载的广告 SDK 这时可能才注册类
         ReArmSplashGuard();
+        // 0.9.99（A4）：回前台运营位会重新拉取，立刻扫一次顶部横幅
+        ArmTopBannerSweep();
     }];
     // 广告 SDK 常是懒加载：启动后 1s / 3s 各再发现一次（一次性，非周期）
     for (NSNumber *delay in @[@1.0, @3.0]) {
