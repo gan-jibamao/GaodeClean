@@ -89,6 +89,11 @@ check:
 	  echo "OK: 0 warnings (STRIP=$$mode)"; \
 	done
 	@echo "check: 静态门禁通过"
+# 0.9.99（A5）：顶部横幅判定单测 —— 纯 C，无 SDK 依赖，任何机器都能跑。
+#   守住「广告角标 + 关闭控件」双证判据：改判据必须同步改测试，否则这里先红。
+	@echo "check: 横幅判定单测"
+	@gcc -O2 -Wall -Wextra -o /tmp/banner_logic_test tests/banner_logic_test.c -lm \
+	  && /tmp/banner_logic_test | tail -3
 # 0.9.20（A2）：混淆回环自测 —— 用与运行时同一份解码数学把 295 条串解回明文，
 # 逐条比对 + 校验头内 FNV 摘要；这一步保证「加密后仍 100% 解得原串」。
 	@$(CLANG) -O2 -Wall -Wextra -I src -o /tmp/obf_selftest scripts/obf_selftest.c \
