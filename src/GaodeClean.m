@@ -18,7 +18,7 @@
 // ---- jibamao 个人标识（编译进 dylib，可用 strings 核对）----
 static NSString *const kGCAuthor      = @"jibamao";
 static NSString *const kGCRepo        = @"https://gan-jibamao.github.io/";
-static NSString *const kGCVersion     = @"0.9.115";
+static NSString *const kGCVersion     = @"0.9.116";
 
 // 0.9.18（A1）：底边间隙**按控件分开**，对表原生（搜索栏白底顶边 = 702.6pt）
 //   车机钮（连接车机 · WINDeviceInterconnectWidget）：原生底 652 → 间隙 50.6 → 取 50
@@ -426,6 +426,16 @@ static void P33Watch(UIView *v, int tag) {
         P33Evs[P33EvI].w = (float)r.size.width; P33Evs[P33EvI].h = (float)r.size.height;
         P33EvI = (P33EvI + 1) % 12;
         P33EvTotal++;
+        // ★0.9.116（C-探针）：事件里补上当时的三道门控状态 ——
+        //   这是「App 晚创建」与「我们按住」的判据：
+        //     why=1(脱窗) 且 key=0  → App 还没把它挂上窗口，我们无能为力
+        //     why=2(hidden) 且 key=1 → 已钉位却仍被按，说明还有别的按住通道
+        //     why=2(hidden) 且 key=0 → 我们按的，等钉位即可放行
+        P7Note(@"P33EV %s%s %s r=(%.0f,%.0f,%.0f,%.0f) key=%d settled=%d cold=%ld",
+               P33TagName(tag), alive ? "现" : "隐", P33WhyName(why),
+               r.origin.x, r.origin.y, r.size.width, r.size.height,
+               objc_getAssociatedObject(v, &AlignedKey) ? 1 : 0,
+               SearchBarSettled, (long)ColdTicks);
     }
 }
 // ══ probe11：全局逐帧轨迹取证（纯只读，不写任何几何/透明度/动画）══
@@ -7370,19 +7380,42 @@ static void InstallPromoAndWidgetHooks(void) {
     //   判据用几何排除右上「+/图层」胶囊（它出生就在 y≈69 = 窗高 3.6%）：
     //   只对 y 落在窗高 25% 以下的实例动手。
     HookVoid(GCStrAt(132), GCStrAt(123), ^(UIView *v) {
-        if (v.window && !SearchBarSettled && GCCIsLiteGroupCapsule(v)) {
+        // ★0.9.116（A2''）：与 setHidden: 那条同源 —— 已钉位就不按住。
+        if (!v.window || !GCCIsLiteGroupCapsule(v)) return;
+        BOOL pinned = objc_getAssociatedObject(v, &AlignedKey) != nil;
+        if (!pinned && !SearchBarSettled) {
             v.hidden = YES; [ColdWidgets addObject:v];
         }
     });
     HookVoid(GCStrAt(132), GCStrAt(91), ^(UIView *v) {
         // 锚点（搜索栏）未定格 = 冷启动未完成：按住它，不让它停在中部位显示。
         // 定格后交回给 A2（与我们的右下控件同一时刻放行）。
+        //
+        // ★0.9.116（A2'）：**放行条件改为「自己已被钉位」优先**。
+        //   原判据只有 SearchBarSettled 一条 —— 而搜索栏定型要等 ColdTicks>=20（4 秒），
+        //   胶囊明明已经被 GCStylePinWidgets 用绝对坐标钉到最终位置了，却还要干等。
+        //   真机录屏（120fps）实测：0.9.114 = 7.9s 才出现，0.9.115 抬到 5.0s，
+        //   仍远晚于右上「+/图层」胶囊。
+        //   现在：只要自身 AlignedKey 已置（= 已钉到最终位）就直接放行，不再看搜索栏。
+        //   安全性：胶囊位置来自 GCPinBottom 绝对坐标，与搜索栏定型无关；
+        //   只有「未钉位」时才继续按老规矩等 SearchBarSettled。
         if (!GCCIsLiteGroupCapsule(v)) return;
-        if (!SearchBarSettled) { v.hidden = YES; [ColdWidgets addObject:v]; }
+        BOOL pinned = objc_getAssociatedObject(v, &AlignedKey) != nil;
+        if (!pinned && !SearchBarSettled) { v.hidden = YES; [ColdWidgets addObject:v]; }
     });
     // 0.4.41：车机圆钮冷启动先隐藏，对齐后再显示，消除跳动
     HookVoid(GCStrAt(140), GCStrAt(91), ^(UIView *w) {
+        // ★0.9.116（A3'）：AlignedKey 已置就直接放行（原逻辑本来就只看这一条，
+        //   现在显式写出来，配合 A3 的「发现即钉位」——发现即打标即放行，零等待）。
         if (w.window && !objc_getAssociatedObject(w, &AlignedKey)) { w.hidden = YES; [ColdWidgets addObject:w]; }
+    });
+    // ★0.9.116（A3''）：上窗瞬间也走同一条判据 —— 原来只在 setHidden: 里判，
+    //   若 App 创建时就带 hidden=YES（不调 setHidden:），这条钩子根本不会触发，
+    //   控件会被 App 自己按在 hidden 状态直到它愿意显示（实测 5.0s）。
+    //   这里在 didMoveToWindow 时补一刀：已钉位就主动置 hidden=NO。
+    HookVoid(GCStrAt(140), GCStrAt(123), ^(UIView *w) {
+        if (!w.window) return;
+        if (objc_getAssociatedObject(w, &AlignedKey) && w.hidden) w.hidden = NO;
     });
     // 0.9.14（A6 回退）：0.9.9（A3）给车机圆钮补的 setHidden:/setAlpha: 两条拦截已移除。
     //   与右下钮同源的「未对齐拒绝显示」逻辑 —— 车机钮虽然靠类名能被 CachedCar 稳定找到
