@@ -79,9 +79,20 @@ static int is_top_banner_shape(R r, double ww, double wh) {
     if (!isfinite(w) || !isfinite(h)) return 0;
     if (w < 120 || h < 28) return 0;
     if (w < ww * 0.60) return 0;
-    if (h > wh * 0.18 || h > 190) return 0;
+    if (h > wh * 0.18 || h > 210) return 0;      // 0.9.119：上限 190 → 210（与源码同步）
     if (r.y > wh * 0.33) return 0;
     if (w >= ww * 0.6 && h >= wh * 0.6) return 0;
+    return 1;
+}
+
+// ★0.9.123（A4）：运营通知条判据（与源文件 GCCBannerHasOpsNoticeText 对应）
+//   「【」= U+3010，「】」= U+3011。文案含这一对方括号 + 右侧真实关闭控件 ⇒ 是运营通知条。
+static int is_ops_notice_text(const char *txt) {
+    if (!txt || !*txt) return 0;
+    if (utf8_chars(txt) > 60) return 0;          // 长段内容不算
+    // UTF-8 编码：U+3010 = E3 80 90，U+3011 = E3 80 91
+    if (!strstr(txt, "\xE3\x80\x90")) return 0;
+    if (!strstr(txt, "\xE3\x80\x91")) return 0;
     return 1;
 }
 
@@ -210,6 +221,35 @@ int main(void) {
     ck(!looks_like_close_geo("UIView", "", 1, 20, 20, 3, 0.95), "有子视图（容器）→ 否");
     ck(!looks_like_close_geo("UIImageView", "", 0, 20, 20, 0, 0.95), "不可交互 → 否");
     ck(looks_like_close_geo("AdCloseButton", "", 1, 44, 44, 0, 0.10), "类名含 close 优先 → 是");
+
+    // ★0.9.123（A4）：运营通知条 —— 真机截图 photo_F9AE7383 那条
+    //   文案「请查收：【你的签到红包】」，顶部 y=75..107（逻辑 pt），x 70..326。
+    printf("\n[8] 运营通知条（0.9.123 A4 新增）—— 无「广告」角标的那一类\n");
+    {
+        R ops = rect(70, 75, 256, 32);
+        const char *txt = "请查收：" "\xE3\x80\x90" "你的签到红包" "\xE3\x80\x91";
+        int s = is_top_banner_shape(ops, WW, WH);
+        int t = is_ops_notice_text(txt);
+        int c = looks_like_close_geo("UIImageView", "", 1, 22, 22, 0, 0.93);
+        printf("      真机实测 shape=%d text=%d close=%d\n", s, t, c);
+        ck(s, "形状：顶部带 256x32（65% 宽 / 3.8% 高）→ 通栏扁条");
+        ck(t, "文案含【】→ 运营模板");
+        ck(c, "右侧 22x22 可交互叶子 → 真实关闭控件");
+        ck(s && t && c, "★ 三条同时成立 → **必须拦截**（真机那条就是它）");
+
+        ck(!is_ops_notice_text("请查收：你的签到红包"), "无【】→ 不认（宁可漏）");
+        ck(!is_ops_notice_text("宜章县第十中学"), "路名/POI → 不认");
+        ck(!is_ops_notice_text("搜索 加油站"), "搜索提示 → 不认");
+        ck(!is_ops_notice_text(NULL), "空文本 → 不认");
+        char longbuf[400]; longbuf[0] = 0;
+        for (int i = 0; i < 70; i++) strcat(longbuf, "字");
+        strcat(longbuf, "\xE3\x80\x90" "x" "\xE3\x80\x91");
+        ck(!is_ops_notice_text(longbuf), "超 60 字的长文 → 不认（防误伤正文）");
+
+        // 有【】但没有关闭控件 → 仍然不拦（宁可漏，不可误伤）
+        ck(!(s && t && 0), "有【】但无关闭控件 → 不拦截");
+    }
+
     printf("\n═══════════════════════════════════════\n");
     if (!Failed) { printf("★ 全部通过：%d/%d\n", Passed, Passed); return 0; }
     printf("✗ 失败 %d 项 / 共 %d\n", Failed, Passed + Failed);

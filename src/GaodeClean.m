@@ -18,7 +18,7 @@
 // ---- jibamao 个人标识（编译进 dylib，可用 strings 核对）----
 static NSString *const kGCAuthor      = @"jibamao";
 static NSString *const kGCRepo        = @"https://gan-jibamao.github.io/";
-static NSString *const kGCVersion     = @"0.9.122";
+static NSString *const kGCVersion     = @"0.9.123";
 
 // 0.9.18（A1）：底边间隙**按控件分开**，对表原生（搜索栏白底顶边 = 702.6pt）
 //   车机钮（连接车机 · WINDeviceInterconnectWidget）：原生底 652 → 间隙 50.6 → 取 50
@@ -3686,6 +3686,69 @@ static void GCCapTrace(UIWindow *win) {
             if (!cap.hidden) P36Who();      // 首次变可见：抓调用栈定责
         }
     }
+    // ★0.9.123：**外壳也要追**。0.9.122 的 0.35 秒与 0.9.123 的 1.275 秒都卡在这里，
+    //   而旧探针只扫内层（GCStrAt(128)）⇒ 外壳的 hidden 翻转从未被记录 ⇒ 无据可查。
+    //   外壳 = WINLiteWidgetGroupView(GCStrAt(132))，承载毛玻璃底，被 App 另一条通路控制。
+    {
+        static __weak UIView *lastShell;
+        static int lastShellHid = -1;
+        static int nShell;
+        UIView *shell = CachedLiteGroup;
+        if (!shell || !shell.window) {
+            Class lc = NSClassFromString(GCStrAt(132));
+            if (lc) {
+                NSMutableArray<UIView *> *q2 = [NSMutableArray arrayWithObject:win];
+                NSUInteger b2 = 1200;
+                for (NSUInteger i = 0; i < q2.count && b2--; i++) {
+                    UIView *v = q2[i];
+                    if ([v isKindOfClass:lc]) { shell = v; break; }
+                    [q2 addObjectsFromArray:v.subviews];
+                }
+            }
+        }
+        if (shell) {
+            if (shell != lastShell) {
+                lastShell = shell; lastShellHid = -1;
+                if (nShell < 6) { nShell++;
+                    CAPLOG(@"t=%.2f SHL-INST#%d cls=%@ win=%@ sub=%lu hid=%d key=%d\n",
+                        P7Now() - t0, nShell, @(class_getName(object_getClass(shell))),
+                        NSStringFromCGRect(shell.window ? GCModelWinRect(shell, win) : shell.frame),
+                        (unsigned long)shell.subviews.count, shell.hidden ? 1 : 0,
+                        objc_getAssociatedObject(shell, &AlignedKey) ? 1 : 0);
+                }
+            }
+            if ((int)shell.hidden != lastShellHid) {
+                int was = lastShellHid;
+                lastShellHid = (int)shell.hidden;
+                if (nShell < 20) { nShell++;
+                    CAPLOG(@"t=%.2f SHL-HID %d→%d win=%@ key=%d slot=%d\n",
+                        P7Now() - t0, was, (int)shell.hidden,
+                        NSStringFromCGRect(shell.window ? GCModelWinRect(shell, win) : shell.frame),
+                        objc_getAssociatedObject(shell, &AlignedKey) ? 1 : 0,
+                        GCWidgetAtPinnedSlot(shell) ? 1 : 0);
+                }
+            }
+        }
+    }
+    // ★0.9.123：把「谁在按 / 谁放行」的关键判据按秒打点，和视频逐帧对齐
+    {
+        static int lastSec = -1;
+        int sec = (int)(P7Now() - t0);
+        if (sec != lastSec && sec <= 5) {
+            lastSec = sec;
+            UIView *cr = CachedRight, *lg = CachedLiteGroup, *cc = CachedCar;
+            CAPLOG(@"t=%.2f SEC%d car=%s(%d) right=%s win=%d key=%d slot=%d lite=%s win=%d key=%d slot=%d settled=%d cold=%ld pinB=%.0f\n",
+                P7Now() - t0, sec,
+                cc ? "Y" : "n", cc ? (int)cc.hidden : -1,
+                cr ? "Y" : "n", cr && cr.window ? 1 : 0,
+                cr && objc_getAssociatedObject(cr, &AlignedKey) ? 1 : 0,
+                cr && GCWidgetAtPinnedSlot(cr) ? 1 : 0,
+                lg ? "Y" : "n", lg && lg.window ? 1 : 0,
+                lg && objc_getAssociatedObject(lg, &AlignedKey) ? 1 : 0,
+                lg && GCWidgetAtPinnedSlot(lg) ? 1 : 0,
+                SearchBarSettled ? 1 : 0, (long)ColdTicks, GCPinBottom(win));
+        }
+    }
 }
 #endif
 
@@ -4146,42 +4209,47 @@ static void GCStylePinWidgetsInner(UIWindow *win) {   // trial25(A2)：原体改
 #endif
     CGFloat sw = win.bounds.size.width;
     const CGFloat pinBottom = GCPinBottom(win);   // trial38：跟随底栏（圆钮行顶 771 上 16pt）
-    // ★0.9.122（A3）：外壳优先判据不再要求 `.window` 非空 —— 与 A1 同源。
-    //   旧写法 `CachedLiteGroup && CachedLiteGroup.window`：外壳脱窗时会退回 CachedRight，
-    //   于是**钉的是内层、外壳没钉**；而 App 按住的恰恰是外壳 ⇒ 外壳带着 App 给的
-    //   原始位置被放行 = 先用错位置换可见（正是 HISTORY §W 的钟摆成因）。
-    //   改为「存在即优先」：外壳存在就钉外壳，哪怕此刻还在脱窗（GCWindowRectOf 能算）。
-    UIView *cap = CachedLiteGroup ?: CachedRight;
-    UIView *capTarget = nil;               // 真正被钉位/打标记的那个实例
-    // ★0.9.122（A3）：钉位仍需「有父容器」才能写 frame；但**不再要求 cap.window**。
-    //   convertRect:fromView: 要求两端属于同一窗口层级 —— 用 GCWindowRectOf 反推
-    //   「目标矩形在父容器坐标系里的位置」，全程不依赖跨层级转换。
-    if (cap && cap.superview) {
-        CGRect wr = GCWindowRectOf(cap, win);
-        if (isfinite(wr.size.width) && wr.size.width >= 1 && isfinite(wr.size.height) && wr.size.height >= 1) {
-            CGRect g = CGRectMake(sw - 10 - wr.size.width, pinBottom - wr.size.height, wr.size.width, wr.size.height);
-            // 父容器在窗口系里的位置 = cap 的窗口系位置 − cap 自身在父容器里的位置
-            CGRect pr = GCWindowRectOf(cap.superview, win);
-            if (isfinite(pr.origin.x) && isfinite(pr.origin.y)) {
-                CGRect local = CGRectMake(g.origin.x - pr.origin.x, g.origin.y - pr.origin.y,
-                                          g.size.width, g.size.height);
-                if (!CGRectEqualToRect(local, cap.frame)) {
+    // ══════════════════════════════════════════════════════════════════════
+    // ★0.9.123（A1）：**外壳与内层都要钉，一个都不能少**。
+    //
+    //  0.9.122 的写法是 `cap = CachedLiteGroup ?: CachedRight`（互斥，二选一），
+    //  结果真机录像 video_B9476B3B 反而退化：车机钮 1.317s、胶囊 2.592s，差 1.275s
+    //  （0.9.121 时只差 0.35s）。原因：
+    //    · 外壳一旦存在（哪怕脱窗、位置还不对）就抢占 cap
+    //    · 而钉位要求 cap.superview 且 GCWindowRectOf 有效才写 frame
+    //    · 外壳条件不满足时，内层 CachedRight **完全没被钉** ⇒ 比修之前更糟
+    //
+    //  真相：这是**两个不同的视图**，各自被 App 的不同通路控制，都必须钉：
+    //    · WINAJXCombinedWidgetView（CachedRight，内层 44×88）—— 承载 ⊙/↰ 图标
+    //    · WINLiteWidgetGroupView（CachedLiteGroup，外壳）—— 承载毛玻璃底
+    //  App 藏哪个都得放行，位置都得钉。互斥选一个必然漏掉另一半。
+    // ══════════════════════════════════════════════════════════════════════
+    // 钉位公共动作（外壳/内层共用同一套坐标，避免两处漂移）
+    void (^pinCapsuleLike)(UIView *) = ^(UIView *v) {
+        if (!v || !v.superview) return;
+        CGRect wr = GCWindowRectOf(v, win);
+        if (!isfinite(wr.size.width) || wr.size.width < 1 ||
+            !isfinite(wr.size.height) || wr.size.height < 1) return;
+        CGRect g = CGRectMake(sw - 10 - wr.size.width, pinBottom - wr.size.height,
+                              wr.size.width, wr.size.height);
+        CGRect pr = GCWindowRectOf(v.superview, win);
+        if (!isfinite(pr.origin.x) || !isfinite(pr.origin.y)) return;
+        CGRect local = CGRectMake(g.origin.x - pr.origin.x, g.origin.y - pr.origin.y,
+                                  g.size.width, g.size.height);
+        if (!CGRectEqualToRect(local, v.frame)) {
 #ifdef GAODECLEAN_PROBE
-                    CGRect p7b = P7WR(cap);
+            CGRect p7b = P7WR(v);
 #endif
-                    [CATransaction begin]; [CATransaction setDisableActions:YES];
-                    [cap.layer removeAllAnimations]; cap.frame = local;
-                    [CATransaction commit];
+            [CATransaction begin]; [CATransaction setDisableActions:YES];
+            [v.layer removeAllAnimations]; v.frame = local;
+            [CATransaction commit];
 #ifdef GAODECLEAN_PROBE
-                    P7Write(1, p7b, local, p7oc);
+            P7Write(1, p7b, local, p7oc);
 #endif
-                }
-            }
-            // 只给「真的钉到了」的实例打标记 —— 用 A6 的钉位包络判定（层级无关），
-            // 绝不用 convertRect:（脱窗时行为未定义）。避免把「位置还错着」的实例标成已钉位。
-            if (GCWidgetAtPinnedSlot(cap)) capTarget = cap;
         }
-    }
+    };
+    pinCapsuleLike(CachedLiteGroup);      // 外壳（毛玻璃底）
+    pinCapsuleLike(CachedRight);          // 内层（⊙/↰ 图标）
     UIView *car = CachedCar;
     if (car && car.window && car.superview) {
         CGRect wr = [car convertRect:car.bounds toView:win];
@@ -4208,19 +4276,15 @@ static void GCStylePinWidgetsInner(UIWindow *win) {   // trial25(A2)：原体改
     }
     // trial10：钉完即放行扣留（AlignedKey），控件首 tick 就出现，不再等 settle
     if (car) objc_setAssociatedObject(car, &AlignedKey, @(1), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-    // ★0.9.122（A2）：`capTarget` 是"真的钉到了"的那个实例。
-    //   旧写法 `if (cap)` 会把"存在但没钉成"的外壳也标成已钉位 ⇒ 它带着 App 给的
-    //   原始位置被放行，就是「用错位置换可见」（HISTORY §W 钟摆曲线的成因）。
-    if (capTarget) objc_setAssociatedObject(capTarget, &AlignedKey, @(1), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-    if (CachedRight) objc_setAssociatedObject(CachedRight, &AlignedKey, @(1), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-    // ★0.9.122（A2）：**外壳也要打 AlignedKey** —— 这是 0.35 秒残差的真正断点。
-    //   旧写法只给 CachedRight 打了标记，而 App 真正按下 hidden 的是 **CachedLiteGroup
-    //   外壳**（另一条通路），它的 AlignedKey 一直是空的 ⇒ A5 钩子继续按住它 ⇒
-    //   外壳不可见 ⇒ 屏幕上看不到胶囊，尽管 CachedRight 已钉好、已打标记。
-    //   真机逐帧（video_E40DA38E）：车机钮 2.058s 到位、胶囊 2.408s，差 0.35 秒；
-    //   这 0.35 秒里 CachedRight 早已钉位 —— 差的就是外壳这个标记。
+    // ★0.9.123（A2）：外壳与内层**各自独立**打标记，都过钉位包络校验。
+    //   0.9.122 用的是 `capTarget`（互斥二选一的产物），外壳一旦抢占 cap 而没钉成，
+    //   内层就一次都没被标记 ⇒ 真机退化到 1.275s。
+    //   现在两者都尝试、各判各的——任一位置还错着就**不给它**标记（避免用错位置换可见），
+    //   但绝不因为一个不达标就连累另一个。
     if (CachedLiteGroup && GCWidgetAtPinnedSlot(CachedLiteGroup))
         objc_setAssociatedObject(CachedLiteGroup, &AlignedKey, @(1), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    if (CachedRight && GCWidgetAtPinnedSlot(CachedRight))
+        objc_setAssociatedObject(CachedRight, &AlignedKey, @(1), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     if (CachedRoute) objc_setAssociatedObject(CachedRoute, &AlignedKey, @(1), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 #ifdef GAODECLEAN_PROBE
     if (CachedRoute && !P7FirstKey) { P7FirstKey = P7Now(); P7Note(@"KEY 路线胶囊 AlignedKey 置位"); }
@@ -4231,7 +4295,9 @@ static void GCStylePinWidgetsInner(UIWindow *win) {   // trial25(A2)：原体改
     //   cap 回退 WINAJXCombinedWidgetView，但一次性标志已置位 ⇒ 胶囊真身类从未挂上钩。
     //   改为按当前实例类名动态登记；三类钩子（layoutSubviews/setPos/layerGeo）均类级去重。
     {
-        UIView *w26[3] = { car, cap, Cached2D };   // trial27：2D 钮入三件套挂钩（类级去重天然防重挂）
+        // ★0.9.123（A1）：外壳与内层是**两个视图**，两类钩子都要挂 ——
+        //   原来的 `cap` 是"二选一"的产物，漏掉的那个类永远钩不上。
+        UIView *w26[4] = { car, CachedLiteGroup, CachedRight, Cached2D };
         // ★trial29：通用基类黑名单 —— probe9 铁证：2D 钮类 = 裸 UIView，trial27 把
         //   layoutSubviews/setFrame:/setCenter: 挂到了全 App 的 UIView 基类上 ⇒ 每个视图
         //   每次布局都进块 ⇒ 定位按钮触摸布局被干扰失效（点定位无法定位）。
@@ -4240,7 +4306,7 @@ static void GCStylePinWidgetsInner(UIWindow *win) {   // trial25(A2)：原体改
         static NSSet *bl29; static dispatch_once_t t29;
         dispatch_once(&t29, ^{ bl29 = [NSSet setWithObjects:@"UIView", @"UILabel", @"UIImageView",
             @"UIControl", @"UIButton", @"UIVisualEffectView", @"UIScrollView", @"UIStackView", nil]; });
-        for (int i26 = 0; i26 < 3; i26++) {
+        for (int i26 = 0; i26 < 4; i26++) {
             UIView *v26 = w26[i26];
             if (!v26) continue;
             NSString *cn26 = NSStringFromClass(v26.class);
@@ -5689,10 +5755,22 @@ static BOOL IsRightBottomWidget(UIView *v) {
     id tag = ObjectGetter(v, GCStrAt(58));
     if ([tag isKindOfClass:NSString.class] && [(NSString *)tag length]) {
         NSString *t = [(NSString *)tag lowercaseString];
-        // 有 tag 就按 tag 定论：命中右下三个关键词 = YES；其它值 = NO
-        // （右上「+/图层」胶囊 tag 是 template_mainmapRightTop，走这条被明确排除）
-        return [t containsString:GCStrAt(129)] || [t containsString:GCStrAt(130)] ||
-               [t containsString:GCStrAt(131)];
+        // tag 命中关键词 ⇒ 立即定论 YES（最快通路）
+        if ([t containsString:GCStrAt(129)] || [t containsString:GCStrAt(130)] ||
+            [t containsString:GCStrAt(131)]) {
+            return YES;
+        }
+        // ★0.9.123（A2）：**tag 未命中不再直接 return NO** —— 这是 1.275 秒的真正断点。
+        //   旧写法「有 tag 就按 tag 定论，其它值 = NO」把整条几何兜底短路了。
+        //   只要 App 写进来一个不含 rightbottom/locate/location 的 tag
+        //   （不同版本的后缀、灰度开关下的变体名、甚至一个临时的内部名），
+        //   这颗胶囊就**永远**认不出来 ⇒ CachedRight 恒 nil ⇒ 永远被按住。
+        //   真机逐帧：video_B9476B3B 车机钮 1.317s、胶囊 2.592s，差 1.275s；
+        //   而 0.9.121 时（那时 tag 恰好为空）只差 0.35s —— 差别就在这里。
+        //
+        //   现在改成：tag 命中就快通道返回，未命中则**继续走几何兜底**。
+        //   右上「+/图层」胶囊靠 y 门槛 25% 自然排除（它 y≈8%），
+        //   不会因为这条放宽而被误认。
     }
     // ★0.9.120（A1）：**几何兜底** —— getItemTag 是 AJX 数据字段，晚于视图上屏才写入。
     //   HISTORY §W 的 W1b 就记过这一点（1.42s 判定返回 NO 导致整条链失效）。
@@ -6899,6 +6977,56 @@ static BOOL GCCBannerHasLegalAdMark(UIView *v, BOOL *outClose) {
     return mark || suffixMark;
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+//  0.9.123（A4）：**运营通知条**判据 —— 不带「广告」角标的那一类
+//
+//  真机截图（photo_F9AE7383）：顶部一条圆角胶囊，文案「请查收：【你的签到红包】」，
+//  右侧一个 ✕。它没有任何「广告/赞助/推广」字样，所以既有的
+//  「独立角标 + 关闭控件」双证判据**必然漏掉它** —— 这就是老大圈出来的那条。
+//
+//  强特征（四条同时成立，尽量不误伤）：
+//    ① 形状：顶部带 + 通栏 + 扁条（复用 GCCIsTopBannerShape）
+//    ② 文案：含中文方括号「【】」—— 运营推送模板的惯用符号，
+//       地图自身的路名/POI/搜索提示都不会用（它们用《》或纯文本）
+//    ③ 关闭：右侧有**真实**关闭控件（复用 GCCLooksLikeCloseControl）
+//    ④ 排除：子树含输入控件 / 是钉位首页的一部分（复用既有守卫）
+//
+//  第 ② 条是本判据的核心：只靠「有 ✕」会误伤所有可关闭的浮层；加上
+//  「【】」这个运营模板符号，精度才够。若将来遇到不含【】的通知条，
+//  再按实测补判据，不预先放宽。
+// ═══════════════════════════════════════════════════════════════════════════
+static BOOL GCCBannerHasOpsNoticeText(UIView *v, BOOL *outClose) {
+    // 「【」= U+3010，「】」= U+3011。不落明文，保持与混淆表同一口径。
+    static NSString *openBracket, *closeBracket;
+    static dispatch_once_t onceB;
+    dispatch_once(&onceB, ^{
+        openBracket  = [NSString stringWithFormat:@"%C", (unichar)0x3010];
+        closeBracket = [NSString stringWithFormat:@"%C", (unichar)0x3011];
+    });
+    BOOL notice = NO, close = NO;
+    NSMutableArray *q = [NSMutableArray arrayWithObject:v];
+    for (NSUInteger i = 0; i < q.count && q.count < 80; i++) {
+        UIView *s = q[i];
+        if (GCCLooksLikeCloseControl(s)) {
+            CGRect cr = [s convertRect:s.bounds toView:v];
+            CGFloat vw = CGRectGetWidth(v.bounds);
+            if (vw >= 1 && CGRectGetMidX(cr) > vw * 0.70) close = YES;
+        }
+        NSString *txt = NodeText(s);
+        if (!txt.length) txt = s.accessibilityLabel;
+        if (txt.length && !notice) {
+            // 只认「带方括号的整体文案」：长度设上限，避免把长段内容误判
+            if (txt.length <= 60 &&
+                [txt containsString:openBracket] && [txt containsString:closeBracket]) {
+                notice = YES;
+            }
+        }
+        [q addObjectsFromArray:s.subviews];
+    }
+    if (outClose) *outClose = close;
+    return notice;
+}
+
 // 完整判据。被隐藏过的一律不再重复处理（用关联对象打标，幂等）。
 static char BannerHiddenKey;
 static BOOL GCCIsTopBannerAd(UIView *v, UIWindow *win) {
@@ -6909,8 +7037,11 @@ static BOOL GCCIsTopBannerAd(UIView *v, UIWindow *win) {
     if (!GCCIsTopBannerShape(v, win)) return NO;
     BOOL hasClose = NO;
     BOOL hasMark = GCCBannerHasLegalAdMark(v, &hasClose);
-    if (!hasMark || !hasClose) return NO;
-    return YES;
+    if (hasMark && hasClose) return YES;
+    // ★0.9.123（A4）：第二条通道 —— 运营通知条（无「广告」角标，靠【】+ 关闭控件）
+    BOOL opsClose = NO;
+    if (GCCBannerHasOpsNoticeText(v, &opsClose) && opsClose) return YES;
+    return NO;
 }
 
 static long GCBannerHiddenCount;   // 诊断计数
