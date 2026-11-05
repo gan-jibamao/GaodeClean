@@ -23,7 +23,18 @@ set -u
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 cd "$ROOT" || exit 2
 
-SDK=${SDK:-/tmp/sdk165/iPhoneOS16.5.sdk}
+# 0.9.121（A12）：SDK 路径自动探测 —— 本机的 SDK 实际在 /tmp/sdkclone。
+#   旧写法硬编码 /tmp/sdk165，其余选项一个都没有，于是 gate 在换过 SDK 位置的机器上
+#   永远先报「SDK 缺失」，接着 [1/4] 跳过、[2/4] make check 因没有 SDK 而失败，
+#   一个正确的包被判成 3 项失败。三处候选路径按优先级探测，任一存在即用。
+pick_sdk() {
+    for c in "$1" /tmp/sdk165/iPhoneOS16.5.sdk /tmp/sdkclone/iPhoneOS16.5.sdk \
+             /opt/theos/sdks/iPhoneOS16.5.sdk /usr/share/iPhoneOS16.5.sdk; do
+        [ -n "$c" ] && [ -d "$c" ] && { printf '%s' "$c"; return 0; }
+    done
+    return 1
+}
+SDK=$(pick_sdk "${SDK:-}") || SDK=${SDK:-/tmp/sdk165/iPhoneOS16.5.sdk}
 PKG=""
 KIND="release"
 
@@ -67,7 +78,9 @@ fi
 
 # ── 2 make check（STRIP=1/0 + 混淆回环 + FNV）──────────────────────────────
 echo "[2/4] make check（STRIP=1 / STRIP=0 / 混淆回环 / FNV）"
-if make -f Makefile.local check >/tmp/gc_gate_check.log 2>&1; then
+# 0.9.121（A12）：必须把探测到的 SDK 传下去，否则 make check 仍用 Makefile 里的
+#   默认路径 /tmp/sdk165 编译，在这台机器上直接 fatal error。
+if make -f Makefile.local check SDK="$SDK" >/tmp/gc_gate_check.log 2>&1; then
     grep -q '全部通过' /tmp/gc_gate_check.log && ok "静态门禁全部通过" || bad "静态门禁未报「全部通过」"
     grep -E 'OK: 0 warnings|PASS 混淆回环' /tmp/gc_gate_check.log | sed 's/^/         /'
 else
@@ -84,9 +97,15 @@ else
     DEBS=$(find "$PKG" -maxdepth 2 -name '*.deb' | sort)
     if [ -z "$DEBS" ]; then bad "$PKG 下没有 .deb"; fi
     for d in $DEBS; do
-        case "$d" in
-            *roothide*) SCHEME=roothide ;;
-            *)          SCHEME=rootless ;;
+        # 0.9.121（A11）：scheme 不能靠文件名猜 —— Release 资产的命名是
+        #   com.jibamao.gaodeclean_0.9.121_iphoneos-arm64e.deb，里面没有 "roothide"
+        #   字样，旧写法会把它判成 rootless，然后因「架构应是 iphoneos-arm64」而误杀。
+        #   0.9.121 这次就真踩了：包完全正确，gate 却报 FAIL。
+        #   改为按 control 里的 Architecture 字段判定：含 arm64e ⇒ roothide。
+        ARCH=$(dpkg-deb -f "$d" Architecture 2>/dev/null || true)
+        case "$ARCH" in
+            *arm64e*) SCHEME=roothide ;;
+            *)        SCHEME=rootless ;;
         esac
         if FINALPACKAGE=1 bash -u scripts/verify_deb.sh "$d" "$SCHEME" >/tmp/gc_gate_deb.log 2>&1; then
             ok "$(basename "$d")（$SCHEME）"

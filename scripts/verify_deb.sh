@@ -21,6 +21,15 @@ DEB="${1:?用法: verify_deb.sh <deb> <rootless|roothide>}"
 SCHEME="${2:?用法: verify_deb.sh <deb> <rootless|roothide>}"
 FAIL=0
 
+# 0.9.121（A10）：iSH 上没有 macOS 的 plutil，工程自带替代实现放在 /tmp/shims。
+#   不把它放进 PATH 就会踩到一个**假失败**：第 264 行的 `plutil -p "$PL"` 因
+#   命令不存在而输出空 ⇒ grep 命中 0 ⇒ 判「过滤器不含 com.autonavi.amap」。
+#   0.9.121 这次就真踩了（包本身完全正确，plist 里明明白白写着 com.autonavi.amap）。
+#   修法：脚本自己在需要时把 shim 目录挂到 PATH 前面，找不到 plutil 时打印提示而非静默误判。
+if ! command -v plutil >/dev/null 2>&1 && [ -d /tmp/shims ] && [ -x /tmp/shims/plutil ]; then
+    PATH="/tmp/shims:$PATH"; export PATH
+fi
+
 say()  { printf '%s\n' "$*"; }
 ok()   { printf '  [OK]   %s\n' "$*"; }
 bad()  { printf '  [FAIL] %s\n' "$*"; FAIL=1; }
@@ -261,8 +270,26 @@ fi
 # --- 8. 注入过滤器 ---
 PL=$(find "$TMP/root" -name 'GaodeClean.plist' | head -1)
 if [ -n "$PL" ]; then
-  plutil -p "$PL" 2>/dev/null | grep -q 'com.autonavi.amap' \
-    && ok "过滤器 Bundles=com.autonavi.amap" || bad "过滤器不含 com.autonavi.amap"
+  # 0.9.121（A10）：工具缺失必须报出来，不能静默判失败（那会把好包判成坏包）。
+  if ! command -v plutil >/dev/null 2>&1; then
+    say "  [NOTE] 无 plutil（macOS 专用），改用 python3 plistlib 校验过滤器"
+    python3 - "$PL" <<'PY'
+import plistlib, sys
+try:
+    with open(sys.argv[1], 'rb') as fh:
+        d = plistlib.load(fh)
+    ok = 'com.autonavi.amap' in (d.get('Filter') or {}).get('Bundles', [])
+except Exception as e:
+    print("  [FAIL] plist 解析失败: %s" % e); sys.exit(1)
+print("  [OK]   过滤器 Bundles=com.autonavi.amap" if ok
+      else "  [FAIL] 过滤器不含 com.autonavi.amap")
+sys.exit(0 if ok else 1)
+PY
+    [ $? -eq 0 ] || FAIL=1
+  else
+    plutil -p "$PL" 2>/dev/null | grep -q 'com.autonavi.amap' \
+      && ok "过滤器 Bundles=com.autonavi.amap" || bad "过滤器不含 com.autonavi.amap"
+  fi
 fi
 
 rm -rf "$TMP"
