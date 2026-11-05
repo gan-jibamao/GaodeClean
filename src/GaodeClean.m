@@ -18,7 +18,7 @@
 // ---- jibamao 个人标识（编译进 dylib，可用 strings 核对）----
 static NSString *const kGCAuthor      = @"jibamao";
 static NSString *const kGCRepo        = @"https://gan-jibamao.github.io/";
-static NSString *const kGCVersion     = @"0.9.121";
+static NSString *const kGCVersion     = @"0.9.122";
 
 // 0.9.18（A1）：底边间隙**按控件分开**，对表原生（搜索栏白底顶边 = 702.6pt）
 //   车机钮（连接车机 · WINDeviceInterconnectWidget）：原生底 652 → 间隙 50.6 → 取 50
@@ -325,18 +325,32 @@ static CGFloat GCPinBottom(UIWindow *win) {
     CGFloat fb = sh - 81 - 16;
     UIView *tb = CachedTabBar;
     CGFloat raw = fb;
+    BOOL fromBar = NO;
     if (win && tb && tb.window == win) {
         CGRect r = GCModelWinRect(tb, win);   // trial43(D1)：底栏也用模型层，避免动画期整组按钮跟着漂
-        if (r.size.height > 20 && r.size.height < 140 && r.origin.y > sh * 0.30)
+        if (r.size.height > 20 && r.size.height < 140 && r.origin.y > sh * 0.30) {
             raw = r.origin.y - 13.0;
+            fromBar = YES;
+        }
     }
     // ★trial44(E2)：0.5 秒锁定 —— App 在缩放/过渡时会连续搬动底栏；我们若逐帧跟随，
     //   2D 钮/车机/天气行就整组跟着跑（老大看到的「2D 图标跳动」）。
     //   规则：与锁定值相差 >0.5pt 时先不动，连续偏离满 0.5s 才采纳新值
     //   ⇒ 瞬态动画被忽略，真实布局变更（换机型/切页）仍会跟上。
+    //
+    // ★0.9.122（A4）：**首次锁定不许锁 fallback**。
+    //   真机逐帧（video_E40DA38E）：底栏三钮 2.642s 才上屏，而车机钮 2.058s 就到位。
+    //   旧写法在第一次调用时（底栏还没出现）就把 locked 定在 fallback `sh-81-16`，
+    //   此后底栏真正落位、raw 变化 >0.5pt 时，还要再等满 0.5 秒才采纳 ⇒
+    //   锚点白白滞后半秒，胶囊与车机钮一起被拖。
+    //   改法：第一次调用若还拿不到底栏（fromBar=NO），**不锁**，返回当前估算值但
+    //   保持 has=NO，让下一次调用继续尝试；一旦拿到底栏值就立刻锁定并采纳。
     static CGFloat locked; static double stableSince; static BOOL has;
     double now = CACurrentMediaTime();
-    if (!has) { locked = raw; stableSince = now; has = YES; return locked; }
+    if (!has) {
+        if (!fromBar) return raw;              // 还没底栏 ⇒ 用估算值，但**不锁定**
+        locked = raw; stableSince = now; has = YES; return locked;
+    }
     if (fabs(raw - locked) <= 0.5) { stableSince = now; return locked; }
     if (now - stableSince > 0.5) { locked = raw; stableSince = now; }
     return locked;
@@ -4132,21 +4146,40 @@ static void GCStylePinWidgetsInner(UIWindow *win) {   // trial25(A2)：原体改
 #endif
     CGFloat sw = win.bounds.size.width;
     const CGFloat pinBottom = GCPinBottom(win);   // trial38：跟随底栏（圆钮行顶 771 上 16pt）
-    UIView *cap = (CachedLiteGroup && CachedLiteGroup.window) ? CachedLiteGroup : CachedRight;
-    if (cap && cap.window && cap.superview) {
-        CGRect wr = [cap convertRect:cap.bounds toView:win];
-        CGRect g = CGRectMake(sw - 10 - wr.size.width, pinBottom - wr.size.height, wr.size.width, wr.size.height);
-        CGRect local = [cap.superview convertRect:g fromView:win];
-        if (!CGRectEqualToRect(local, cap.frame)) {
+    // ★0.9.122（A3）：外壳优先判据不再要求 `.window` 非空 —— 与 A1 同源。
+    //   旧写法 `CachedLiteGroup && CachedLiteGroup.window`：外壳脱窗时会退回 CachedRight，
+    //   于是**钉的是内层、外壳没钉**；而 App 按住的恰恰是外壳 ⇒ 外壳带着 App 给的
+    //   原始位置被放行 = 先用错位置换可见（正是 HISTORY §W 的钟摆成因）。
+    //   改为「存在即优先」：外壳存在就钉外壳，哪怕此刻还在脱窗（GCWindowRectOf 能算）。
+    UIView *cap = CachedLiteGroup ?: CachedRight;
+    UIView *capTarget = nil;               // 真正被钉位/打标记的那个实例
+    // ★0.9.122（A3）：钉位仍需「有父容器」才能写 frame；但**不再要求 cap.window**。
+    //   convertRect:fromView: 要求两端属于同一窗口层级 —— 用 GCWindowRectOf 反推
+    //   「目标矩形在父容器坐标系里的位置」，全程不依赖跨层级转换。
+    if (cap && cap.superview) {
+        CGRect wr = GCWindowRectOf(cap, win);
+        if (isfinite(wr.size.width) && wr.size.width >= 1 && isfinite(wr.size.height) && wr.size.height >= 1) {
+            CGRect g = CGRectMake(sw - 10 - wr.size.width, pinBottom - wr.size.height, wr.size.width, wr.size.height);
+            // 父容器在窗口系里的位置 = cap 的窗口系位置 − cap 自身在父容器里的位置
+            CGRect pr = GCWindowRectOf(cap.superview, win);
+            if (isfinite(pr.origin.x) && isfinite(pr.origin.y)) {
+                CGRect local = CGRectMake(g.origin.x - pr.origin.x, g.origin.y - pr.origin.y,
+                                          g.size.width, g.size.height);
+                if (!CGRectEqualToRect(local, cap.frame)) {
 #ifdef GAODECLEAN_PROBE
-            CGRect p7b = P7WR(cap);
+                    CGRect p7b = P7WR(cap);
 #endif
-            [CATransaction begin]; [CATransaction setDisableActions:YES];
-            [cap.layer removeAllAnimations]; cap.frame = local;
-            [CATransaction commit];
+                    [CATransaction begin]; [CATransaction setDisableActions:YES];
+                    [cap.layer removeAllAnimations]; cap.frame = local;
+                    [CATransaction commit];
 #ifdef GAODECLEAN_PROBE
-            P7Write(1, p7b, local, p7oc);
+                    P7Write(1, p7b, local, p7oc);
 #endif
+                }
+            }
+            // 只给「真的钉到了」的实例打标记 —— 用 A6 的钉位包络判定（层级无关），
+            // 绝不用 convertRect:（脱窗时行为未定义）。避免把「位置还错着」的实例标成已钉位。
+            if (GCWidgetAtPinnedSlot(cap)) capTarget = cap;
         }
     }
     UIView *car = CachedCar;
@@ -4175,8 +4208,19 @@ static void GCStylePinWidgetsInner(UIWindow *win) {   // trial25(A2)：原体改
     }
     // trial10：钉完即放行扣留（AlignedKey），控件首 tick 就出现，不再等 settle
     if (car) objc_setAssociatedObject(car, &AlignedKey, @(1), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-    if (cap) objc_setAssociatedObject(cap, &AlignedKey, @(1), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    // ★0.9.122（A2）：`capTarget` 是"真的钉到了"的那个实例。
+    //   旧写法 `if (cap)` 会把"存在但没钉成"的外壳也标成已钉位 ⇒ 它带着 App 给的
+    //   原始位置被放行，就是「用错位置换可见」（HISTORY §W 钟摆曲线的成因）。
+    if (capTarget) objc_setAssociatedObject(capTarget, &AlignedKey, @(1), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     if (CachedRight) objc_setAssociatedObject(CachedRight, &AlignedKey, @(1), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    // ★0.9.122（A2）：**外壳也要打 AlignedKey** —— 这是 0.35 秒残差的真正断点。
+    //   旧写法只给 CachedRight 打了标记，而 App 真正按下 hidden 的是 **CachedLiteGroup
+    //   外壳**（另一条通路），它的 AlignedKey 一直是空的 ⇒ A5 钩子继续按住它 ⇒
+    //   外壳不可见 ⇒ 屏幕上看不到胶囊，尽管 CachedRight 已钉好、已打标记。
+    //   真机逐帧（video_E40DA38E）：车机钮 2.058s 到位、胶囊 2.408s，差 0.35 秒；
+    //   这 0.35 秒里 CachedRight 早已钉位 —— 差的就是外壳这个标记。
+    if (CachedLiteGroup && GCWidgetAtPinnedSlot(CachedLiteGroup))
+        objc_setAssociatedObject(CachedLiteGroup, &AlignedKey, @(1), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     if (CachedRoute) objc_setAssociatedObject(CachedRoute, &AlignedKey, @(1), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 #ifdef GAODECLEAN_PROBE
     if (CachedRoute && !P7FirstKey) { P7FirstKey = P7Now(); P7Note(@"KEY 路线胶囊 AlignedKey 置位"); }
@@ -5698,10 +5742,18 @@ static BOOL IsRightBottomWidget(UIView *v) {
 //   但它出生就在窗口顶部（y≈69 ≈ 窗高 3.6%），故用 25% 高度线排除。
 static BOOL GCCIsLiteGroupCapsule(UIView *v) {
     if (![NSStringFromClass(v.class) isEqualToString:GCStrAt(132)]) return NO;
-    UIView *win = v.window;
+    // ★0.9.122（A1）：与 IsRightBottomWidget 同一个毛病 —— 不再要求 v.window 非空。
+    //   冷启动期这层外壳可能「已建好但还没挂上窗口」，旧写法在这里整条退出 ⇒
+    //   CachedLiteGroup 恒 nil ⇒ pin 通道退回用 CachedRight ⇒ 但 CachedRight 被打上
+    //   AlignedKey 后，setHidden: 拦截保护的是**外壳**（另一条通路），两套缓存不同步
+    //   ⇒ 外壳仍被按着。真机逐帧：车机钮 2.058s 到位、胶囊 2.408s，差 0.35 秒。
+    UIWindow *win = v.window ?: GCAnyMainWindow();
     if (!win) return NO;
-    CGFloat y = [v convertPoint:CGPointZero toView:win].y;
-    return y > win.bounds.size.height * 0.25;
+    // 判据与 IsRightBottomWidget 同源：用层级无关换算，脱窗也能判
+    CGRect r = GCWindowRectOf(v, win);
+    if (!isfinite(r.origin.y) || !isfinite(r.size.height)) return NO;
+    if (r.size.height < 1) return NO;
+    return CGRectGetMidY(r) > win.bounds.size.height * 0.25;
 }
 
 __attribute__((unused)) static void AlignOneWidget(UIView *bar, UIView *w, CGFloat barTop, CGFloat gap) {

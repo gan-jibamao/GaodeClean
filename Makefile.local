@@ -136,6 +136,10 @@ check:
 	@echo "check: 右下几何单测"
 	@gcc -O2 -Wall -Wextra -o /tmp/right_geo_test tests/right_geo_test.c -lm \
 	  && /tmp/right_geo_test | tail -3
+# 0.9.122（A2/A3）：胶囊外壳放行 —— 锁住「外壳也要打 AlignedKey」「中部瞬态位不许放行」。
+	@echo "check: 外壳放行单测"
+	@gcc -O2 -Wall -Wextra -o /tmp/shell_release_test tests/shell_release_test.c -lm \
+	  && /tmp/shell_release_test | tail -3
 # 0.9.20（A2）：混淆回环自测 —— 用与运行时同一份解码数学把 295 条串解回明文，
 # 逐条比对 + 校验头内 FNV 摘要；这一步保证「加密后仍 100% 解得原串」。
 	@$(CLANG) -O2 -Wall -Wextra -I src -o /tmp/obf_selftest scripts/obf_selftest.c \
