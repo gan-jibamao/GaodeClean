@@ -18,7 +18,7 @@
 // ---- jibamao 个人标识（编译进 dylib，可用 strings 核对）----
 static NSString *const kGCAuthor      = @"jibamao";
 static NSString *const kGCRepo        = @"https://gan-jibamao.github.io/";
-static NSString *const kGCVersion     = @"0.9.120";
+static NSString *const kGCVersion     = @"0.9.121";
 
 // 0.9.18（A1）：底边间隙**按控件分开**，对表原生（搜索栏白底顶边 = 702.6pt）
 //   车机钮（连接车机 · WINDeviceInterconnectWidget）：原生底 652 → 间隙 50.6 → 取 50
@@ -303,6 +303,10 @@ static UIColor *GCStyleFillColor(UIView *ref) {
 
 static BOOL IsRightBottomWidget(UIView *v);            // trial11：前置声明（discover 用）
 static BOOL GCCIsLiteGroupCapsule(UIView *v);          // trial11：前置声明（discover 用）
+// 0.9.121：三个新判据的前置声明（定义分散在文件后部，而 A3 的调用点在冷启动兜底里）
+static UIWindow *GCAnyMainWindow(void);                 // A7：脱窗时的主窗口兜底
+static CGRect GCWindowRectOf(UIView *v, UIWindow *win); // A2：层级无关的窗口坐标换算
+static BOOL GCWidgetAtPinnedSlot(UIView *v);            // A6：钉位包络判据
 static BOOL FixingHintText;
 static __weak UIView *CachedTabBar;
 
@@ -2210,6 +2214,21 @@ static void Schedule(void) {
                 HomeSettled = YES;
                 for (UIView *w in ColdWidgets.allObjects) {
                     if (![w isKindOfClass:UIView.class]) continue;
+                    // ★0.9.121（A3）：钉位不达标的控件，不许在这条兜底里被
+                    //   「无条件补打 AlignedKey + 点亮」。
+                    //   这就是 HISTORY §W 钟摆曲线的成因：先用错位置换可见，再瞬移。
+                    //   判定与 GCShouldProtectPinnedWidget 的 ③ 同一套坐标（A6 抽出），
+                    //   这里取反：不达标 ⇒ 跳过，下一拍由几何兜底认领并钉位。
+                    //   真机逐帧：胶囊 2.375s 之前全图 0 命中（任何位置都没有 98×195 白块）
+                    //   ⇒ 它一直是 hidden，从未在中部露过；这条兜底本可提前点亮它，
+                    //   但那样会以 App 原生瞬态位出现，正是要禁止的。
+                    //
+                    // ★0.9.121（A3 保险）：skip 只在前 40 拍（≈8 秒）内生效。
+                    //   若 8 秒还没钉位，说明识别链路彻底失效（类名变了/树里没有），
+                    //   这时宁可「用错位置显示」也不能「永远不显示」——
+                    //   宁可露一次，不可永久缺件。这条保险保证 A3 不会引入
+                    //   「比以前更糟」的退化。
+                    if (ColdTicks <= 40 && !GCWidgetAtPinnedSlot(w)) continue;
                     objc_setAssociatedObject(w, &AlignedKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
                     // 兜底同样要恢复 alpha，否则被压成 0 的控件即使 hidden=NO 也不可见。
                     if (w.alpha < 0.01) w.alpha = 1.0;
@@ -2332,6 +2351,33 @@ static NSArray<UIWindow *> *GCAllWindows(void) {
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
     return UIApplication.sharedApplication.windows;
 #pragma clang diagnostic pop
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  0.9.121（A7）：主窗口兜底 —— 脱窗时取参照窗口
+//
+//  A1/A2/A6 都要在「v.window 为 nil」时拿到一个参照窗口。不能直接用
+//  UIApplication.sharedApplication.keyWindow（iOS 13+ 多场景下已弃用），
+//  也不能假设 GCAllWindows 的第一个就是主窗（弹窗/浮层会插进来）。
+//
+//  优先级：缓存的最大非隐藏窗口 → 重新枚举取面积最大者。
+//  取不到返回 nil，调用方各自回退（绝不崩）。
+// ═══════════════════════════════════════════════════════════════════════════
+static UIWindow *GCAnyMainWindow(void) {
+    static __weak UIWindow *cached;
+    if (cached && !cached.hidden && cached.bounds.size.width >= 200) return cached;
+    UIWindow *best = nil;
+    CGFloat bestArea = 0;
+    for (UIWindow *w in GCAllWindows()) {
+        if (!w || w.hidden || w.alpha < 0.01f) continue;
+        CGRect b = w.bounds;
+        if (!isfinite(b.size.width) || !isfinite(b.size.height)) continue;
+        if (b.size.width < 200 || b.size.height < 200) continue;
+        CGFloat area = b.size.width * b.size.height;
+        if (area > bestArea) { bestArea = area; best = w; }
+    }
+    cached = best;
+    return best;
 }
 
 // 目的：一次拿到搜索栏 / 底栏的真实视图层级 + 规则 dry-run 判定 ——
@@ -3324,12 +3370,19 @@ static void GCStyleDiscoverWidgets(UIWindow *win) {
         if (gnow - GCStyleGoneAt[3] > 1.0) { CachedLiteGroup = nil; GCStyleGoneAt[3] = 0; }
     } else GCStyleGoneAt[3] = 0;
     if (Cached2D && !Cached2D.window) Cached2D = nil;   // trial27：2D 钮断链即清（App 真删时 BFS 重发现）
-#ifdef GAODECLEAN_PROBE
-    if (CachedCar && CachedRight && CachedRoute && CachedLiteGroup) P7DiscSkips++;
-#endif
     // ★trial50(A1)：Cached2D 已停用（0.9.29 无此缓存），不再参与"齐套"判定，
     //   否则恒缺员 ⇒ 每拍全树 BFS 白烧。
-    if (CachedCar && CachedRight && CachedRoute && CachedLiteGroup) return;
+    // ★0.9.121（A4）：早退门必须剔除「脱窗」实例 —— 非 nil 不算齐套，得有 window。
+    //   0.9.120（A2）加的 GCPinnedRightStrong 是**强引用**：App 毁掉实例后对象仍活着
+    //   （只是脱窗），于是 CachedRight 恒非 nil ⇒ 这里早退 ⇒ BFS 永不重跑 ⇒
+    //   App 新建的那颗真胶囊永远发现不了。真机逐帧铁证：几何兜底（A1）已写好，
+    //   胶囊却仍锁在 2.375s（车机钮 0.975s 就在）—— 差的这 1.40 秒全在这里。
+    BOOL rightLive = (CachedRight && CachedRight.window);
+    BOOL liteLive  = (CachedLiteGroup && CachedLiteGroup.window);
+#ifdef GAODECLEAN_PROBE
+    if (CachedCar && rightLive && CachedRoute && liteLive) P7DiscSkips++;
+#endif
+    if (CachedCar && rightLive && CachedRoute && liteLive) return;
     // ★trial25(A4)：BFS 节流 ≥100ms —— display-link 60fps 驱动下，缓存缺员（dump 铁证：
     //   LiteGroup 0.8s 丢失后 ptr=0x0 长期为 nil）时每帧全树 BFS（预算 2000 节点）白烧。
     static CFAbsoluteTime GCStyleLastBFS = 0;
@@ -5605,16 +5658,35 @@ static BOOL IsRightBottomWidget(UIView *v) {
     //
     //   几何判据（对表真机实测 339,667,44x88 / 屏 393x852）：
     //     · 右列：中心 x > 屏宽 70%（排除左侧车机钮）
-    //     · 底部带：中心 y > 屏高 60%（**排除右上「+/图层」胶囊**，它 y≈8%）
+    //     · 底部带：中心 y > 屏高 **25%**（**排除右上「+/图层」胶囊**，它 y≈8%）
     //     · 尺寸：宽 30..70、高 50..130（留余量兼容不同机型）
-    UIWindow *win = v.window;
+    //
+    // ★0.9.121（A1）：**不再要求 v.window 非空**。
+    //   冷启动期这颗胶囊可能「已上屏但脱窗」（HISTORY §Z 记 1.187s App 摆它时处于
+    //   隐藏态；trial25(A3) 记容器摘挂 1~3s）。旧写法 `if (!win) return NO` 在这里
+    //   整条退出 ⇒ 几何兜底形同不存在 ⇒ CachedRight 恒 nil ⇒ 打不上 AlignedKey
+    //   ⇒ 被 setHidden: 拦截里的「未钉位就按住」一路压到 2.375s。
+    //   真机逐帧铁证：车机钮（靠类名识别，与位置无关）0.975s 出现，胶囊 2.375s。
+    UIWindow *win = v.window ?: GCAnyMainWindow();
     if (!win) return NO;
     CGFloat ww = win.bounds.size.width, wh = win.bounds.size.height;
     if (ww < 1 || wh < 1) return NO;
-    CGRect r = [v convertRect:v.bounds toView:win];
-    if (!isfinite(r.origin.x) || !isfinite(r.origin.y)) return NO;
+    // ★0.9.121（A1'）：y 门槛 60% → **25%**。
+    //   这是 0.9.120 最大的自锁：未钉位的胶囊被 App 摆在瞬态位 (339,340)，
+    //   即屏高 40%；40% < 60% ⇒ 判据说「不是它」⇒ 永远打不上 AlignedKey
+    //   ⇒ 永远被按住 ⇒ 永远到不了 60% 以下的终止位。死循环。
+    //   25% 与 GCCIsLiteGroupCapsule 排除右上「+/图层」胶囊用的是同一个界
+    //   （那颗 y≈8%），既够宽（能认出瞬态位）又够严（不会误伤右上）。
+    //   认出之后由 GCStyleDiscoverWidgets 的「发现即钉位」当场摆到终位，
+    //   全程 hidden，用户看不到它在中部出现。
+    // ★0.9.121（A2）：几何**不依赖跨层级转换** —— 改用层级无关的逐级累加，
+    //   见 GCWindowRectOf 的注释（convertRect:toView: 在脱窗时是未定义结果）。
+    CGRect r = GCWindowRectOf(v, win);
+    if (!isfinite(r.origin.x) || !isfinite(r.origin.y) ||
+        !isfinite(r.size.width) || !isfinite(r.size.height)) return NO;
+    if (r.size.width < 1 || r.size.height < 1) return NO;
     if (CGRectGetMidX(r) < ww * 0.70) return NO;
-    if (CGRectGetMidY(r) < wh * 0.60) return NO;
+    if (CGRectGetMidY(r) < wh * 0.25) return NO;
     CGSize sz = v.bounds.size;
     if (sz.width < 30 || sz.width > 70) return NO;
     if (sz.height < 50 || sz.height > 130) return NO;
@@ -5782,6 +5854,43 @@ static BOOL GCCViewIsUnder(UIView *v, UIView *anc) {   // v == anc 或其后代�
 //     · 顶部：视图 maxY ≤ 屏高 35%
 //   这正好框住右上「+/图层」胶囊，而右下 ⊙/↰ 胶囊（y≈600pt，70%）与底栏（y≈760pt）
 //   都在框外，不会被误判成「胶囊内」。中部裸露的 LiteGroup（y>25% 且居中）也不受影响。
+// ═══════════════════════════════════════════════════════════════════════════
+//  0.9.121（A2）：**层级无关**的窗口坐标换算
+//
+//  为什么不能用 convertRect:toView:
+//    该 API 在「视图不属于目标窗口层级」时是未定义行为 —— 实测返回 {inf,inf}
+//    或原样吐回父容器坐标。而冷启动判定恰恰要覆盖「还没挂到窗口上」的那段
+//    （HISTORY §Z：1.187s App 摆它时处于隐藏态；trial25(A3)：容器摘挂 1~3s）。
+//    0.9.120 的几何兜底因此全程无效 —— 真机逐帧铁证：胶囊 2.375s 才出现，
+//    车机钮 0.975s 就在，两者差的这 1.40 秒全在这里。
+//
+//  做法：逐级把 superview 的 frame 累加，遇到目标窗口或到达根就停，
+//        全程 isfinite 守卫；任何一级非法就返回 CGRectNull 让调用方放弃。
+//  语义：返回值是「该视图 bounds 在 win 坐标系里的矩形」（等于 convertRect:toView:
+//        在层级正常时的结果），层级不正常时给出的是「能算多少算多少」的近似值。
+// ═══════════════════════════════════════════════════════════════════════════
+static CGRect GCWindowRectOf(UIView *v, UIWindow *win) {
+    if (!v) return CGRectNull;
+    CGRect vb = v.bounds;
+    CGRect vf = v.frame;
+    if (!isfinite(vb.size.width) || !isfinite(vb.size.height) ||
+        !isfinite(vf.origin.x) || !isfinite(vf.origin.y)) return CGRectNull;
+    // 起点：v 的 bounds 偏移到自身坐标系原点，再叠加 v 自己的 frame.origin
+    CGRect acc = CGRectMake(vf.origin.x, vf.origin.y, vb.size.width, vb.size.height);
+    if (!win) return acc;
+    UIView *p = v.superview;
+    int guard = 0;
+    while (p && p != win && guard++ < 32) {
+        CGRect f = p.frame;
+        if (!isfinite(f.origin.x) || !isfinite(f.origin.y)) return CGRectNull;
+        acc.origin.x += f.origin.x;
+        acc.origin.y += f.origin.y;
+        if (p.superview == nil) break;          // 到根：acc 已是根坐标系
+        p = p.superview;
+    }
+    return acc;
+}
+
 static BOOL GCCIsInTopRightCapsuleZone(UIView *v) {
     if (!v) return NO;
     UIWindow *win = v.window;
@@ -5912,8 +6021,19 @@ static void AlignCornerWidgets(UIView *bar) {
     // 0.9.16（A2 安全网）：锚点已定格、但我们仍按着 App 原生组容器时超时放行 ——
     //   覆盖「CachedRight 未配对 / AlignOneWidget 没跑到」的极端情形，
     //   确保胶囊的背景与图标绝不会永久缺失（宁可早放，不可不放）。
+    //
+    // ★0.9.121（A9）：这是**第三道**被 SearchBarSettled 掐死的锁。
+    //   本机首页是圆钮底栏、没有搜索栏 ⇒ SearchBarSettled 永远 NO ⇒
+    //   这条「超时放行」永远不会触发，LiteGroup 外壳只能靠 A5 那条钩子放行。
+    //   A5 只管「钩子被调用的那一刻」，而 App 可能只调一次、发生在 A5 判断之前。
+    //   这里补一条不依赖搜索栏的通道：容器已在钉位包络内且被按着 ⇒ 直接放行。
+    //   与 A5 同一判据（A6），两处互相兜底，任一通路成立即可见。
     if (SearchBarSettled && ColdTicks > 16 && CachedLiteGroup &&
         CachedLiteGroup.window && CachedLiteGroup.hidden) {
+        CachedLiteGroup.hidden = NO;
+    }
+    if (CachedLiteGroup && CachedLiteGroup.window && CachedLiteGroup.hidden &&
+        GCWidgetAtPinnedSlot(CachedLiteGroup)) {
         CachedLiteGroup.hidden = NO;
     }
 }
@@ -7468,6 +7588,40 @@ static void InstallBarContentHooks(void) {
 //    ③ 位置确实在目标上：与 GCPinBottom 推导出的目标位相差 ≤ 4pt
 //  再加一条兜底：显示状态只「扶正」不「创造」—— 控件必须在 window 里。
 // ═══════════════════════════════════════════════════════════════════════════
+//  0.9.121（A6）：**钉位包络**判据（与 AlignedKey 解耦）
+//
+//  为什么单独抽出来：A3（冷启动兜底不许用错位置点亮）与 A5（LiteGroup 外壳
+//  的按住判据）都需要回答同一句话 ——「它现在是不是真的在钉位上」，
+//  而两处调用点都**还没有** AlignedKey（正是要决定要不要给）。
+//
+//  判据与下面 GCShouldProtectPinnedWidget 的第 ③ 条完全同源，避免两套坐标漂移：
+//    · 底边必须落在 GCPinBottom 上方 0..200pt 的带内
+//    · 横向必须在左右两侧边列（这两族控件都贴边）
+//    · 几何全程走 GCWindowRectOf（层级无关，脱窗也能判）
+// ═══════════════════════════════════════════════════════════════════════════
+static BOOL GCWidgetAtPinnedSlot(UIView *v) {
+    if (!v) return NO;
+    UIWindow *win = v.window ?: GCAnyMainWindow();
+    if (!win) return NO;
+    CGFloat sh = win.bounds.size.height, sw = win.bounds.size.width;
+    if (sh < 1 || sw < 1) return NO;
+    CGRect r = GCWindowRectOf(v, win);
+    if (!isfinite(r.origin.x) || !isfinite(r.origin.y) ||
+        !isfinite(r.size.width) || !isfinite(r.size.height)) return NO;
+    if (r.size.height < 1 || r.size.width < 1) return NO;
+    const CGFloat pinBottom = GCPinBottom(win);
+    CGFloat bottom = CGRectGetMaxY(r);
+    // 只认「右下角这一族」：底边落在 pinBottom 上方 0..200pt 的带内
+    //   · 胶囊底边 = pinBottom                  （实测 667 + 88 = 755）
+    //   · 车机钮底边 = pinBottom - 147 附近     （实测 608 + 44 = 652，755-652=103）
+    if (bottom > pinBottom + 4) return NO;                 // 低于胶囊底边 → 不是它们
+    if (bottom < pinBottom - 200) return NO;               // 高于车机钮带 → 不是它们
+    // 横向也必须在右侧或左侧边缘列（这两个控件都贴边）
+    CGFloat midx = CGRectGetMidX(r);
+    if (!(midx > sw * 0.70) && !(midx < sw * 0.30)) return NO;
+    return YES;
+}
+
 static BOOL GCShouldProtectPinnedWidget(UIView *v) {
     if (!v || !v.window) return NO;
     if (ColdTicks >= 60) return NO;                                    // ① 只在冷启动窗口内
@@ -7538,7 +7692,15 @@ static void InstallPromoAndWidgetHooks(void) {
         // ★0.9.116（A2''）：与 setHidden: 那条同源 —— 已钉位就不按住。
         if (!v.window || !GCCIsLiteGroupCapsule(v)) return;
         BOOL pinned = objc_getAssociatedObject(v, &AlignedKey) != nil;
-        if (!pinned && !SearchBarSettled) {
+        // ★0.9.121（A5）：补「钉位包络」判据，替代纯计时的 !SearchBarSettled。
+        //   铁证：本机首页是**圆钮底栏、没有搜索栏**（真机录像 5.997s 全程底栏
+        //   三个圆钮，无 WINQuickSearchBarV2）⇒ SearchBarSettled **永远是 NO**
+        //   ⇒ 这条钩子对 LiteGroup 外壳**永久按住**。而 pin 通道优先选的就是它
+        //     （GCStylePinWidgetsInner: cap = CachedLiteGroup ?: CachedRight）
+        //   ⇒ 就算 CachedRight 修对了，外壳还压着，屏幕照样看不见 = 第二道独立锁。
+        //   漏掉它，A1~A4 全部白修。
+        //   新判据：位置已落在胶囊钉位包络内 ⇒ 放行（不再依赖搜索栏是否存在）。
+        if (!pinned && !SearchBarSettled && !GCWidgetAtPinnedSlot(v)) {
             v.hidden = YES; [ColdWidgets addObject:v];
         }
     });
