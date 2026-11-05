@@ -85,6 +85,20 @@ static int is_top_banner_shape(R r, double ww, double wh) {
     return 1;
 }
 
+
+// 与源文件 GCCBannerHasLegalAdMark 的「后缀角标」分支对应
+static int is_suffix_ad_mark(const char *txt, double relX) {
+    if (!txt || !*txt) return 0;
+    int n = utf8_chars(txt);
+    if (n > 40) return 0;
+    int has = 0;
+    for (int i = 0; i < kAdBadgeCount; i++) {
+        if (strstr(txt, kAdBadges[i])) { has = 1; break; }
+    }
+    if (!has) return 0;
+    return relX > 0.55;
+}
+
 // ── 单测 ────────────────────────────────────────────────────────────────────
 static int Passed, Failed;
 static void ck(int cond, const char *what) {
@@ -108,6 +122,9 @@ int main(void) {
     ck(!is_top_banner_shape(rect(40, 50, 200, 56), WW, WH), "窄卡 200x56（51%宽）→ 否");
     ck(!is_top_banner_shape(rect(40, 50, 312, 20), WW, WH), "扁条 312x20（高<28）→ 否");
     ck(!is_top_banner_shape(rect(40, 50, 312, 200), WW, WH), "高块 312x200（>190）→ 否");
+    ck(is_top_banner_shape(rect(0, 150, 886, 189), 886, 1920),
+       "0.9.118：天猫横幅 886x189 @y=150（真机实测）→ 命中");
+    ck(!is_top_banner_shape(rect(40, 50, 312, 230), WW, WH), "高块 312x230（>210）→ 否");
     ck(!is_top_banner_shape(rect(40, 400, 312, 56), WW, WH), "同尺寸 @y=400（>33%）→ 否");
     ck(!is_top_banner_shape(rect(0, 0, 393, 852), WW, WH), "全屏 → 否（归开屏守卫）");
     ck(!is_top_banner_shape(rect(0, 0, 393, 600), WW, WH), "大面积 393x600 → 否（归开屏守卫）");
@@ -123,6 +140,14 @@ int main(void) {
     ck(is_independent_ad_mark(" 广告 "), "「 广告 」带空格 → 独立角标");
     ck(is_independent_ad_mark("广告推广"), "「广告推广」→ 独立角标");
     ck(is_independent_ad_mark("\u3000广告\u3000"), "全角空格包裹 → 独立角标");
+
+    printf("\n[3b] 后缀角标（0.9.118 新增）\n");
+    ck(is_independent_ad_mark("广告"), "独立「广告」→ 角标");
+    // 长文后缀型：靠 is_suffix_ad_mark 判定
+    ck(is_suffix_ad_mark("真诚无套路，直降再叠券 7.2折起 广告", 0.62), "长文案尾部带广告且靠右 → 角标");
+    ck(!is_suffix_ad_mark("真诚无套路，直降再叠券 7.2折起 广告", 0.30), "同文案但靠左 → 否");
+    ck(!is_suffix_ad_mark("这是一段非常长的正文内容用来测试长度上限是否能够正确拦截因为广告字样的确出现在里面但是整体字数已经远远超过了四十个字的门槛", 0.60), "超 40 字 → 否");
+    ck(is_suffix_ad_mark("限时活动 赞助", 0.70), "「赞助」后缀 → 角标");
 
     printf("\n[4] 关闭控件识别\n");
     ck(looks_like_close("AdCloseButton", "", 1), "AdCloseButton → 是");

@@ -18,7 +18,7 @@
 // ---- jibamao 个人标识（编译进 dylib，可用 strings 核对）----
 static NSString *const kGCAuthor      = @"jibamao";
 static NSString *const kGCRepo        = @"https://gan-jibamao.github.io/";
-static NSString *const kGCVersion     = @"0.9.117";
+static NSString *const kGCVersion     = @"0.9.118";
 
 // 0.9.18（A1）：底边间隙**按控件分开**，对表原生（搜索栏白底顶边 = 702.6pt）
 //   车机钮（连接车机 · WINDeviceInterconnectWidget）：原生底 652 → 间隙 50.6 → 取 50
@@ -6596,7 +6596,7 @@ static BOOL GCCIsTopBannerShape(UIView *v, UIWindow *win) {
     if (!isfinite(w) || !isfinite(h)) return NO;
     if (w < 120 || h < 28) return NO;                                  // 太小，不可能是通栏运营位
     if (w < ww * 0.60) return NO;                                      // 实测 79.6%，留余量到 60%
-    if (h > wh * 0.18 || h > 190) return NO;                           // 实测 6.6%，上限 18%/190pt
+    if (h > wh * 0.18 || h > 210) return NO;                           // 实测 6.6%~9.8%，上限放到 18%/210pt
     if (CGRectGetMinY(r) > wh * 0.33) return NO;                       // 只在顶部带内
     if (w >= ww * 0.6 && h >= wh * 0.6) return NO;                     // 全屏归开屏守卫管
     return YES;
@@ -6607,6 +6607,16 @@ static BOOL GCCIsTopBannerShape(UIView *v, UIWindow *win) {
 // 这一条把「搜索提示词里带广告二字」之类全部排掉。
 static BOOL GCCBannerHasLegalAdMark(UIView *v, BOOL *outClose) {
     BOOL mark = NO, close = NO;
+    // ★0.9.118：新增「后缀角标」判据。
+    //   真机截图（天猫双11 横幅）：「广告」二字是灰色小字，与主文案**排在同一个
+    //   文案视图里**（"真诚无套路，直降再叠券 7.2折起 广告"），长度远超原来的
+    //   ≤6 字门槛 ⇒ 0.9.99~0.9.117 的内容判据一直在放行它。
+    //   （之前没暴露是因为运营位填充率 —— 没素材时根本不展示。）
+    //   现在：允许「文本里含广告/赞助/推广」的情况，但必须同时满足
+    //     ① 总长 ≤ 40 字（防止把长文正文当广告）
+    //     ② 该文本靠近整条横幅的右端（角标法定位置在右上/右下角）
+    //     ③ 仍然要求有真实关闭控件（close 双证不变）
+    BOOL suffixMark = NO;
     NSMutableArray *q = [NSMutableArray arrayWithObject:v];
     for (NSUInteger i = 0; i < q.count && q.count < 80; i++) {
         UIView *s = q[i];
@@ -6621,10 +6631,24 @@ static BOOL GCCBannerHasLegalAdMark(UIView *v, BOOL *outClose) {
                 if ([trim isEqualToString:badge]) { mark = YES; break; }
             }
         }
+        // ② 后缀角标：长文尾部带「广告」且位置贴横幅右端
+        if (!mark && txt.length && txt.length <= 40) {
+            for (NSString *badge in @[@"广告", @"赞助", @"推广"]) {
+                if ([txt containsString:badge]) {
+                    // 位置校验：该 label 的中心必须落在横幅右侧 45% 内
+                    CGRect lr = [s convertRect:s.bounds toView:v];
+                    if (CGRectGetWidth(v.bounds) > 1 &&
+                        CGRectGetMidX(lr) > CGRectGetWidth(v.bounds) * 0.55) {
+                        suffixMark = YES;
+                    }
+                    break;
+                }
+            }
+        }
         [q addObjectsFromArray:s.subviews];
     }
     if (outClose) *outClose = close;
-    return mark;
+    return mark || suffixMark;
 }
 
 // 完整判据。被隐藏过的一律不再重复处理（用关联对象打标，幂等）。
@@ -7441,9 +7465,22 @@ static void InstallPromoAndWidgetHooks(void) {
     // ★0.9.117（A1）：**胶囊容器 setHidden: 改为「拦截」而非「回调」**。
     //   0.9.116 那条 HookVoid 只做「我们不主动按」，App 自己调 setHidden:YES 时
     //   仍然直通 —— 探针 t=3.1s 实测 hid=1 就是这么来的。
-    //   现在：三重安全阀全满足时把 hidden 改回 NO，其余情况原样直通。
+    //
+    //   ★★0.9.118 修正：类名拦错了。
+    //   探针 t=3.1s 的 P7Inst 段铁证：
+    //     右下控件 WINAJXCombinedWidgetView  win={{339,667},{44,88}} hid=1 key=1 ★缓存
+    //     路线按钮 WINRouteLineWidgetView     win={{339,711},{44,44}} hid=0 key=1
+    //     ⊙       WINLocationView            win={{339,667},{44,44}} hid=0
+    //   而被隐藏的容器是 **WINAJXCombinedWidgetView**，不是 WINLiteWidgetGroupView。
+    //   后者在 1.6s 就被 App 销毁（dump 里有 DISC Lite→新实例 new=0x0），
+    //   0.9.117 的 A1 挂在它身上，等于拦了个已经不存在的东西 ——
+    //   这解释了为什么 0.9.117 车机钮提前到 1.8s、胶囊却仍在 5.0s。
+    //
+    //   但 WINAJXCombinedWidgetView 是**共用类**：右上「+/图层」胶囊用的也是它。
+    //   所以必须用精确 tag 判据 IsRightBottomWidget（含 rightbottom/locate/location）
+    //   把右下那颗挑出来，绝不能用类名一刀切。
     {
-        Class capCls = NSClassFromString(GCStrAt(132));
+        Class capCls = NSClassFromString(GCStrAt(128));
         if (capCls) {
             SEL sh = @selector(setHidden:);
             Method m = class_getInstanceMethod(capCls, sh);
@@ -7451,14 +7488,14 @@ static void InstallPromoAndWidgetHooks(void) {
                 IMP orig = method_getImplementation(m);
                 const char *t = method_getTypeEncoding(m);
                 Replace(capCls, sh, imp_implementationWithBlock(^(UIView *self, BOOL hidden) {
-                    if (hidden && GCCIsLiteGroupCapsule(self) &&
+                    if (hidden && IsRightBottomWidget(self) &&
                         GCShouldProtectPinnedWidget(self)) {
                         // 已就位却被隐藏 → 拒绝本次隐藏（不递归：直接不调原实现）
                         return;
                     }
-                    if (!hidden && GCCIsLiteGroupCapsule(self) &&
-                        !objc_getAssociatedObject(self, &AlignedKey) && !SearchBarSettled) {
-                        // 未钉位且锚点未定型 → 继续沿用老规矩按住
+                    if (!hidden && IsRightBottomWidget(self) && self.window &&
+                        !objc_getAssociatedObject(self, &AlignedKey)) {
+                        // 未钉位 → 继续沿用老规矩按住
                         ((void (*)(id, SEL, BOOL))orig)(self, sh, YES);
                         [ColdWidgets addObject:self];
                         return;
