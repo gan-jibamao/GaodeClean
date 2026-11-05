@@ -133,12 +133,30 @@ case "$SLICES" in
         CHK="$DYL"           # 非 fat，单架构直接查
       fi
       if [ -n "$CHK" ]; then
-        CHN=$(llvm-objdump --macho --private-headers "$CHK" 2>/dev/null | grep -c LC_DYLD_CHAINED_FIXUPS || true)
-        CHN=${CHN:-0}
-        if [ "$CHN" -gt 0 ]; then
-          ok "arm64e 切片为链式绑定（可安装）"
+        # ★工具可用性先判：macOS 的 CI 上**没有 llvm-objdump**（只有 otool），
+        #   若不判就取值，管道会静默返回空 → CHN 变成空/0 → 误判成
+        #   「不是链式绑定」而 FAIL（0.9.120 的 CI 就是死在这里）。
+        OBJDUMP=$(command -v llvm-objdump 2>/dev/null || true)
+        OTOOL=$(command -v otool 2>/dev/null || true)
+        if [ -n "$OBJDUMP" ]; then
+          CHN=$("$OBJDUMP" --macho --private-headers "$CHK" 2>/dev/null | grep -c LC_DYLD_CHAINED_FIXUPS || true)
+          CHN=${CHN:-0}
+          if [ "$CHN" -gt 0 ]; then
+            ok "arm64e 切片为链式绑定（可安装）"
+          else
+            bad "arm64e 切片是 LC_DYLD_INFO_ONLY —— 真机 dyld 会崩（bad bind opcode）"
+          fi
+        elif [ -n "$OTOOL" ]; then
+          # macOS 原生路径：otool -l 输出 load command 列表，同样能看 LC_DYLD_CHAINED_FIXUPS
+          CHN=$("$OTOOL" -l "$CHK" 2>/dev/null | grep -c "LC_DYLD_CHAINED_FIXUPS" || true)
+          CHN=${CHN:-0}
+          if [ "$CHN" -gt 0 ]; then
+            ok "arm64e 切片为链式绑定（可安装，otool）"
+          else
+            bad "arm64e 切片是 LC_DYLD_INFO_ONLY —— 真机 dyld 会崩（bad bind opcode）"
+          fi
         else
-          bad "arm64e 切片是 LC_DYLD_INFO_ONLY —— 真机 dyld 会崩（bad bind opcode）"
+          say "  [note] 无 llvm-objdump / otool，跳过 arm64e 绑定方式检查"
         fi
       else
         say "  [note] 无法读取 arm64e 切片，跳过绑定方式检查"
