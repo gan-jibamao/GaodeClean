@@ -18,7 +18,7 @@
 // ---- jibamao 个人标识（编译进 dylib，可用 strings 核对）----
 static NSString *const kGCAuthor      = @"jibamao";
 static NSString *const kGCRepo        = @"https://gan-jibamao.github.io/";
-static NSString *const kGCVersion     = @"0.9.114";
+static NSString *const kGCVersion     = @"0.9.115";
 
 // 0.9.18（A1）：底边间隙**按控件分开**，对表原生（搜索栏白底顶边 = 702.6pt）
 //   车机钮（连接车机 · WINDeviceInterconnectWidget）：原生底 652 → 间隙 50.6 → 取 50
@@ -2179,13 +2179,26 @@ static void Schedule(void) {
             // 0.9.15（A4）：阈值 12 → 16。A2 的锚点闸门保证「最早也要 ColdTicks>=15
             // 才认领」—— 12 拍开闸会**先**把控件按 app 原始位置强显（中部位），
             // 等于把刚堵上的裸露从兜底这条路重新放出来。16 拍确保闸门先跑。
-            HomeSettled = YES;
-            for (UIView *w in ColdWidgets.allObjects) {
-                if (![w isKindOfClass:UIView.class]) continue;
-                objc_setAssociatedObject(w, &AlignedKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-                // 兜底同样要恢复 alpha，否则被压成 0 的控件即使 hidden=NO 也不可见。
-                if (w.alpha < 0.01) w.alpha = 1.0;
-                w.hidden = NO;
+            //
+            // ★0.9.115（A4）：兜底**只在锚点已定型后才允许点火**。
+            //   原写法是纯计时（ColdTicks > 16）—— 若搜索栏在 4 秒定型闸门打开前
+            //   一直没能定型，兜底会在第 17 拍抢先开闸，把 ColdWidgets 里尚未对齐的
+            //   控件按 **app 原生位置**强显（就是 0.9.8 那个「中部位裸露 19 帧」）。
+            //   改成「定型后才点火」= 兜底回归它本来的语义：**定型之后的最后保险**，
+            //   而不是抢在定型之前的另一条显示通道。
+            //   配合 A3（发现即钉位），正常路径根本走不到这里；这里只兜住
+            //   「CachedCar 一直没被发现 / AlignCornerWidgets 从未跑到」的极端情形。
+            if (!SearchBarSettled) {
+                // 未定型：本拍不点火，但也不封门（HomeSettled 保持 NO，下一拍照常评估）
+            } else {
+                HomeSettled = YES;
+                for (UIView *w in ColdWidgets.allObjects) {
+                    if (![w isKindOfClass:UIView.class]) continue;
+                    objc_setAssociatedObject(w, &AlignedKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+                    // 兜底同样要恢复 alpha，否则被压成 0 的控件即使 hidden=NO 也不可见。
+                    if (w.alpha < 0.01) w.alpha = 1.0;
+                    w.hidden = NO;
+                }
             }
         }
         // 0.4.45：搜索栏被 app 拉回原生位置(447)时重新隐藏并重置稳定性计数（兜底）
@@ -3303,11 +3316,15 @@ static void GCStyleDiscoverWidgets(UIWindow *win) {
     if (bnow - GCStyleLastBFS < 0.1) return;
     GCStyleLastBFS = bnow;
     NSMutableArray<UIView *> *queue = [NSMutableArray arrayWithObject:win];
+    BOOL foundCar = NO;                    // 0.9.115（A3）：本轮 BFS 是否新发现车机钮
     for (NSUInteger i = 0; i < queue.count && queue.count < 2000; i++) {
         UIView *v = queue[i];
         [queue addObjectsFromArray:v.subviews];
         NSString *cn = NSStringFromClass(v.class);
-        if ([cn isEqualToString:GCStrAt(140)]) CachedCar = v;
+        if ([cn isEqualToString:GCStrAt(140)]) {
+            if (CachedCar != v) foundCar = YES;
+            CachedCar = v;
+        }
         else if (IsRightBottomWidget(v)) CachedRight = v;
         else if ([cn isEqualToString:GCStrAt(141)]) CachedRoute = v;
         else if (GCCIsLiteGroupCapsule(v)) CachedLiteGroup = v;
@@ -3316,6 +3333,15 @@ static void GCStyleDiscoverWidgets(UIWindow *win) {
         //   与 0.9.29 使用的 WINPermanentCompassView 是两个不同实例，是后续所有 2D 钮问题的源头。
         if (CachedCar && CachedRight && CachedRoute && CachedLiteGroup) break;
     }
+    // ★0.9.115（A3）：**发现即钉位** —— 新发现车机钮的同一拍立刻摆位并置 AlignedKey。
+    //   原流程：发现 → 等下一次 tick / layoutSubviews → AlignCornerWidgets → GCStylePinWidgets
+    //   → 才打 AlignedKey → 才放行。真机录屏（120fps 546 帧）实测这条链要 2.9 秒：
+    //     t=5.0s  地图出现、右上「+/图层」已在
+    //     t=7.9s  车机钮与 ⊙/↰ 才出现
+    //   而钩子里「!AlignedKey 就 hidden=YES」的按住逻辑，正是这段延迟的全部来源。
+    //   车机钮的位置由 GCStylePinWidgets 用**绝对坐标**（GCPinBottom）算出，不依赖
+    //   搜索栏定型，所以发现后立刻钉位是安全的 —— 不会出现「先按错误位置显示再跳」。
+    if (foundCar) GCStylePinWidgets(win);
 #ifdef GAODECLEAN_PROBE
     if (CachedCar != p7oc)     P7Note(@"DISC 车机→新实例 old=%p(%@) new=%p(%@)", (__bridge void *)p7oc, NSStringFromCGRect(P7WR(p7oc)), (__bridge void *)CachedCar, NSStringFromCGRect(P7WR(CachedCar)));
     if (CachedRight != p7or_)  P7Note(@"DISC 右下→新实例 old=%p(%@) new=%p(%@)", (__bridge void *)p7or_, NSStringFromCGRect(P7WR(p7or_)), (__bridge void *)CachedRight, NSStringFromCGRect(P7WR(CachedRight)));
