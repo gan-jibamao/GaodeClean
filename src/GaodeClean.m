@@ -18,7 +18,7 @@
 // ---- jibamao 个人标识（编译进 dylib，可用 strings 核对）----
 static NSString *const kGCAuthor      = @"jibamao";
 static NSString *const kGCRepo        = @"https://gan-jibamao.github.io/";
-static NSString *const kGCVersion     = @"0.9.116";
+static NSString *const kGCVersion     = @"0.9.117";
 
 // 0.9.18（A1）：底边间隙**按控件分开**，对表原生（搜索栏白底顶边 = 702.6pt）
 //   车机钮（连接车机 · WINDeviceInterconnectWidget）：原生底 652 → 间隙 50.6 → 取 50
@@ -7340,6 +7340,57 @@ static void InstallBarContentHooks(void) {
     }
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+//  0.9.117（A3）：冷启动「已就位就拒绝被隐藏」安全阀
+//
+//  探针铁证（0.9.116+probe1，t=3.1s dump）：
+//    右下控件 WINAJXCombinedWidgetView  win={{339,667},{44,88}} hid=1 key=1
+//    车机     WINDeviceInterconnectWidget win={{10,608},{44,44}} hid=1 key=1
+//    路线按钮 WINRouteLineWidgetView       win={{339,711},{44,44}} hid=0 key=1
+//    ⊙       WINLocationView              win={{339,667},{44,44}} hid=0
+//  ⇒ 位置**完全正确**、AlignedKey **已置**、搜索栏 **settled=1**，
+//    但外层容器仍是 hid=1；而里面的内容（⊙/↰）hid=0 正画在正确位置。
+//  ⇒ 不是我们按住，是 App 自己隐藏。父链：
+//    MapWidgetContainerView ← NMMoveContentView ← UIView ← AMCommonContentBackgroundView
+//    NMMoveContentView 是「上拉发现」的移动容器 —— 冷启动时它把整层搬走又搬回。
+//
+//  与 0.9.9~0.9.13 那次失败（HISTORY §W）的**本质区别**：
+//    那次拦的是「控件位置还错着、我们拒绝它显示」→ 拦截与布局互斗，钟摆 19→21→14→4→2→14。
+//    这次拦的是「控件位置已经对了、App 又把它藏回去」→ 我们不是改位置，是维持已就位状态。
+//
+//  三重安全阀（任一不满足即原样直通 App，绝不硬顶）：
+//    ① 冷启动窗口内：ColdTicks < 60（≈12 秒）
+//    ② 已钉位：AlignedKey 已置
+//    ③ 位置确实在目标上：与 GCPinBottom 推导出的目标位相差 ≤ 4pt
+//  再加一条兜底：显示状态只「扶正」不「创造」—— 控件必须在 window 里。
+// ═══════════════════════════════════════════════════════════════════════════
+static BOOL GCShouldProtectPinnedWidget(UIView *v) {
+    if (!v || !v.window) return NO;
+    if (ColdTicks >= 60) return NO;                                    // ① 只在冷启动窗口内
+    if (!objc_getAssociatedObject(v, &AlignedKey)) return NO;          // ② 必须已钉位
+    UIWindow *win = v.window;
+    CGFloat sh = win.bounds.size.height, sw = win.bounds.size.width;
+    if (sh < 1 || sw < 1) return NO;
+    CGRect r = [v convertRect:v.bounds toView:win];
+    if (!isfinite(r.origin.y) || !isfinite(r.origin.x) || r.size.height < 1) return NO;
+    // ③ **独立位置校验**（不信 AlignedKey 的来源 —— 冷启动兜底会给 ColdWidgets 里的
+    //    控件无条件补打 AlignedKey，若只信标记就可能把「位置还错着」的控件也保护起来，
+    //    那正是 HISTORY §W 钟摆曲线的成因。这里用绝对坐标把关。）
+    const CGFloat pinBottom = GCPinBottom(win);
+    CGFloat bottom = CGRectGetMaxY(r);
+    // 只认「右下角这一族」：底边必须落在 pinBottom 上方 0..200pt 的带内
+    //   · 胶囊底边 = pinBottom                  （实测 667 + 88 = 755）
+    //   · 车机钮底边 = pinBottom - 147 附近     （实测 608 + 44 = 652，755-652=103）
+    if (bottom > pinBottom + 4) return NO;                 // 低于胶囊底边 → 不是它们
+    if (bottom < pinBottom - 200) return NO;               // 高于车机钮带 → 不是它们
+    // 横向也必须在右侧或左侧边缘列（这两个控件都贴边）
+    CGFloat midx = CGRectGetMidX(r);
+    BOOL rightCol = (midx > sw * 0.70);
+    BOOL leftCol  = (midx < sw * 0.30);
+    if (!rightCol && !leftCol) return NO;
+    return YES;
+}
+
 static void InstallPromoAndWidgetHooks(void) {
     HookVoid(GCStrAt(275), GCStrAt(91), ^(id view) { if (IsHiddenMapPromo(view)) [view setHidden:YES]; });
     Class cls = NSClassFromString(GCStrAt(275));
@@ -7387,35 +7438,67 @@ static void InstallPromoAndWidgetHooks(void) {
             v.hidden = YES; [ColdWidgets addObject:v];
         }
     });
-    HookVoid(GCStrAt(132), GCStrAt(91), ^(UIView *v) {
-        // 锚点（搜索栏）未定格 = 冷启动未完成：按住它，不让它停在中部位显示。
-        // 定格后交回给 A2（与我们的右下控件同一时刻放行）。
-        //
-        // ★0.9.116（A2'）：**放行条件改为「自己已被钉位」优先**。
-        //   原判据只有 SearchBarSettled 一条 —— 而搜索栏定型要等 ColdTicks>=20（4 秒），
-        //   胶囊明明已经被 GCStylePinWidgets 用绝对坐标钉到最终位置了，却还要干等。
-        //   真机录屏（120fps）实测：0.9.114 = 7.9s 才出现，0.9.115 抬到 5.0s，
-        //   仍远晚于右上「+/图层」胶囊。
-        //   现在：只要自身 AlignedKey 已置（= 已钉到最终位）就直接放行，不再看搜索栏。
-        //   安全性：胶囊位置来自 GCPinBottom 绝对坐标，与搜索栏定型无关；
-        //   只有「未钉位」时才继续按老规矩等 SearchBarSettled。
-        if (!GCCIsLiteGroupCapsule(v)) return;
-        BOOL pinned = objc_getAssociatedObject(v, &AlignedKey) != nil;
-        if (!pinned && !SearchBarSettled) { v.hidden = YES; [ColdWidgets addObject:v]; }
-    });
-    // 0.4.41：车机圆钮冷启动先隐藏，对齐后再显示，消除跳动
-    HookVoid(GCStrAt(140), GCStrAt(91), ^(UIView *w) {
-        // ★0.9.116（A3'）：AlignedKey 已置就直接放行（原逻辑本来就只看这一条，
-        //   现在显式写出来，配合 A3 的「发现即钉位」——发现即打标即放行，零等待）。
-        if (w.window && !objc_getAssociatedObject(w, &AlignedKey)) { w.hidden = YES; [ColdWidgets addObject:w]; }
-    });
-    // ★0.9.116（A3''）：上窗瞬间也走同一条判据 —— 原来只在 setHidden: 里判，
-    //   若 App 创建时就带 hidden=YES（不调 setHidden:），这条钩子根本不会触发，
-    //   控件会被 App 自己按在 hidden 状态直到它愿意显示（实测 5.0s）。
-    //   这里在 didMoveToWindow 时补一刀：已钉位就主动置 hidden=NO。
+    // ★0.9.117（A1）：**胶囊容器 setHidden: 改为「拦截」而非「回调」**。
+    //   0.9.116 那条 HookVoid 只做「我们不主动按」，App 自己调 setHidden:YES 时
+    //   仍然直通 —— 探针 t=3.1s 实测 hid=1 就是这么来的。
+    //   现在：三重安全阀全满足时把 hidden 改回 NO，其余情况原样直通。
+    {
+        Class capCls = NSClassFromString(GCStrAt(132));
+        if (capCls) {
+            SEL sh = @selector(setHidden:);
+            Method m = class_getInstanceMethod(capCls, sh);
+            if (m) {
+                IMP orig = method_getImplementation(m);
+                const char *t = method_getTypeEncoding(m);
+                Replace(capCls, sh, imp_implementationWithBlock(^(UIView *self, BOOL hidden) {
+                    if (hidden && GCCIsLiteGroupCapsule(self) &&
+                        GCShouldProtectPinnedWidget(self)) {
+                        // 已就位却被隐藏 → 拒绝本次隐藏（不递归：直接不调原实现）
+                        return;
+                    }
+                    if (!hidden && GCCIsLiteGroupCapsule(self) &&
+                        !objc_getAssociatedObject(self, &AlignedKey) && !SearchBarSettled) {
+                        // 未钉位且锚点未定型 → 继续沿用老规矩按住
+                        ((void (*)(id, SEL, BOOL))orig)(self, sh, YES);
+                        [ColdWidgets addObject:self];
+                        return;
+                    }
+                    ((void (*)(id, SEL, BOOL))orig)(self, sh, hidden);
+                }), t);
+            }
+        }
+    }
+    // ★0.9.117（A2）：车机钮 setHidden: 同样改「拦截」。
+    //   探针 t=3.1s 铁证：WINDeviceInterconnectWidget win={{10,608},{44,44}} hid=1 key=1
+    //   —— 位置对、已钉位、仍被 App 藏。三条安全阀同 A1。
+    {
+        Class carCls = NSClassFromString(GCStrAt(140));
+        if (carCls) {
+            SEL sh = @selector(setHidden:);
+            Method m = class_getInstanceMethod(carCls, sh);
+            if (m) {
+                IMP orig = method_getImplementation(m);
+                const char *t = method_getTypeEncoding(m);
+                Replace(carCls, sh, imp_implementationWithBlock(^(UIView *self, BOOL hidden) {
+                    if (hidden && GCShouldProtectPinnedWidget(self)) {
+                        return;      // 已就位却被隐藏 → 拒绝
+                    }
+                    if (!hidden && self.window &&
+                        !objc_getAssociatedObject(self, &AlignedKey)) {
+                        ((void (*)(id, SEL, BOOL))orig)(self, sh, YES);
+                        [ColdWidgets addObject:self];
+                        return;
+                    }
+                    ((void (*)(id, SEL, BOOL))orig)(self, sh, hidden);
+                }), t);
+            }
+        }
+    }
+    // ★0.9.117（A2'）：上窗瞬间也扶正一次 —— 覆盖「创建时自带 hidden=YES、
+    //   全程不调 setHidden:」这条路径（0.9.116 实测它会把控件按到 5.0s）。
     HookVoid(GCStrAt(140), GCStrAt(123), ^(UIView *w) {
         if (!w.window) return;
-        if (objc_getAssociatedObject(w, &AlignedKey) && w.hidden) w.hidden = NO;
+        if (w.hidden && GCShouldProtectPinnedWidget(w)) w.hidden = NO;
     });
     // 0.9.14（A6 回退）：0.9.9（A3）给车机圆钮补的 setHidden:/setAlpha: 两条拦截已移除。
     //   与右下钮同源的「未对齐拒绝显示」逻辑 —— 车机钮虽然靠类名能被 CachedCar 稳定找到
