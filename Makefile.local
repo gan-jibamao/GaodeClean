@@ -132,6 +132,10 @@ check:
 	@echo "check: 安全阀单测"
 	@gcc -O2 -Wall -Wextra -o /tmp/pinned_guard_test tests/pinned_guard_test.c -lm \
 	  && /tmp/pinned_guard_test | tail -3
+# 0.9.120（A1）：右下胶囊几何兜底 —— 锁住「不误认右上 +/图层」。
+	@echo "check: 右下几何单测"
+	@gcc -O2 -Wall -Wextra -o /tmp/right_geo_test tests/right_geo_test.c -lm \
+	  && /tmp/right_geo_test | tail -3
 # 0.9.20（A2）：混淆回环自测 —— 用与运行时同一份解码数学把 295 条串解回明文，
 # 逐条比对 + 校验头内 FNV 摘要；这一步保证「加密后仍 100% 解得原串」。
 	@$(CLANG) -O2 -Wall -Wextra -I src -o /tmp/obf_selftest scripts/obf_selftest.c \
