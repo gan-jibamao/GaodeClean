@@ -18,7 +18,7 @@
 // ---- jibamao 个人标识（编译进 dylib，可用 strings 核对）----
 static NSString *const kGCAuthor      = @"jibamao";
 static NSString *const kGCRepo        = @"https://gan-jibamao.github.io/";
-static NSString *const kGCVersion     = @"0.9.119";
+static NSString *const kGCVersion     = @"0.9.120";
 
 // 0.9.18（A1）：底边间隙**按控件分开**，对表原生（搜索栏白底顶边 = 702.6pt）
 //   车机钮（连接车机 · WINDeviceInterconnectWidget）：原生底 652 → 间隙 50.6 → 取 50
@@ -106,6 +106,12 @@ static char AlignedKey;
 static dispatch_source_t ScheduleTimer;
 static __weak UIView *BarParent;
 static __weak UIView *CachedCar, *CachedRight, *CachedRoute;
+// ★0.9.120（A2）：右下胶囊的**强引用**副本。
+//   CachedRight 是 __weak —— 启动期 App 反复建/毁同一控件（源码注释自己也写
+//   「缓存常年 nil」），一旦被销毁就再也拿不到实例，AlignedKey 也就打不上，
+//   于是 setHidden: 拦截里的「未钉位就按住」会一直生效到 App 自己把 tag 写进来。
+//   这里额外持一份强引用，只在「窗口没了」时释放，保证首帧发现后能钉住。
+static UIView *GCPinnedRightStrong;
 static NSMutableString *GCProbeBuf6;     // probe53：探针总缓冲（dump 真正带出去的通道）
 #ifdef GAODECLEAN_PROBE
 static int GCCapEntered;                 // probe52：GCCapTrace 进入计数（dump 可读）
@@ -3302,7 +3308,12 @@ static void GCStyleDiscoverWidgets(UIWindow *win) {
     } else GCStyleGoneAt[0] = 0;
     if (CachedRight && !CachedRight.window) {
         if (!GCStyleGoneAt[1]) GCStyleGoneAt[1] = gnow;
-        if (gnow - GCStyleGoneAt[1] > 1.0) { CachedRight = nil; GCStyleGoneAt[1] = 0; }
+        if (gnow - GCStyleGoneAt[1] > 1.0) {
+            CachedRight = nil; GCStyleGoneAt[1] = 0;
+            // 0.9.120（A2）：强引用同步释放 —— 否则会一直吊着一块已死的视图，
+            // 既泄漏，也会让下次 BFS「以为还在」而不再重新发现。
+            GCPinnedRightStrong = nil;
+        }
     } else GCStyleGoneAt[1] = 0;
     if (CachedRoute && !CachedRoute.window) {
         if (!GCStyleGoneAt[2]) GCStyleGoneAt[2] = gnow;
@@ -3327,6 +3338,7 @@ static void GCStyleDiscoverWidgets(UIWindow *win) {
     GCStyleLastBFS = bnow;
     NSMutableArray<UIView *> *queue = [NSMutableArray arrayWithObject:win];
     BOOL foundCar = NO;                    // 0.9.115（A3）：本轮 BFS 是否新发现车机钮
+    BOOL foundRight = NO;                  // 0.9.120（A3）：本轮 BFS 是否新发现右下胶囊
     for (NSUInteger i = 0; i < queue.count && queue.count < 2000; i++) {
         UIView *v = queue[i];
         [queue addObjectsFromArray:v.subviews];
@@ -3335,7 +3347,14 @@ static void GCStyleDiscoverWidgets(UIWindow *win) {
             if (CachedCar != v) foundCar = YES;
             CachedCar = v;
         }
-        else if (IsRightBottomWidget(v)) CachedRight = v;
+        else if (IsRightBottomWidget(v)) {
+            // ★0.9.120（A3）：发现新胶囊的**同一拍**即钉位（与车机钮的 A3 同一套路）。
+            //   0.9.119 实测：车机钮 1.05s（发现即钉位），胶囊 2.50s（只写缓存，等下一轮
+            //   GCStylePinWidgets）。差的这 1.45s 全花在「等」上。
+            if (CachedRight != v) foundRight = YES;
+            CachedRight = v;
+            GCPinnedRightStrong = v;          // 强引用（A2）
+        }
         else if ([cn isEqualToString:GCStrAt(141)]) CachedRoute = v;
         else if (GCCIsLiteGroupCapsule(v)) CachedLiteGroup = v;
         // ★trial50(A1)：撤除 trial27 的 GCStyleIs2DBtn 识别 —— 0.9.29 没有 Cached2D。
@@ -3351,7 +3370,7 @@ static void GCStyleDiscoverWidgets(UIWindow *win) {
     //   而钩子里「!AlignedKey 就 hidden=YES」的按住逻辑，正是这段延迟的全部来源。
     //   车机钮的位置由 GCStylePinWidgets 用**绝对坐标**（GCPinBottom）算出，不依赖
     //   搜索栏定型，所以发现后立刻钉位是安全的 —— 不会出现「先按错误位置显示再跳」。
-    if (foundCar) GCStylePinWidgets(win);
+    if (foundCar || foundRight) GCStylePinWidgets(win);
 #ifdef GAODECLEAN_PROBE
     if (CachedCar != p7oc)     P7Note(@"DISC 车机→新实例 old=%p(%@) new=%p(%@)", (__bridge void *)p7oc, NSStringFromCGRect(P7WR(p7oc)), (__bridge void *)CachedCar, NSStringFromCGRect(P7WR(CachedCar)));
     if (CachedRight != p7or_)  P7Note(@"DISC 右下→新实例 old=%p(%@) new=%p(%@)", (__bridge void *)p7or_, NSStringFromCGRect(P7WR(p7or_)), (__bridge void *)CachedRight, NSStringFromCGRect(P7WR(CachedRight)));
@@ -5571,9 +5590,35 @@ static void KickBarFix(void) { KickBarFixFor(0.64); }
 static BOOL IsRightBottomWidget(UIView *v) {
     if (![NSStringFromClass(v.class) isEqualToString:GCStrAt(128)]) return NO;
     id tag = ObjectGetter(v, GCStrAt(58));
-    if (![tag isKindOfClass:NSString.class]) return NO;
-    NSString *t = [(NSString *)tag lowercaseString];
-    return [t containsString:GCStrAt(129)] || [t containsString:GCStrAt(130)] || [t containsString:GCStrAt(131)];
+    if ([tag isKindOfClass:NSString.class] && [(NSString *)tag length]) {
+        NSString *t = [(NSString *)tag lowercaseString];
+        // 有 tag 就按 tag 定论：命中右下三个关键词 = YES；其它值 = NO
+        // （右上「+/图层」胶囊 tag 是 template_mainmapRightTop，走这条被明确排除）
+        return [t containsString:GCStrAt(129)] || [t containsString:GCStrAt(130)] ||
+               [t containsString:GCStrAt(131)];
+    }
+    // ★0.9.120（A1）：**几何兜底** —— getItemTag 是 AJX 数据字段，晚于视图上屏才写入。
+    //   HISTORY §W 的 W1b 就记过这一点（1.42s 判定返回 NO 导致整条链失效）。
+    //   0.9.119 实测：车机钮 1.05s 就出现，胶囊却要 2.50s —— 差的正是这段
+    //   「tag 还没写进来」的时间。这期间 CachedRight 恒为 nil ⇒ 胶囊打不上
+    //   AlignedKey ⇒ 被 setHidden: 拦截里的「未钉位就按住」一直压着。
+    //
+    //   几何判据（对表真机实测 339,667,44x88 / 屏 393x852）：
+    //     · 右列：中心 x > 屏宽 70%（排除左侧车机钮）
+    //     · 底部带：中心 y > 屏高 60%（**排除右上「+/图层」胶囊**，它 y≈8%）
+    //     · 尺寸：宽 30..70、高 50..130（留余量兼容不同机型）
+    UIWindow *win = v.window;
+    if (!win) return NO;
+    CGFloat ww = win.bounds.size.width, wh = win.bounds.size.height;
+    if (ww < 1 || wh < 1) return NO;
+    CGRect r = [v convertRect:v.bounds toView:win];
+    if (!isfinite(r.origin.x) || !isfinite(r.origin.y)) return NO;
+    if (CGRectGetMidX(r) < ww * 0.70) return NO;
+    if (CGRectGetMidY(r) < wh * 0.60) return NO;
+    CGSize sz = v.bounds.size;
+    if (sz.width < 30 || sz.width > 70) return NO;
+    if (sz.height < 50 || sz.height > 130) return NO;
+    return YES;
 }
 
 // 0.9.16（A1）：App 原生「轻量控件组」容器的识别与排除判定。
