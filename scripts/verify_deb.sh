@@ -73,6 +73,8 @@ printf '%s\n' "$LIST" | grep -q 'GaodeClean.plist' && ok "过滤器 plist 已随
 
 # --- 3. 维护脚本（本工程不应有；有则必须检查路径前缀） ---
 TMP=$(mktemp -d)
+LIPO_THIN=$(command -v llvm-lipo 2>/dev/null || command -v lipo 2>/dev/null || true)
+LIPOTHIN="$LIPO_THIN"
 dpkg-deb -e "$DEB" "$TMP/DEBIAN"
 SCRIPTS=$(ls "$TMP/DEBIAN" | grep -E '^(preinst|postinst|prerm|postrm)$' || true)
 if [ -z "$SCRIPTS" ]; then
@@ -104,6 +106,47 @@ esac
 case "$SLICES" in
   *arm64*) ok "含 arm64 切片" ;;
   *) bad "缺 arm64 切片" ;;
+esac
+
+# --- 4b. arm64e 切片必须是 LC_DYLD_CHAINED_FIXUPS（0.9.119 真机事故门禁）---
+#   事故：AMapiPhone 17.03.0 / iOS 16.2 / iPhone15,2
+#         termination.reasons = ["bad bind opcode 0x00"]
+#         frames = dyld4::prepare → dyld4::halt → abort_with_payload
+#   根因：本机 lld 不支持 arm64e 的 -fixup_chains，退回 LC_DYLD_INFO_ONLY，
+#         且它写出的 bind 流在 iOS 16 的 dyld 上不合法。fixarch.py 只修
+#         cpusubtype 与签名页哈希，不修 bind 流 ⇒ 修不回来。
+#   判据：含 arm64e 的 dylib，其 arm64e 切片必须带 LC_DYLD_CHAINED_FIXUPS。
+case "$SLICES" in
+  *arm64e*)
+    if [ -n "${LIPO_THIN:-}" ] && [ -x "$LIPOTHIN" ]; then
+      TMPE="$TMP/e.dylib"
+      CHK=""
+      # 单架构（非 fat）直接用原文件；fat 才需要 -thin 抽 arm64e 切片。
+      # ★llvm-lipo -thin 对非 fat 文件会直接报错退出，这点踩过一次。
+      if [ -f "$TMPE" ]; then rm -f "$TMPE"; fi
+      # ★必须先吞掉退出码：llvm-lipo 对「非 fat 文件」用 -thin 会返回 1，
+      #   在 set -e 下会让整个脚本静默终止（这个坑踩了两次）。
+      "$LIPOTHIN" -thin arm64e "$DYL" -output "$TMPE" 2>/dev/null || true
+      if [ -f "$TMPE" ]; then
+        CHK="$TMPE"          # fat，抽出成功
+      elif [ -f "$DYL" ]; then
+        CHK="$DYL"           # 非 fat，单架构直接查
+      fi
+      if [ -n "$CHK" ]; then
+        CHN=$(llvm-objdump --macho --private-headers "$CHK" 2>/dev/null | grep -c LC_DYLD_CHAINED_FIXUPS || true)
+        CHN=${CHN:-0}
+        if [ "$CHN" -gt 0 ]; then
+          ok "arm64e 切片为链式绑定（可安装）"
+        else
+          bad "arm64e 切片是 LC_DYLD_INFO_ONLY —— 真机 dyld 会崩（bad bind opcode）"
+        fi
+      else
+        say "  [note] 无法读取 arm64e 切片，跳过绑定方式检查"
+      fi
+    else
+      say "  [note] 无 llvm-lipo，跳过 arm64e 绑定方式检查"
+    fi
+    ;;
 esac
 
 # --- 5. FINALPACKAGE 剥离哨兵（0.9.20 A2 改口径：零日志、零探针）---
