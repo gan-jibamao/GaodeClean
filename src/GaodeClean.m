@@ -18,7 +18,7 @@
 // ---- jibamao 个人标识（编译进 dylib，可用 strings 核对）----
 static NSString *const kGCAuthor      = @"jibamao";
 static NSString *const kGCRepo        = @"https://gan-jibamao.github.io/";
-static NSString *const kGCVersion     = @"0.9.118";
+static NSString *const kGCVersion     = @"0.9.119";
 
 // 0.9.18（A1）：底边间隙**按控件分开**，对表原生（搜索栏白底顶边 = 702.6pt）
 //   车机钮（连接车机 · WINDeviceInterconnectWidget）：原生底 652 → 间隙 50.6 → 取 50
@@ -6539,19 +6539,41 @@ static NSArray<NSString *> *GCAdBadgeTexts(void) {
 
 // 关闭控件：类名/无障碍标签里带 close/dismiss（含中文）。AdCloseButton 直接命中。
 static BOOL GCCLooksLikeCloseControl(UIView *v) {
-    if (!v || !v.userInteractionEnabled) return NO;
+    if (!v) return NO;
     NSString *cn = NSStringFromClass(v.class);
     NSString *low = cn.lowercaseString;
+    // ① 类名直认（最可靠）
     if ([low containsString:@"close"] || [low containsString:@"dismiss"]) return YES;
+    // ② 无障碍标签（关闭/不感兴趣/close）
     NSString *al = v.accessibilityLabel;
     if (al.length) {
         if ([al containsString:@"关闭"] || [al containsString:@"不感兴趣"]) return YES;
         NSString *all = al.lowercaseString;
         if ([all containsString:@"close"] || [all containsString:@"dismiss"]) return YES;
     }
+    // ③ UIControl + 无障碍提示
     if ([v isKindOfClass:UIControl.class]) {
         NSString *desc = v.accessibilityHint ?: @"";
         if ([desc containsString:@"关闭"]) return YES;
+    }
+    // ★0.9.119：④ 几何兜底 —— 真机上「×」很可能是纯 UIImageView + 手势，
+    //   既没有 close 类名，也没有无障碍标签（0.9.118 实测广告就是这种情况）。
+    //   判据（三条同时成立，尽量不误伤）：
+    //     a. 自身可交互（或父视图可交互 —— 点击热区常挂在父容器上）
+    //     b. 尺寸小巧（≤44pt 见方），符合「关闭按钮」的视觉规格
+    //     c. 是横幅子树里的**叶子**（subviews 为空），排除容器
+    //   位置校验（靠右）在 GCCBannerHasLegalAdMark 里用横幅坐标另判。
+    if (![v isKindOfClass:UIControl.class]) {
+        BOOL interactive = v.userInteractionEnabled ||
+                           (v.superview && v.superview.userInteractionEnabled);
+        if (interactive && v.subviews.count == 0) {
+            CGSize sz = v.bounds.size;
+            if (sz.width > 0 && sz.height > 0 &&
+                sz.width <= 44 && sz.height <= 44 &&
+                sz.width >= 8 && sz.height >= 8) {
+                return YES;
+            }
+        }
     }
     return NO;
 }
@@ -6607,41 +6629,50 @@ static BOOL GCCIsTopBannerShape(UIView *v, UIWindow *win) {
 // 这一条把「搜索提示词里带广告二字」之类全部排掉。
 static BOOL GCCBannerHasLegalAdMark(UIView *v, BOOL *outClose) {
     BOOL mark = NO, close = NO;
-    // ★0.9.118：新增「后缀角标」判据。
-    //   真机截图（天猫双11 横幅）：「广告」二字是灰色小字，与主文案**排在同一个
-    //   文案视图里**（"真诚无套路，直降再叠券 7.2折起 广告"），长度远超原来的
-    //   ≤6 字门槛 ⇒ 0.9.99~0.9.117 的内容判据一直在放行它。
-    //   （之前没暴露是因为运营位填充率 —— 没素材时根本不展示。）
-    //   现在：允许「文本里含广告/赞助/推广」的情况，但必须同时满足
-    //     ① 总长 ≤ 40 字（防止把长文正文当广告）
-    //     ② 该文本靠近整条横幅的右端（角标法定位置在右上/右下角）
-    //     ③ 仍然要求有真实关闭控件（close 双证不变）
+    // ★0.9.119：取文本改用 NodeText() —— 它认 UILabel / AJX 自绘 / accessibilityLabel / 
+    //   关联对象缓存四路。原来只认 UILabel 与前两条，遇到高德 AJX 自绘文案（真机上
+    //   广告文案很可能就是 AJXLabel 或 CoreText 层）会整条判据全空 ⇒ 永远拦不住。
+    //   （0.9.118 实测：形状判据全过，广告仍挂着，唯一可能就是这里看不到文字。）
+    // 0.9.118 补充「后缀角标」：真机截图（天猫双11）里「广告」二字是灰色小字，
+    //   与主文案排在同一视图（"真诚无套路，直降再叠券 7.2折起 广告"），
+    //   远超原来 ≤6 字门槛 ⇒ 增加「长文含广告 + 位置靠右」分支。
     BOOL suffixMark = NO;
     NSMutableArray *q = [NSMutableArray arrayWithObject:v];
     for (NSUInteger i = 0; i < q.count && q.count < 80; i++) {
         UIView *s = q[i];
-        if (GCCLooksLikeCloseControl(s)) close = YES;
-        NSString *txt = nil;
-        if ([s isKindOfClass:UILabel.class]) txt = ((UILabel *)s).text;
-        else if (s.accessibilityLabel.length) txt = s.accessibilityLabel;
-        if (txt.length && txt.length <= 6) {
-            NSString *trim = [txt stringByTrimmingCharactersInSet:
-                              [NSCharacterSet whitespaceAndNewlineCharacterSet]];
-            for (NSString *badge in GCAdBadgeTexts()) {
-                if ([trim isEqualToString:badge]) { mark = YES; break; }
-            }
+        if (GCCLooksLikeCloseControl(s)) {
+            // ★0.9.119：关闭控件必须落在横幅右侧 —— 几何兜底（④）放宽后，
+            // 任何 8~44pt 的可交互叶子都会被认成「关闭」，若不加位置约束，
+            // 横幅里的商品图片、角标图标都会冒充关闭控件，导致判据失真。
+            // 真机上「×」固定在右侧（实测天猫横幅在 x≈0.97 处），
+            // 这里取「中心点落在横幅右侧 30%」作为必要条件。
+            CGRect cr = [s convertRect:s.bounds toView:v];
+            CGFloat vw = CGRectGetWidth(v.bounds);
+            if (vw < 1 || CGRectGetMidX(cr) > vw * 0.70) close = YES;
         }
-        // ② 后缀角标：长文尾部带「广告」且位置贴横幅右端
-        if (!mark && txt.length && txt.length <= 40) {
-            for (NSString *badge in @[@"广告", @"赞助", @"推广"]) {
-                if ([txt containsString:badge]) {
-                    // 位置校验：该 label 的中心必须落在横幅右侧 45% 内
-                    CGRect lr = [s convertRect:s.bounds toView:v];
-                    if (CGRectGetWidth(v.bounds) > 1 &&
-                        CGRectGetMidX(lr) > CGRectGetWidth(v.bounds) * 0.55) {
-                        suffixMark = YES;
+        // 双路取文本：NodeText（覆盖 AJX）+ accessibilityLabel 兜底
+        NSString *txt = NodeText(s);
+        if (!txt.length) txt = s.accessibilityLabel;
+        if (txt.length) {
+            // ① 独立角标：整段文本（去空白后）恰好就是「广告」之类，≤6 字
+            if (txt.length <= 6) {
+                NSString *trim = [txt stringByTrimmingCharactersInSet:
+                                  [NSCharacterSet whitespaceAndNewlineCharacterSet]];
+                for (NSString *badge in GCAdBadgeTexts()) {
+                    if ([trim isEqualToString:badge]) { mark = YES; break; }
+                }
+            }
+            // ② 后缀角标：长文尾部带「广告」且该视图靠横幅右侧
+            if (!mark && txt.length <= 40) {
+                for (NSString *badge in @[@"广告", @"赞助", @"推广"]) {
+                    if ([txt containsString:badge]) {
+                        CGRect lr = [s convertRect:s.bounds toView:v];
+                        if (CGRectGetWidth(v.bounds) > 1 &&
+                            CGRectGetMidX(lr) > CGRectGetWidth(v.bounds) * 0.55) {
+                            suffixMark = YES;
+                        }
+                        break;
                     }
-                    break;
                 }
             }
         }
@@ -6757,13 +6788,17 @@ static void GCBannerProbeDump(const char *reason) {
         CGRect r = [v convertRect:v.bounds toView:win];
         if (v != win && CGRectGetMinY(r) <= cut && CGRectGetMaxY(r) > 0) {
             BOOL mark = NO, close = NO;
-            NSString *txt = nil;
-            if ([v isKindOfClass:UILabel.class]) txt = ((UILabel *)v).text;
-            else if (v.accessibilityLabel.length) txt = v.accessibilityLabel;
-            if (txt.length && txt.length <= 8) {
+            // 0.9.119：探针与正式判据用同一个取文本入口，避免「探针看不见、判据也看不见」
+            NSString *txt = NodeText(v);
+            if (!txt.length) txt = v.accessibilityLabel;
+            if (txt.length) {
                 NSString *tm = [txt stringByTrimmingCharactersInSet:
                                 [NSCharacterSet whitespaceAndNewlineCharacterSet]];
-                for (NSString *b in GCAdBadgeTexts()) if ([tm isEqualToString:b]) { mark = YES; break; }
+                if (tm.length <= 8) {
+                    for (NSString *b in GCAdBadgeTexts()) if ([tm isEqualToString:b]) { mark = YES; break; }
+                }
+                for (NSString *b in @[@"广告", @"赞助", @"推广"])
+                    if ([txt containsString:b]) { mark = YES; break; }
             }
             close = GCCLooksLikeCloseControl(v);
             [o appendFormat:@"%*s%@ f=%@ w=%@ hid=%d a=%.2f sub=%lu%@%@%@\n",
@@ -6771,7 +6806,7 @@ static void GCBannerProbeDump(const char *reason) {
                 NSStringFromClass(v.window.class), v.hidden, v.alpha,
                 (unsigned long)v.subviews.count,
                 mark ? @" [ADMARK]" : @"", close ? @" [CLOSE]" : @"",
-                txt.length && txt.length <= 24 ? [NSString stringWithFormat:@" txt=「%@」", txt] : @""];
+                txt.length && txt.length <= 60 ? [NSString stringWithFormat:@" txt=「%@」", txt] : @""];
         }
         if (d >= 7) continue;
         for (UIView *c in v.subviews) { [q addObject:c]; [dep addObject:@(d + 1)]; }

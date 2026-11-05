@@ -99,6 +99,19 @@ static int is_suffix_ad_mark(const char *txt, double relX) {
     return relX > 0.55;
 }
 
+
+// 与源文件 GCCLooksLikeCloseControl 的几何兜底（④）对应
+static int looks_like_close_geo(const char *cn, const char *al, int inter,
+                                 double w, double h, int nsub, double relX) {
+    if (cn && (strstr(cn, "close") || strstr(cn, "Close") ||
+               strstr(cn, "dismiss") || strstr(cn, "Dismiss"))) return inter ? 1 : 0;
+    if (al && (strstr(al, "关闭") || strstr(al, "不感兴趣"))) return 1;
+    if (!inter) return 0;
+    if (nsub != 0) return 0;
+    if (!(w >= 8 && w <= 44 && h >= 8 && h <= 44)) return 0;
+    return relX > 0.70;
+}
+
 // ── 单测 ────────────────────────────────────────────────────────────────────
 static int Passed, Failed;
 static void ck(int cond, const char *what) {
@@ -189,6 +202,14 @@ int main(void) {
         ck(!(s && m && c), msg);
     }
 
+
+    printf("\n[7] 关闭控件几何兜底（0.9.119 新增）\n");
+    ck(looks_like_close_geo("UIImageView", "", 1, 20, 20, 0, 0.95), "纯图片 × 20x20 靠右 → 是");
+    ck(!looks_like_close_geo("UIImageView", "", 1, 20, 20, 0, 0.40), "同图但靠左（商品图）→ 否");
+    ck(!looks_like_close_geo("UIImageView", "", 1, 60, 60, 0, 0.95), "60x60 太大 → 否");
+    ck(!looks_like_close_geo("UIView", "", 1, 20, 20, 3, 0.95), "有子视图（容器）→ 否");
+    ck(!looks_like_close_geo("UIImageView", "", 0, 20, 20, 0, 0.95), "不可交互 → 否");
+    ck(looks_like_close_geo("AdCloseButton", "", 1, 44, 44, 0, 0.10), "类名含 close 优先 → 是");
     printf("\n═══════════════════════════════════════\n");
     if (!Failed) { printf("★ 全部通过：%d/%d\n", Passed, Passed); return 0; }
     printf("✗ 失败 %d 项 / 共 %d\n", Failed, Passed + Failed);
