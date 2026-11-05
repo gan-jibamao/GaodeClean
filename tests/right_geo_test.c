@@ -21,6 +21,7 @@
 // ============================================================================
 #include <stdio.h>
 #include <math.h>
+#include <string.h>
 
 typedef struct { double x, y, w, h; } R;
 static R rect(double x, double y, double w, double h) { R r = {x, y, w, h}; return r; }
@@ -48,6 +49,35 @@ static int at_pinned_slot(R r, double ww, double wh, double pinBottom) {
     if (bottom < pinBottom - 200) return 0;
     double midx = r.x + r.w / 2;
     if (!(midx > ww * 0.70) && !(midx < ww * 0.30)) return 0;
+    return 1;
+}
+
+// ★0.9.123（A2）：IsRightBottomWidget 的**完整**判据（tag 快通道 + 几何兜底）
+//   锁住最要命的一条：tag 存在但**不命中关键词**时，必须继续走几何兜底，
+//   不许像 0.9.120 那样「有 tag 就定论 NO」把兜底短路。
+//   真机逐帧证据：video_B9476B3B 车机钮 1.317s、胶囊 2.592s，差 1.275s。
+//   tag: NULL = 未写入；"" = 空；其它 = 已写入
+static int is_right_bottom_full(const char *tag, R r, double ww, double wh) {
+    // ① tag 快通道
+    if (tag && *tag) {
+        char low[256]; int i = 0;
+        for (; tag[i] && i < 255; i++) {
+            char c = tag[i];
+            low[i] = (c >= 'A' && c <= 'Z') ? (char)(c - 'A' + 'a') : c;
+        }
+        low[i] = 0;
+        if (strstr(low, "rightbottom") || strstr(low, "locate") || strstr(low, "location"))
+            return 1;
+        // 未命中 ⇒ **不返回 0**，继续往下走几何兜底（0.9.123 A2 的修法）
+    }
+    // ② 几何兜底
+    if (ww < 1 || wh < 1) return 0;
+    if (!isfinite(r.x) || !isfinite(r.y) || !isfinite(r.w) || !isfinite(r.h)) return 0;
+    if (r.w < 1 || r.h < 1) return 0;
+    if (r.x + r.w / 2 < ww * 0.70) return 0;
+    if (r.y + r.h / 2 < wh * 0.25) return 0;
+    if (r.w < 30 || r.w > 70) return 0;
+    if (r.h < 50 || r.h > 130) return 0;
     return 1;
 }
 
@@ -114,6 +144,31 @@ int main(void) {
        "搜索栏 → 不在包络（居中列）");
     ck(!at_pinned_slot(rect(160, 640, 44, 88), WW, WH, PB),
        "居中 {160,640} → 不在包络");
+
+    printf("\n[8] ★ tag 短路回归（0.9.123 A2）—— 1.275 秒的真凶\n");
+    {
+        R finalPos = rect(339, 667, 44, 88);
+        ck(is_right_bottom_full(NULL, finalPos, WW, WH), "tag 未写入 → 几何兜底命中");
+        ck(is_right_bottom_full("", finalPos, WW, WH), "tag 为空串 → 几何兜底命中");
+        ck(is_right_bottom_full("template_mainmapRightBottom", finalPos, WW, WH),
+           "tag 命中 rightbottom → 快通道 YES");
+        ck(is_right_bottom_full("template_mainmapRightLocation", finalPos, WW, WH),
+           "tag 命中 location → 快通道 YES");
+        // 关键四条：tag 存在但**不含**关键词
+        ck(is_right_bottom_full("template_mainmapRightBottomBeta", finalPos, WW, WH),
+           "★ tag 含后缀变体 → 必须仍命中（旧写法这里返回 NO，就是 1.275s）");
+        ck(is_right_bottom_full("some_internal_name", finalPos, WW, WH),
+           "★ tag 是无关内部名 → 必须仍走几何兜底命中");
+        ck(is_right_bottom_full("template_mainmapRightTop", rect(339, 69, 44, 88), WW, WH) == 0,
+           "★ tag 是 rightTop + 位置在右上 → 几何兜底也不误伤");
+        ck(is_right_bottom_full("template_mainmapRightTop", finalPos, WW, WH),
+           "tag 是 rightTop 但**位置在右下** → 按几何认（宁可认，不可永久缺件）");
+        // 瞬态位也要命中（0.9.121 A1' 的自锁解除）
+        ck(is_right_bottom_full("weird_tag", rect(339, 340, 44, 88), WW, WH),
+           "tag 无关 + 中部瞬态位 → 命中（自锁已解除）");
+        ck(!is_right_bottom_full("weird_tag", rect(339, 69, 44, 88), WW, WH),
+           "tag 无关 + 右上 y=8% → 不误伤");
+    }
 
     printf("\n═══════════════════════════════════════\n");
     if (!Failed) { printf("★ 全部通过：%d/%d\n", Passed, Passed); return 0; }
