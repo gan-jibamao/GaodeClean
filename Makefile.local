@@ -5,6 +5,25 @@
 #    .github/workflows/build-theos.yml）。本文件仅供本机 iSH 快速验证使用，
 #    产出物不得作为发布资产。调用方式：make -f Makefile.local <target>
 #
+#  ██ 警告（2026-11-05 真机事故后新增）██
+#  本机 lld 产出的 **arm64e** 切片会直接崩 App，禁止安装！
+#    真机日志：AMapiPhone 17.03.0 / iPhone OS 16.2
+#      termination.reasons = ["bad bind opcode 0x00"]
+#      frames = dyld4::prepare → dyld4::halt → abort_with_payload
+#    即 dyld 在**加载阶段**解析 LC_DYLD_INFO_ONLY 的 bind 流时读到非法操作码。
+#
+#    原因：lld **不支持 arm64e 的 -fixup_chains**（只支持 x86_64 与 arm64），
+#    因此 arm64e 只能退回经典 LC_DYLD_INFO_ONLY 绑定；而 lld 写出的这条 bind
+#    流在 iOS 16 的 dyld 上不合法。fixarch.py 只修 cpusubtype 与签名页哈希，
+#    **不修 bind 流**，所以修不回来。
+#
+#    判别方法（一条命令）：
+#      llvm-objdump --macho --private-headers <dylib> | grep -c LC_DYLD_CHAINED_FIXUPS
+#      1 = 合法（theos 产物）    0 = 会崩（lld 的 arm64e 产物）
+#
+#    ⇒ 本机只允许用来跑 `make check`（语法/单测）与出 **arm64** 切片自测。
+#      arm64e 的任何真机安装包，必须走 GitHub Actions（theos）。
+#
 #  此前仓库没有任何构建脚本：mkdeb.py 里写死 /tmp/gcbuild090 与 VERSION=0.9.0，
 #  编译参数只存在于历史对话里，任何人拿到仓库都无法一键重建。
 #
@@ -68,6 +87,17 @@ $(DYLIB64): $(SRC) $(HDR) | $(OUT)
 $(DYLIB64E): $(SRC) $(HDR) | $(OUT)
 	$(CLANG) -target arm64e-apple-ios$(TARGET_IOS) $(COMMON) $(LINK) -o $@ $(SRC)
 	python3 scripts/fixarch.py $@ 2
+	@echo ""
+	@echo "╔══════════════════════════════════════════════════════════════╗"
+	@echo "║  ⚠️  本机 lld 产出的 arm64e 切片不可安装                     ║"
+	@echo "║                                                              ║"
+	@echo "║  真机日志：bad bind opcode 0x00（dyld4::prepare 阶段中止）    ║"
+	@echo "║  原因：lld 不支持 arm64e 的 -fixup_chains，退回              ║"
+	@echo "║        LC_DYLD_INFO_ONLY 且 bind 流不合法                    ║"
+	@echo "║                                                              ║"
+	@echo "║  仅有 arm64 切片可用于真机自测；arm64e 请走 GitHub Actions。 ║"
+	@echo "╚══════════════════════════════════════════════════════════════╝"
+	@echo ""
 
 $(OUT):
 	mkdir -p $(OUT)
