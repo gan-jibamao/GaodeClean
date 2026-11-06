@@ -1512,6 +1512,194 @@ Amap 私有类名（`WINPermanentCompassView`/`WINLiteWidgetGroupView`/…）与
 本地双包门禁 **15/16 项 [OK]、exit 0**；体内版本串 `0.9.21` ×1、`0.9.20` 残留 **0**；
 敏感明文 0、本地符号 0（加固不回退）。
 
+---
+
+### §AI · 0.9.99 —— 顶部运营横幅广告（天猫双11）
+
+**现象**：冷启动后顶部出现「真诚无套路，直降再叠券 7.2折起 广告」整条横幅，右侧带 ✕。
+
+**根因（三重盲区叠加，全在开屏通道上）**
+
+1. `GCCIsSplashAd()` 末句 `return GCCIsFullScreen(v)` 要求宽**和**高都 ≥ 窗口 60%。
+   真机截图实测横幅 **312.7×56.3pt / 屏 393×852** ⇒ 宽 79.6%、**高只有 6.6%** ⇒ 高度必然不满足。
+2. `SplashAdTick()` 只在启动 75 拍（≈15s）的有界窗口内跑，而运营位是**异步落地**的。
+3. 主窗口兜底只遍历 `GCCMainWindow.subviews` 第一层。
+
+**修法**：与开屏完全分离的独立通道（A1–A5）—— 形状（顶部带 + 通栏 + 扁条）+
+内容（独立「广告」角标 + 真实关闭控件，二者必须同时成立）+ 常驻 tick。
+只 `hidden=YES`，**不** `removeFromSuperview`（避免破坏运营位约束链）。
+新增 `tests/banner_logic_test.c`（纯 C，35 项）。
+
+**踩坑**：`control` 的扩展描述必须**以空行开头**，且**最后一个字段必须是普通字段** ——
+`mkdeb.py` 把 `Installed-Size` 追加到文件末尾，描述粘在 `Depends` 之后会报
+`empty field name` / `Depends syntax error`。
+
+### §AJ · 0.9.113 —— 撤回本机 lld 包，发布链改 GitHub CI
+
+**老大指令**：撤回 0.9.111 / 0.9.112，必须走 GitHub 打包。
+
+**为什么要撤**：那两个包是本机 `Makefile.local` + lld 打的，不是正式通道。
+**一眼辨真伪**：本机 lld → dylib **225,712 B**；GitHub theos → **440,656 B**。
+
+**重要坑**：tag 发布流水线只在 `refs/tags/v*` 触发；`git tag` 需要 committer 身份；
+源仓库 push 常被 CI 抢（`fetch` + `reset --hard FETCH_HEAD`，别用 rebase）；
+**别在本机 build 后推索引** —— 本机没有 GPG 私钥，签名只能靠 CI。
+
+### §AK · 0.9.114~0.9.120 —— 四件真机问题的定因与修法
+
+这部分是「按用户录像逐帧定位」方法论的成型期。所有结论都来自 **120fps 录屏逐帧**。
+
+**A. 右上「+」号冷启动闪烁（0.9.114，228 帧）**
+
+逐帧时间线：`1.000s 出现 → 1.042–1.208s 消失 → 1.250s 回来 → 1.333–1.417s 再消失 → 1.458s 稳定`。
+
+根因：2D/3D 在 0.9.99 已移除，但 `WINPermanentCompassView` 的 `layoutSubviews`/`didMoveToWindow`
+钩子仍在调 `AlignMapTypeButton(CachedRight)`；而 `GCCFindMapTypeButton` 的「③ 兜底：
+BFS 序第一个 40..48 方形」抓到的正是右上胶囊里 **44×44 的「+」号**，把它搬到「胶囊顶 − 13.3」，
+App 布局又拉回 ⇒ 两个通道拉锯。
+且豁免依赖 `CachedLiteGroup` 弱引用（0.83s 前为 nil），整条失效。
+
+修法：删两个钩子 + 删 ③ 兜底 + 新增 `GCCIsInTopRightCapsuleZone` **纯几何**硬豁免
+（右列 x≥70% + 顶部 maxY≤35%，不依赖弱引用）。新增 `tests/capsule_zone_test.c`（18 项）。
+
+**B. 车机钮与 ⊙/↰ 胶囊晚出现（0.9.115 → 0.9.120）**
+
+| 版本 | 车机钮 | 胶囊 | 关键改动 |
+|---|---|---|---|
+| 0.9.114 | 7.9s | 7.9s | — |
+| 0.9.115 | 5.0s | 5.0s | A3 车机钮「发现即钉位」；A4 兜底改「定型后才点火」 |
+| 0.9.117 | 1.8s | 5.0s | 探针实证 t=3.1s `hid=1 key=1 settled=1`；`setHidden:` 改**拦截** + 三重安全阀 |
+| 0.9.118 | 1.0s | 2.5s | 胶囊拦截类名 `WINLiteWidgetGroupView`(132) → `WINAJXCombinedWidgetView`(128) |
+| 0.9.120 | 1.05s | 2.5s | `IsRightBottomWidget` 加几何兜底 + `GCPinnedRightStrong` 强引用 + 发现即钉位 |
+
+**C. arm64e 崩溃事故（0.9.119，真机 .ips 铁证）**
+
+```
+EXC_CRASH / SIGABRT
+termination.reasons = ["bad bind opcode 0x00"]
+frames = __abort_with_payload → dyld4::halt → dyld4::prepare → start
+```
+崩在 **dyld4::prepare**，App 代码一行未执行。
+
+根因：本机 lld **不支持 arm64e 的 `-fixup_chains`**，退回 `LC_DYLD_INFO_ONLY`，
+该 bind 流在 iOS 16 的 dyld 上不合法。`fixarch.py` 只改 cpusubtype 与签名页哈希，不修 bind 流。
+
+判别（一条命令）：`llvm-objdump --macho --private-headers <dylib> | grep -c LC_DYLD_CHAINED_FIXUPS`
+—— `1` 合法，`0` 会崩。
+
+加固：`verify_deb.sh` 新增 4b 段（arm64e 必须链式绑定）、`Makefile.local` 打印警告、`gate.sh` 复用。
+**从此本机 lld 的 arm64e 产物会被门禁当场拒掉。**
+
+**D. CI 门禁把好包判成坏包（0.9.120 那次）**
+
+CI 报 `[FAIL] arm64e 切片是 LC_DYLD_INFO_ONLY`。真因：**macOS runner 只有 `otool`，
+没有 `llvm-objdump`** —— 命令不存在 → 输出空 → `CHN=0` → 误判。
+修法：优先 `llvm-objdump`，缺失退回 `otool -l`，两者都无才 note 跳过。
+
+### §AL · 0.9.121~0.9.123 —— 胶囊残差 1.40s → 0.35s → 归零的完整拆账
+
+这三轮是同一个目标的三次逼近，每一轮都推翻上一轮的假设。**记下来是因为教训比结论值钱。**
+
+**0.9.121（video_1972B400，356 帧）：1.40s → 0.35s**
+
+四道独立的锁，全部由同一个前提引爆 ——
+**本机首页是圆钮底栏、没有搜索栏 ⇒ `SearchBarSettled` 恒为 NO**。
+这个前提让所有「等搜索栏定型」的门**永久关闭**。
+
+| 锁 | 破绽 |
+|---|---|
+| **A1' 几何兜底自锁** | y 判据要求 >60% 屏高，而未钉位胶囊在瞬态位 y=40% ⇒ 永远说不 ⇒ 永远打不上 AlignedKey ⇒ 永远被按住 ⇒ 永远到不了 60% 以下。**死循环** |
+| A1/A2 脱窗识别失败 | 要求 `v.window` 非空；`convertRect:toView:` 在脱窗时是未定义结果 |
+| A4 早退门被强引用占位 | `GCPinnedRightStrong` 强引用让死实例占着 `CachedRight` ⇒ 齐套早退 ⇒ BFS 永不重跑 |
+| A5/A9 外壳永久按住 | 按住判据是纯计时 `!SearchBarSettled`；而 pin 通道**优先选外壳** |
+
+修法：y 门槛 **60% → 25%**；新增 `GCAnyMainWindow()` / `GCWindowRectOf()`
+（层级无关逐级累加）/ `GCWidgetAtPinnedSlot()`（钉位包络，与 AlignedKey 解耦）；
+早退门改「必须有 window 才算齐套」；A3 点火前加包络校验 + **8 秒失效保险**。
+
+**0.9.122（video_E40DA38E，370 帧）：0.35s —— 找到「外壳没打标记」**
+
+- 0.9.121 修 `IsRightBottomWidget` 时漏了 `GCCIsLiteGroupCapsule` 的同一个毛病
+- **外壳从未被打过 AlignedKey**：`cap` 选的是「外壳优先」，但标记只打给了 `CachedRight`，
+  而 App 真正按 `hidden` 的是外壳 ⇒ 外壳不可见 ⇒ 屏幕什么都没有
+- `GCPinBottom` 首次调用时底栏还没上屏，`locked` 被定在 fallback，底栏落位后还要再等满 0.5s
+
+**0.9.123（video_B9476B3B，457 帧）：1.275s（退化）→ 归零 —— tag 短路**
+
+0.9.122 把 `cap` 写成互斥二选一，外壳一旦存在就抢占，它条件不满足时内层**完全没被钉** ⇒ 比修之前更糟。
+
+而**真正的元凶**是 0.9.120 埋的一句：
+
+```objc
+id tag = ObjectGetter(v, GCStrAt(58));
+if ([tag isKindOfClass:NSString.class] && [tag length]) {
+    return [t containsString:@"rightbottom"] || ... ;   // ← 其它值 = NO
+}
+```
+
+**这一句把整条几何兜底关死了。** 只要高德写进一个不含约定关键词的 tag
+（版本后缀、灰度开关下的变体名、临时内部名），胶囊就**永远**认不出来。
+0.9.121 那次只差 0.35s，是**因为那一次 tag 恰好还是空的** —— 运气，不是设计。
+这就是「时好时坏」的全部来源。
+
+修法：tag 命中 ⇒ 快通道 YES；tag 未命中 ⇒ **继续走几何兜底**
+（右上「+/图层」靠 y 门槛 25% 自然排除）。
+同时把外壳与内层改成**各自钉位、各自过包络校验后打标记**，钩子登记 3 类扩到 4 类。
+
+**方法论成型**：判「某控件是否上屏」必须用**末帧模板 + 归一化互相关**，
+或 8 邻域连通域全图搜白块。**暗像素计数会被地图文字/图标污染** ——
+这个坑我踩了两次（bbox 覆盖整块区域，n≈1140 全是地图字）。
+
+### §AM · 0.9.123 —— 顶部运营通知条 + 构建链迁 Linux
+
+**A. 「请查收：【你的签到红包】」（老大截图圈出）**
+
+这条**没有任何「广告/赞助/推广」字样**，所以 §AI 那套「独立角标 + 关闭控件」双证判据**必然漏掉**。
+
+新增独立通道 `GCCBannerHasOpsNoticeText`，三条同时成立才动手：
+
+1. **形状**：顶部带 + 通栏 + 扁条（复用 `GCCIsTopBannerShape`）
+2. **文案**：含中文方括号 **【】** —— 运营推送模板惯用符号，路名/POI/搜索提示都不用
+3. **关闭**：右侧有**真实**关闭控件
+
+`【】` 用 `unichar 0x3010 / 0x3011` 构造，不落明文（与混淆表同一口径）；文案长度 ≤60 字防误伤。
+真机实测几何：x 70..326（65% 宽）、y 75..107（3.8% 高）。
+
+**B. macos-14 runner 调不起来 → 迁 ubuntu-latest**
+
+现象：2026-11-06 00:09 起，本仓库 `macos-14` job 在 **1~3 秒内被取消**，
+`runner_id=0`、`runner_name` 为空 ⇒ **job 根本没分配到 runner 就被取消**。
+重试 push / 空提交 / workflow_dispatch 共 4 次全一样；同账号另一仓库 `ubuntu-latest` 同时正常。
+
+⚠️ **注意：公共仓库的标准 runner（含 macOS）全部免费** —— 我最初判断成「macOS 分钟数用尽」，
+那是错的（私有仓库才计费，macOS 按 10 倍）。
+
+Linux 迁移的两个坑：
+
+1. **Ubuntu 26.04(resolute) 没有 `libtinfo5` / `libncurses5` / `ldid`**。
+   前两个只有 Swift 工具链才需要（我们用非 Swift 版）；
+   `ldid` 官方源没有，而 theos 的 `makefiles/targets/_common/darwin_head.mk`
+   用 `__executable,ldid` 探测 **PATH** ⇒ 必须自己装
+   `ProcursusTeam/ldid` 的 `ldid_linux_{x86_64,aarch64}` 静态二进制。
+2. Linux 需额外装 theos 的 iOS 工具链（macOS 由 Xcode 自带）：
+   `L1ghtmann/llvm-project` 的 `iOSToolchain-*.tar.xz`，解到 `$THEOS/toolchain/`。
+
+theos 官方 Linux 依赖：`build-essential fakeroot rsync curl perl git zip xz-utils
+libxml2-dev dpkg clang llvm` + `fakeroot` 切 sysv 后端。
+`verify_deb.sh` 相应改：切片信息 `lipo → llvm-lipo → file` 三级取（Linux 无 macOS lipo）。
+
+**C. 门禁自身的三处误判（都会把好包判成坏包）**
+
+| 编号 | 破绽 |
+|---|---|
+| A10 | `verify_deb.sh` 调裸 `plutil`，iSH 没有 ⇒ 输出空 ⇒ grep 命中 0 ⇒ 判「过滤器不含 com.autonavi.amap」。**每个正确的包都会被判坏**。修法：脚本自己挂 `/tmp/shims`，无 plutil 时退回 python3 plistlib |
+| A11 | `gate.sh` 的 scheme 靠**文件名**猜 `*roothide*`，而 Release 资产叫 `..._iphoneos-arm64e.deb` 里没有该字样 ⇒ 误判 rootless ⇒ 因架构不符误杀。修法：读 control 的 `Architecture` |
+| A12 | `gate.sh` SDK 硬编码 `/tmp/sdk165`，本机实际在 `/tmp/sdkclone`。修法：三处候选探测 + `make check` 必须带 `SDK="$SDK"` |
+
+**0.9.123 产物**：Linux runner 构建，dylib 471,904 B（比 0.9.122 的 440,736 大约 31KB，
+新增正式代码所致，探针已验证 0 残留）；arm64 `435e6cf1…`（96,664 B）/
+arm64e `3ca9bf7f…`（96,576 B）。单测合计 **153 项**，0 警告。
+
 ## 五、教训
 
 1. **视图「不见了」按三个通道依次排除** — `hidden` → `alpha` → `removeFromSuperview`；
@@ -1541,6 +1729,46 @@ Amap 私有类名（`WINPermanentCompassView`/`WINLiteWidgetGroupView`/…）与
 14. **压 alpha 的拦截，放行时必须同时恢复 alpha 与 hidden** —— 只恢复 `hidden`、alpha 仍是 0，
     控件会「逻辑可见、视觉全透明」，比不修更难查（0.9.9 W2/W3 的自伤点，W4 补齐）。
 
+15. **「几何兜底」若把「目标位置」写进判据，就是自锁** —— 认不出来的原因正是位置不对，
+    而判据又要求位置对，于是它永远不成立（0.9.120 的胶囊 y>60% 门槛，0.9.123 才发现）。
+    **判据必须只描述「是哪一类东西」，不能描述「它现在在哪」。**
+
+16. **强引用缓存 + 「非 nil 即齐套」的早退门 = BFS 永久停摆** —— App 毁掉实例后对象仍活着
+    （只是脱窗），缓存恒非 nil，于是永远早退、永远不再重新发现。
+    **缓存有效性必须包含 `window` 检查，不能只看非 nil。**
+
+17. **纯计时门控（`!SearchBarSettled`）在「该控件不存在」的机型上等于永久关闭** ——
+    本机首页是圆钮底栏、没有搜索栏，于是所有「等搜索栏定型」的门全部永久关闭，四道锁同时生效。
+    **任何「等 X 定型」的门，都必须配一条不依赖 X 的备用通道。**
+
+18. **「有捷径就定论」是最隐蔽的短路** —— 0.9.120 的
+    `if (tag 非空) return 命中关键词;` 一句，把整条几何兜底关死了。
+    此后胶囊能否出现，取决于高德写不写 tag、写什么 tag —— 表现就是**时好时坏**。
+    **凡是「快通道 + 兜底」的结构，快通道只许返回「确定是」，绝不许返回「确定不是」。**
+
+19. **「钉位」和「打标记」作用于两个不同对象时必然错位** —— 0.9.122：钉的是外壳（优先选），
+    标记只打给内层。App 按的是外壳 ⇒ 外壳永远不放行。
+    **凡是有「优先选」的地方，钉位与打标记必须用同一个变量。**
+    但 0.9.123 又发现：当两者是**两个真实视图**时，互斥二选一本身就是错的 ——
+    必须各自钉、各自判、各自标记。
+
+20. **给实例打「已就位」标记前，必须先校验它真的在目标位** —— 否则就是「用错位置换可见」，
+    比不修更糟（HISTORY §W 钟摆曲线的成因）。用独立的钉位包络校验把关，不信标记来源。
+
+21. **缓存锚点首次取值不许锁在 fallback 上** —— 首次拿不到真实锚（底栏未上屏）时，
+    应返回估算值但**不锁定**，等真实值到了立刻采纳；否则白等一个锁定周期（0.5s）。
+
+22. **判「某控件是否上屏」必须用模板匹配或白块连通域，绝不能用暗像素计数** ——
+    暗像素会被地图文字/图标污染（bbox 覆盖整块区域、n≈1140 全是地图字），
+    这个坑踩了两次。正确做法：末帧作模板 + 逐帧归一化互相关；或 8 邻域连通域全图搜白块。
+
+23. **「时好时坏」类 bug，先查「有没有一条捷径把兜底短路了」** ——
+    不是找「为什么这次慢」，而是找「为什么大多数时候它没走那条正路」。
+
+24. **门禁自己也会有假失败，先验证门禁** —— 0.9.121/0.9.123 三次「包坏了」全是门禁自身缺陷：
+    工具缺失导致 grep 命中 0、按文件名猜 scheme、SDK 路径硬编码。
+    **门禁报错时，第一件事是把包手工解出来看一眼，而不是改代码。**
+
 ---
 
 ## 六、构建与产物
@@ -1560,9 +1788,38 @@ make check SDK=/path/to/iPhoneOS16.5.sdk  # 只跑 0 警告门禁
 deb 打包用 `scripts/mkdeb.py`（Python 写 `ar` 归档，不需要 `dpkg-deb`）；
 版本号从 `control` 的 `Version` 读，`Installed-Size` 按真实载荷计算。
 
-> **arm64e 是这样出来的** —— 两件事都要处理：
+> **arm64e 是这样出来的** —— ⚠️ **本节已于 0.9.119 作废，仅留作历史记录。**
+>
+> **0.9.119 真机事故（`AMapiPhone-2026-11-05-121051.ips`）**：
+> ```
+> EXC_CRASH / SIGABRT
+> termination.reasons = ["bad bind opcode 0x00"]
+> frames = __abort_with_payload → dyld4::halt → dyld4::prepare → start
+> ```
+> 崩在 **dyld4::prepare**，即**加载阶段**，App 自身代码一行未执行。
+>
+> 根因就是下面第 1 条：lld 的 arm64e 切片走 `LC_DYLD_INFO_ONLY`，而它写出的 bind 流
+> 在 iOS 16 的 dyld 上**不合法**。`fixarch.py` 只修 cpusubtype 与签名页哈希，**不修 bind 流**，
+> 所以修不回来。**这条老路子彻底废弃。**
+>
+> **现行规则（0.9.120 起强制）**：arm64e 切片**必须**带 `LC_DYLD_CHAINED_FIXUPS`，
+> 而该标志在 arm64e 上只有 theos（LLVM 完整版）能产出。
+> ⇒ **所有要装到真机上的包（含探针包）一律走 GitHub Actions 构建，本机 lld 只能做 arm64 自测。**
+>
+> 判别（一条命令）：
+> ```
+> llvm-objdump --macho --private-headers <dylib> | grep -c LC_DYLD_CHAINED_FIXUPS
+> # 1 = 合法   0 = 会崩（dyld: bad bind opcode）
+> ```
+> 门禁已内建：`verify_deb.sh` 第 4b 段、`gate.sh`、`Makefile.local` 三处都会拦。
+>
+> ---
+>
+> 以下是作废前的旧记录（lld 时代），**不要再照做**：
+
+> **（旧）arm64e 是这样出来的** —— 两件事都要处理：
 > 1. lld 不支持 arm64e 的 `-fixup_chains`（只支持 x86_64 与 arm64），
->    所以 arm64e 切片走经典 `LC_DYLD_INFO_ONLY` 绑定，**不加** `-Wl,-fixup_chains`。
+>    所以 arm64e 切片走经典 `LC_DYLD_INFO_ONLY` 绑定 —— **这就是 0.9.119 事故的根因**。
 > 2. **clang 的 arm64e 后端是对的（`.o` 里 cpusubtype=2），但 lld 写出 Mach-O 时会把
 >    输出头的 cpusubtype 写成 0。** dyld 用
 >    `(cpusubtype & ~CPU_SUBTYPE_MASK) == CPU_SUBTYPE_ARM64E` 判断「是否为 arm64e 映像」，
@@ -1571,7 +1828,7 @@ deb 打包用 `scripts/mkdeb.py`（Python 写 `ar` 归档，不需要 `dpkg-deb`
 >    （cpusubtype 在 header 偏移 8，落在第 0 页里）。
 >
 > ```
-> # arm64e 切片
+> # （旧 lld 路径，已废弃）arm64e 切片
 > clang -target arm64e-apple-ios15.0 -isysroot $SDK -fobjc-arc -fblocks \
 >   -fobjc-runtime=ios-15 -O2 -dynamiclib -fuse-ld=lld \
 >   -Wl,-install_name,@rpath/GaodeClean.dylib -Wl,-adhoc_codesign \
@@ -1581,6 +1838,7 @@ deb 打包用 `scripts/mkdeb.py`（Python 写 `ar` 归档，不需要 `dpkg-deb`
 > ```
 >
 > 校验：`csverify.py` 应报「页哈希 45/45 通过」；头部 cpusubtype=2、cputype=0x100000c。
+> —— 以上只能保证**签名正确**，保证不了 **bind 流合法**，所以判定为不可用。
 
 ### deb 布局
 
@@ -1596,24 +1854,27 @@ deb 打包用 `scripts/mkdeb.py`（Python 写 `ar` 归档，不需要 `dpkg-deb`
 
 装完 `sbreload` 或重启用户空间。
 
-### 本包产物（0.9.16）
+### 本包产物（当前版本 0.9.123）
 
 | 文件 | 说明 |
 |:--|:--|
-| `GaodeClean-0.9.16.dylib`（arm64）| 201,776 B · rootless / Dopamine |
-| `GaodeClean-0.9.16-arm64e.dylib` | 203,248 B · RootHide（`cpusubtype 0x2` 已由 `fixarch.py` 修正）|
-| `com.jibamao.gaodeclean_0.9.16_iphoneos-arm64.deb` | 62,488 B · rootless（载荷 `/var/jb/Library/MobileSubstrate/…`）|
-| `com.jibamao.gaodeclean_0.9.16_iphoneos-arm64e-roothide.deb` | 61,972 B · RootHide（载荷 `/Library/…`，`Depends` 含 `oldabi`）|
-| `com.jibamao.gaodeclean_0.9.16+diag_*.deb` | 取证包（行为与正式包一致，仅多 `-DGAODECLEAN_DIAG_LOG=1`）|
-| `dist/GaodeClean-0.9.16-Source.zip` | 完整源码（src + control + scripts + tools + Makefile + GCCDiag.h）|
+| `GaodeClean-0.9.123-arm64.dylib` | 471,904 B · fat（arm64 + arm64e 双切片）|
+| `GaodeClean-0.9.123-arm64e.dylib` | 471,904 B · 同上（同一份 fat 文件，按需取）|
+| `com.jibamao.gaodeclean_0.9.123_iphoneos-arm64.deb` | 96,664 B · rootless（载荷 `/var/jb/Library/MobileSubstrate/…`）|
+| `com.jibamao.gaodeclean_0.9.123_iphoneos-arm64e.deb` | 96,576 B · RootHide（载荷 `/Library/…`，`Depends` 含 `oldabi`）|
+| `GaodeClean-0.9.123-Source.zip` | 完整源码（`git archive` 生成，不含 `dist/`、`packages/`、`.theos/`）|
 
-**0.9.16 日志分档**：正式包由 Makefile 注入 `-DGAODECLEAN_STRIP_LOGS=1`，
-12 处每事件级 `GCLog` 在编译期展开为空操作（`strings` 已验证全部消失）；
-装机核对所需的 8 处 `NSLog` 保留。需真机排查时用 `make dev` 出带日志的调试包。
+> **构建通道（0.9.123 起）**：`ubuntu-latest` + roothide theos（commit 固定）+ iPhoneOS SDK（commit 固定）。
+> 两个切片都带 `LC_DYLD_CHAINED_FIXUPS`，真机可加载。
+> 本机 `Makefile.local` 只能出 **arm64** 自测包；**arm64e 必须走 CI**（见 §AK-C 事故）。
 
-> 产物体积随代码增长而变；以 `make` 的实际输出与 `dist/SHA256SUMS.txt` 为准。
-> **体积跳变提示**：0.9.16 较 0.9.15 文件 +16,752 B，而 `__text` 仅 +1,544 B ——
-> 差额是 `__got` 跨 `0x4000` 页边界的对齐填充（16,384 B），与 0.9.8 审计时的同一现象，**非重复代码**。
+> 产物体积随代码增长而变；以 `make` 的实际输出与 Release 页的 `SHA256SUMS.txt` 为准。
+> **体积跳变提示**：0.9.123 较 0.9.122 文件 +31,168 B —— 新增的正式代码所致
+> （运营通知条判据、外壳/内层双钉位、tag 快通道、逐秒打点），
+> 已用 `strings` 验证探针串 0 残留，非重复代码。
+>
+> 历史参考：0.9.16 较 0.9.15 文件 +16,752 B，而 `__text` 仅 +1,544 B ——
+> 差额是 `__got` 跨 `0x4000` 页边界的对齐填充（16,384 B），与 0.9.8 审计时同一现象。
 
 ### 每次发版自检清单
 
@@ -1796,3 +2057,27 @@ strings GaodeClean.dylib | grep -F 0.9.21            # 0.9.21  ×1
 
 **0.9.29 收口**：探针模块（4 个 `#ifdef GAODECLEAN_PROBE` 块、241 行、control.probe*）**物理删除**，
 正式包 strings 零探针串；trial 系列 control 文件一并清除；版本 0.9.29（dpkg 序 > 0.9.28+trial12）。
+
+---
+
+### 0.9.29 → 0.9.123 速览
+
+| 版本 | 主题 | 关键点 |
+|:--|:--|:--|
+| 0.9.98 | 底栏/搜索栏收口 | 白雾、上拉发现、圆钮居中三件套定稿 |
+| **0.9.99** | **顶部运营横幅广告移除** | 开屏通道三重盲区：高度 6.6% 必被 `GCCIsFullScreen` 拒；独立通道 + `banner_logic_test.c` |
+| 0.9.100~0.9.110 | 探针期 / 灰度试验 | 各类 `+trial` / `+probe` 包，只作诊断，不发布 |
+| **0.9.111** | **上架做爱源** | 描述改「高德无设置，无广告。」；版本必须高于源里现役版本 |
+| 0.9.112 | 包内描述精简 | `control` Description 四句 |
+| **0.9.113** | **撤回本机 lld 包，改 GitHub CI** | 本机 dylib 225,712 B vs theos 440,656 B，一眼辨真伪 |
+| **0.9.114** | **右上「+」号闪烁** | 2D/3D 已移除但钩子仍在搬它；改纯几何硬豁免 |
+| **0.9.115** | **车机钮「发现即钉位」** | 7.9s → 5.0s |
+| 0.9.117 | 胶囊 `setHidden:` 改拦截 | 三重安全阀 + `pinned_guard_test.c` |
+| 0.9.118 | 胶囊类名修正 | `WINLiteWidgetGroupView` → `WINAJXCombinedWidgetView` |
+| 0.9.119 | 广告取文本改 `NodeText` | 覆盖 AJX 自绘；**同版 arm64e 崩溃事故 → 全链加固** |
+| 0.9.120 | 胶囊几何兜底（**埋了 tag 短路**）| 1.05s / 2.5s；`right_geo_test.c` |
+| **0.9.121** | **解开四道 `SearchBarSettled` 锁** | 1.40s → 0.35s；y 门槛 60%→25% 解除自锁 |
+| 0.9.122 | 外壳补打 `AlignedKey` | 0.35s 的断点；同时修门禁三处误判 |
+| **0.9.123** | **tag 短路根除 + 运营通知条 + CI 迁 Linux** | 真凶是 0.9.120 的 `if (tag) return 关键词;` |
+
+**当前状态（0.9.123）**：单测 153 项、0 警告、门禁全绿、源站已上架。
