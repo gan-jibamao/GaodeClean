@@ -103,7 +103,14 @@ fi
 dpkg-deb -x "$DEB" "$TMP/root"
 DYL=$(find "$TMP/root" -name 'GaodeClean.dylib' | head -1)
 [ -n "$DYL" ] || { bad "解包后找不到 dylib"; exit 1; }
-SLICES=$(lipo -info "$DYL" 2>/dev/null || file "$DYL")
+# ★0.9.123（A5）：Linux runner 上没有 macOS 的 `lipo`，只有 `llvm-lipo`。
+#   旧的 `lipo -info ... || file ...` 在 Linux 上会直接落到 `file`，
+#   虽然 `file` 的输出恰好也含 arm64/arm64e 字样能过判据，但那是巧合。
+#   这里显式按 lipo → llvm-lipo → file 三级取，语义最清晰。
+SLICES=$( { command -v lipo       >/dev/null 2>&1 && lipo -info "$DYL" 2>/dev/null; } \
+       || { command -v llvm-lipo  >/dev/null 2>&1 && llvm-lipo -info "$DYL" 2>/dev/null; } \
+       || file "$DYL" )
+[ -n "$SLICES" ] || SLICES=$(file "$DYL")
 say "  $SLICES"
 case "$SLICES" in
   *arm64e*) ok "含 arm64e 切片" ;;
