@@ -57,17 +57,40 @@ jobs:
           set -e
           sudo apt-get update
           # theos 官方 Linux 依赖（build-essential/fakeroot/rsync/perl/libxml2 等）
-          # + ldid（签名）+ dpkg/xz（打包）+ zip（源码包）+ llvm（objdump 验链式绑定）
+          # + dpkg/xz（打包）+ zip（源码包）+ clang/llvm（混淆自测 + objdump 验链式绑定）
+          #
+          # ★0.9.123（A5'）：不装 libtinfo5 / libncurses5 / ldid —— 实测 runner 是
+          #   Ubuntu 26.04（resolute），这三个包在官方源里都不存在：
+          #     libtinfo5/libncurses5：只有 Swift 工具链才需要，我们用的是非 Swift 版
+          #     ldid：theos 仓库自带 Linux 二进制（$THEOS/bin/ldid），不需要 apt
+          #   第一次跑就是因为这三个包导致 `E: Unable to locate package` + exit 100。
           sudo apt-get install -y --no-install-recommends \
             build-essential fakeroot rsync curl perl git zip xz-utils \
-            libxml2-dev libtinfo5 libncurses5 ldid dpkg \
-            clang llvm
+            libxml2-dev dpkg clang llvm
           # fakeroot 用 sysv 后端（官方建议，避免部分发行版的 tcp 限制）
           sudo update-alternatives --set fakeroot /usr/bin/fakeroot-sysv || true
           echo "--- 工具自检 ---"
-          for t in make clang ldid dpkg-deb zip rsync fakeroot llvm-objdump; do
+          for t in make clang dpkg-deb zip rsync fakeroot llvm-objdump; do
             printf '%-14s ' "$t"; command -v $t || echo '(缺)'
           done
+
+      - name: Install ldid (Linux static binary)
+        run: |
+          set -e
+          # theos 的打包链要 PATH 里有 ldid（makefiles/targets/_common/darwin_head.mk
+          # 用 `__executable,ldid` 探测），而 Ubuntu 26.04 官方源没有这个包。
+          # 用 ProcursusTeam/ldid 官方发行的 Linux 静态二进制，放 /usr/local/bin。
+          ARCH=$(uname -m)
+          case "$ARCH" in
+            x86_64)  L=ldid_linux_x86_64 ;;
+            aarch64) L=ldid_linux_aarch64 ;;
+            *) echo "不支持的架构 $ARCH"; exit 1 ;;
+          esac
+          sudo curl -fsSL -o /usr/local/bin/ldid \
+            "https://github.com/ProcursusTeam/ldid/releases/download/v2.1.5-procursus7/${L}"
+          sudo chmod +x /usr/local/bin/ldid
+          ldid -h 2>&1 | head -3 || true
+          echo "ldid → $(command -v ldid)"
 
       - name: Install theos (roothide fork, pinned) + SDK
         run: |
