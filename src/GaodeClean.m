@@ -18,7 +18,7 @@
 // ---- jibamao 个人标识（编译进 dylib，可用 strings 核对）----
 static NSString *const kGCAuthor      = @"jibamao";
 static NSString *const kGCRepo        = @"https://gan-jibamao.github.io/";
-static NSString *const kGCVersion     = @"0.9.123";
+static NSString *const kGCVersion     = @"0.9.124";
 
 // 0.9.18（A1）：底边间隙**按控件分开**，对表原生（搜索栏白底顶边 = 702.6pt）
 //   车机钮（连接车机 · WINDeviceInterconnectWidget）：原生底 652 → 间隙 50.6 → 取 50
@@ -6978,53 +6978,51 @@ static BOOL GCCBannerHasLegalAdMark(UIView *v, BOOL *outClose) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-//  0.9.123（A4）：**运营通知条**判据 —— 不带「广告」角标的那一类
+//  0.9.124（A1）：把「形状」与「内容」解耦 —— 0.9.123 那条运营条漏网的真因
 //
-//  真机截图（photo_F9AE7383）：顶部一条圆角胶囊，文案「请查收：【你的签到红包】」，
-//  右侧一个 ✕。它没有任何「广告/赞助/推广」字样，所以既有的
-//  「独立角标 + 关闭控件」双证判据**必然漏掉它** —— 这就是老大圈出来的那条。
+//  0.9.123 的写法是：
+//      if (!GCCIsTopBannerShape(v, win)) return NO;   // 先要求 v 自身是横幅形状
+//      ... 再在 v 的子树里找【】和 ✕ ...
 //
-//  强特征（四条同时成立，尽量不误伤）：
-//    ① 形状：顶部带 + 通栏 + 扁条（复用 GCCIsTopBannerShape）
-//    ② 文案：含中文方括号「【】」—— 运营推送模板的惯用符号，
-//       地图自身的路名/POI/搜索提示都不会用（它们用《》或纯文本）
-//    ③ 关闭：右侧有**真实**关闭控件（复用 GCCLooksLikeCloseControl）
-//    ④ 排除：子树含输入控件 / 是钉位首页的一部分（复用既有守卫）
+//  这两件事**未必落在同一个节点上**。BFS 从窗口根往下走：
+//    · 窗口根：全屏，形状不成立
+//    · 外层容器（可能 393×200，或本身是整块顶栏）：高度超过 210pt ⇒ 形状不成立
+//    · 真正的横幅节点：形状成立，但它的子树里不一定同时含【】和 ✕
+//      （✕ 常在横幅的**兄弟子视图**里，或挂在另一个容器上）
+//  ⇒ 形状判据把内容判据**堵死在外面**，永远对不上。
 //
-//  第 ② 条是本判据的核心：只靠「有 ✕」会误伤所有可关闭的浮层；加上
-//  「【】」这个运营模板符号，精度才够。若将来遇到不含【】的通知条，
-//  再按实测补判据，不预先放宽。
+//  真机铁证（photo_F4D9D03B，1179×2556 @3x）：横幅本体 x 66.7..326pt（宽 259.7）、
+//  y 75.7..106.3pt（高 30.6）。形状判据单独看是过的（66% 宽、3.6% 高、顶部带）
+//  —— 所以漏网的肯定不是形状，而是「形状与内容不在同一节点」。
+//
+//  修法：先按形状挑**候选**，再往上取一个足够大的共同祖先，在**祖先子树**里查内容。
+//  形状仍只对候选节点判（保证「有宽而扁的东西」），内容对祖先判（保证【】和 ✕ 同源）。
 // ═══════════════════════════════════════════════════════════════════════════
-static BOOL GCCBannerHasOpsNoticeText(UIView *v, BOOL *outClose) {
+
+// 判断「v 的子树里是否同时有【】文案与右侧真实关闭控件」
+static BOOL GCIsOpsNoticeText(NSString *txt);          // 前置声明（定义在下方文案通道处）
+static NSString *GCNodeOwnText(UIView *v);             // 前置声明
+static BOOL GCSubtreeHasOpsNotice(UIView *v) {
     // 「【」= U+3010，「】」= U+3011。不落明文，保持与混淆表同一口径。
-    static NSString *openBracket, *closeBracket;
-    static dispatch_once_t onceB;
-    dispatch_once(&onceB, ^{
-        openBracket  = [NSString stringWithFormat:@"%C", (unichar)0x3010];
-        closeBracket = [NSString stringWithFormat:@"%C", (unichar)0x3011];
-    });
     BOOL notice = NO, close = NO;
     NSMutableArray *q = [NSMutableArray arrayWithObject:v];
-    for (NSUInteger i = 0; i < q.count && q.count < 80; i++) {
+    for (NSUInteger i = 0; i < q.count && q.count < 120; i++) {
         UIView *s = q[i];
-        if (GCCLooksLikeCloseControl(s)) {
+        if (!close && GCCLooksLikeCloseControl(s)) {
+            // 相对**整条横幅 v** 判右缘，而不是相对 s 自己或某个内层 label ——
+            // 0.9.123 用的是被扫描节点做参考，节点一变判据就失真。
             CGRect cr = [s convertRect:s.bounds toView:v];
             CGFloat vw = CGRectGetWidth(v.bounds);
             if (vw >= 1 && CGRectGetMidX(cr) > vw * 0.70) close = YES;
         }
-        NSString *txt = NodeText(s);
-        if (!txt.length) txt = s.accessibilityLabel;
-        if (txt.length && !notice) {
-            // 只认「带方括号的整体文案」：长度设上限，避免把长段内容误判
-            if (txt.length <= 60 &&
-                [txt containsString:openBracket] && [txt containsString:closeBracket]) {
-                notice = YES;
-            }
+        if (!notice) {
+            // ★A2'：与文案直取通道同源，只认节点自身文本（不走关联对象缓存）
+            if (GCIsOpsNoticeText(GCNodeOwnText(s))) notice = YES;
         }
+        if (notice && close) return YES;
         [q addObjectsFromArray:s.subviews];
     }
-    if (outClose) *outClose = close;
-    return notice;
+    return (notice && close);
 }
 
 // 完整判据。被隐藏过的一律不再重复处理（用关联对象打标，幂等）。
@@ -7034,17 +7032,155 @@ static BOOL GCCIsTopBannerAd(UIView *v, UIWindow *win) {
     if (objc_getAssociatedObject(v, &BannerHiddenKey)) return NO;
     if (GCCIsPinnedHomeView(v) || GCCAncestryIsPinnedHome(v)) return NO;
     if (GCCSubtreeHasInput(v)) return NO;
-    if (!GCCIsTopBannerShape(v, win)) return NO;
-    BOOL hasClose = NO;
-    BOOL hasMark = GCCBannerHasLegalAdMark(v, &hasClose);
-    if (hasMark && hasClose) return YES;
-    // ★0.9.123（A4）：第二条通道 —— 运营通知条（无「广告」角标，靠【】+ 关闭控件）
-    BOOL opsClose = NO;
-    if (GCCBannerHasOpsNoticeText(v, &opsClose) && opsClose) return YES;
+
+    // ── 通道①：既有「广告角标 + 关闭控件」双证（形状必须落在 v 自己身上）
+    if (GCCIsTopBannerShape(v, win)) {
+        BOOL hasClose = NO;
+        if (GCCBannerHasLegalAdMark(v, &hasClose) && hasClose) return YES;
+    }
+
+    // ── 通道②：运营通知条（0.9.124 重写）
+    //   v 只要能当「横幅的某一层」就够 —— 形状可以落在 v，也可以落在 v 的子孙；
+    //   内容是往上找共同祖先再判。
+    //   判据：v 的子树里**有**一条宽而扁、贴顶部的节点（= 横幅本体存在），
+    //        且从这个祖先/自身算起，子树里同时有【】与右侧关闭控件。
+    {
+        // 自 v 起向下找「横幅本体」候选（宽 ≥60% 屏宽、扁、贴顶）
+        UIView *body = nil;
+        NSMutableArray *q = [NSMutableArray arrayWithObject:v];
+        for (NSUInteger i = 0; i < q.count && q.count < 120; i++) {
+            UIView *s = q[i];
+            if (GCCIsTopBannerShape(s, win)) { body = s; break; }
+            [q addObjectsFromArray:s.subviews];
+        }
+        if (!body) return NO;
+        // 内容在「本体」及其祖先的子树里找 —— 先本体，再逐级往上，但**必须设上界**：
+        //   祖先一旦不再是「一条横幅该有的样子」（太高 / 太靠下 / 超出屏宽太多），
+        //   就立刻停 —— 否则会一路爬到整块首页容器，那时子树里同时有【】和任意 ✕，
+        //   极易误伤（比如某个带【】的 POI 卡片）。这是 0.9.124 加的第一道保护。
+        CGFloat ww = win.bounds.size.width, wh = win.bounds.size.height;
+        UIView *scope = body;
+        for (int up = 0; up < 5 && scope; up++) {
+            if (GCSubtreeHasOpsNotice(scope)) return YES;
+            UIView *p = scope.superview;
+            if (!p || p == win || GCCIsPinnedHomeView(p)) break;
+            // 上界校验：祖先必须仍是「顶部、不超高、不超宽」的容器
+            CGRect pr = [p convertRect:p.bounds toView:win];
+            if (!isfinite(pr.origin.y) || !isfinite(pr.size.height)) break;
+            if (pr.size.height < 1 || pr.size.width < 1) break;
+            if (pr.size.width > ww * 1.05) break;          // 比屏幕还宽 ⇒ 不是横幅层
+            if (pr.size.height > 260) break;               // 太高 ⇒ 已经不是一条横幅
+            if (CGRectGetMinY(pr) > wh * 0.33) break;      // 不在顶部带 ⇒ 停
+            scope = p;
+        }
+    }
     return NO;
 }
 
 static long GCBannerHiddenCount;   // 诊断计数
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  0.9.124（A2）：**文案直取通道** —— 不依赖形状判据命中
+//
+//  为什么要再加一条：
+//    A1 已经把「形状」与「内容」解耦，但它仍然假设「横幅本体在 v 的子树里能找到
+//    一个通过形状判据的节点」。如果高德的这条运营条是由**几个并列的兄弟视图**
+//    拼出来的（背景一层、文字一层、✕ 一层，各自挂在同一个容器下，谁都不是「横幅本体」），
+//    A1 依然会漏。0.9.123 已经漏了一次，我不想再赌第二次。
+//
+//  这条通道直接以**文案**为锚：
+//    在顶部带内找「含【】且长度 ≤60」的文本节点（这是运营模板的强特征），
+//    找到后向上走到「第一个高度 ≤260pt 且不超屏宽的容器」，把那个容器收掉。
+//    仍要求该容器子树里有右侧真实关闭控件 —— 双证不变。
+//
+//  与 A1 的关系：A1 是「形状 → 内容」，A2 是「内容 → 形状」。
+//  两条独立成立，任一命中即可，互为兜底。
+// ═══════════════════════════════════════════════════════════════════════════
+static BOOL GCIsOpsNoticeText(NSString *txt) {
+    static NSString *openBracket, *closeBracket;
+    static dispatch_once_t onceB;
+    dispatch_once(&onceB, ^{
+        openBracket  = [NSString stringWithFormat:@"%C", (unichar)0x3010];
+        closeBracket = [NSString stringWithFormat:@"%C", (unichar)0x3011];
+    });
+    if (!txt.length || txt.length > 60) return NO;
+    return [txt containsString:openBracket] && [txt containsString:closeBracket];
+}
+
+// ★0.9.124（A2'）：**只取节点自身的显示文本**，不用 NodeText 的关联对象缓存。
+//   原因：NodeText 会拼上 `TextKey` 关联对象，而那是 Capture() 给搜索/POI 元素写的
+//   元数据（站名、地址、电话…）。真机上 POI 元数据里出现【】并不罕见，
+//   一旦拼进来，配上一个无关的关闭控件就会误伤整块地图卡片 —— 这是本判据最大的风险点。
+//   只认 text / accessibilityLabel 两路，都是「这个 label 实际写着的字」。
+static NSString *GCNodeOwnText(UIView *v) {
+    if ([v isKindOfClass:UILabel.class]) {
+        NSString *t = ((UILabel *)v).text;
+        if (t.length) return t;
+    }
+    // AJX 自绘 label：text / attributedText / title 三路（都不走关联对象）
+    if (NodeIsAjx(v)) {
+        static NSArray<NSString *> *getters;
+        static dispatch_once_t onceT;
+        dispatch_once(&onceT, ^{ getters = @[GCStrAt(11), GCStrAt(12), GCStrAt(13)]; });
+        for (NSString *getter in getters) {
+            id value = ObjectGetter(v, getter);
+            if ([value isKindOfClass:NSAttributedString.class]) value = [value string];
+            if ([value isKindOfClass:NSString.class] && [value length] && [value length] < 160)
+                return value;
+        }
+    }
+    NSString *al = v.accessibilityLabel;
+    if (al.length && al.length < 160) return al;
+    return nil;
+}
+
+// 返回「应当被收掉的容器」；找不到返回 nil。
+static UIView *GCTextAnchoredOpsBanner(UIView *v, UIWindow *win) {
+    if (!v || !win || v.hidden || v.alpha < 0.02) return nil;
+    if (GCCIsPinnedHomeView(v) || GCCAncestryIsPinnedHome(v)) return nil;
+    if (GCCSubtreeHasInput(v)) return nil;
+    CGFloat ww = win.bounds.size.width, wh = win.bounds.size.height;
+    if (ww < 1 || wh < 1) return nil;
+
+    // 从 v 起向下找「带【】的文本节点」，预算 120 节点
+    UIView *hit = nil;
+    NSMutableArray *q = [NSMutableArray arrayWithObject:v];
+    for (NSUInteger i = 0; i < q.count && q.count < 120; i++) {
+        UIView *s = q[i];
+        if (s != v && (s.hidden || s.alpha < 0.02)) continue;
+        // ★A2'：只认节点自身文本（不用关联对象缓存，避免 POI 元数据误伤）
+        if (GCIsOpsNoticeText(GCNodeOwnText(s))) { hit = s; break; }
+        [q addObjectsFromArray:s.subviews];
+    }
+    if (!hit) return nil;
+
+    // 这个文本节点必须自己就在顶部带内（路名/POI 卡片上的【】在中部，会被排掉）
+    CGRect hr = [hit convertRect:hit.bounds toView:win];
+    if (!isfinite(hr.origin.y) || !isfinite(hr.size.height)) return nil;
+    if (CGRectGetMinY(hr) > wh * 0.33) return nil;
+
+    // 向上走：取「第一个高度 ≤260 且不超屏宽」的容器 —— 那就是整条横幅
+    UIView *best = nil;
+    UIView *p = hit;
+    for (int up = 0; up < 8 && p && p != win; up++, p = p.superview) {
+        if (GCCIsPinnedHomeView(p) || GCCSubtreeHasInput(p)) break;
+        CGRect pr = [p convertRect:p.bounds toView:win];
+        if (!isfinite(pr.origin.y) || !isfinite(pr.size.height) ||
+            !isfinite(pr.size.width)) break;
+        if (pr.size.width < 1 || pr.size.height < 1) break;
+        if (pr.size.width > ww * 1.05) break;     // 比屏还宽 ⇒ 出界
+        if (pr.size.height > 260) break;          // 太高 ⇒ 已经越出「一条横幅」
+        if (CGRectGetMinY(pr) > wh * 0.33) break; // 不在顶部带 ⇒ 停
+        best = p;
+    }
+    if (!best) return nil;
+    // 容器必须是「够宽的一条」—— 防止把一个小气泡当横幅收掉
+    CGRect br = [best convertRect:best.bounds toView:win];
+    if (CGRectGetWidth(br) < ww * 0.45) return nil;
+    // 双证不变：子树里必须有右侧真实关闭控件
+    if (!GCSubtreeHasOpsNotice(best)) return nil;
+    return best;
+}
 
 static void GCHideTopBannerAd(UIView *v, const char *why) {
     if (!v) return;
@@ -7079,6 +7215,37 @@ static void SweepTopBannerAds(void) {
     for (UIWindow *w in wins) {
         if (![w isKindOfClass:UIWindow.class] || w.hidden) continue;
         if (w.bounds.size.width < 1 || w.bounds.size.height < 1) continue;
+
+        // ★0.9.124（A2）：**先跑文案直取通道** —— 它不以形状为入口，最不容易被结构变化坑掉。
+        //   只扫顶部带内的节点（BFS 到 8 层、上限 1200），命中即收。
+        {
+            NSMutableArray *q0 = [NSMutableArray arrayWithObject:w];
+            NSMutableArray *d0 = [NSMutableArray arrayWithObject:@0];
+            CGFloat cut = w.bounds.size.height * 0.33;
+            NSUInteger visited0 = 0;
+            for (NSUInteger i = 0; i < q0.count && visited0 < 1200; i++) {
+                UIView *v = q0[i];
+                int d = [d0[i] intValue];
+                visited0++;
+                if (v != w) {
+                    CGRect vr = [v convertRect:v.bounds toView:w];
+                    if (CGRectGetMinY(vr) <= cut && CGRectGetMaxY(vr) > 0) {
+                        UIView *target = GCTextAnchoredOpsBanner(v, w);
+                        if (target) {
+                            GCHideTopBannerAd(target, "ops-text");
+                            return;
+                        }
+                    }
+                }
+                if (d >= 8) continue;
+                for (UIView *c in v.subviews) {
+                    [q0 addObject:c];
+                    [d0 addObject:@(d + 1)];
+                }
+            }
+        }
+
+        // 通道①：形状 → 内容（沿用 0.9.124 A1 的解耦版）
         // 广度优先下潜 6 层、上限 900 节点。只找「顶部带 + 通栏」的候选，
         // 命中即停（一条横幅一次只处理一个，避免同一拍重复遍历大子树）。
         NSMutableArray *q = [NSMutableArray arrayWithObject:w];
