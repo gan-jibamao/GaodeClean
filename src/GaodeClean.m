@@ -18,7 +18,55 @@
 // ---- jibamao 个人标识（编译进 dylib，可用 strings 核对）----
 static NSString *const kGCAuthor      = @"jibamao";
 static NSString *const kGCRepo        = @"https://gan-jibamao.github.io/";
-static NSString *const kGCVersion     = @"0.9.124";
+static NSString *const kGCVersion     = @"0.9.125";
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  0.9.125（A1）：**偏好读取层** —— 设置项的数据来源
+//
+//  域名必须与 layout/Library/PreferenceLoader/Preferences/GaodeClean.plist
+//  里 `defaults` 的值完全一致，否则设置 App 里改了、tweak 读不到。
+//
+//  ★所有开关**默认关**（老大 2026-11-07 指令）：不存在键时返回 def，而每个调用点
+//    传的 def 都是 NO。这样「刚装上、还没进设置」的状态 = 插件不干预，
+//    用户必须自己去设置里逐项打开 —— 行为完全可预期。
+//
+//  读取失败（域不存在 / 值类型不对 / 键被删）一律回落到默认值，绝不崩。
+// ═══════════════════════════════════════════════════════════════════════════
+static NSString *const kGCPrefDomain = @"com.jibamao.gaodeclean";
+
+static BOOL GCPrefBool(NSString *key, BOOL def) {
+    if (!key.length) return def;
+    id v = nil;
+    @try {
+        NSUserDefaults *d = [[NSUserDefaults alloc] initWithSuiteName:kGCPrefDomain];
+        v = d ? [d objectForKey:key] : nil;
+    } @catch (__unused NSException *e) { v = nil; }
+    if ([v isKindOfClass:NSNumber.class]) return [(NSNumber *)v boolValue];
+    if ([v isKindOfClass:NSString.class]) {
+        NSString *s = [(NSString *)v lowercaseString];
+        if ([s isEqualToString:@"1"] || [s isEqualToString:@"yes"] || [s isEqualToString:@"true"]) return YES;
+        if ([s isEqualToString:@"0"] || [s isEqualToString:@"no"] || [s isEqualToString:@"false"]) return NO;
+    }
+    return def;
+}
+
+// 开关列表（每个调用点都传 NO 作默认值：默认关）
+#define GC_PREF_TOP_BANNER   @"hideTopBanner"       // 顶部运营/广告横幅
+#define GC_PREF_SPLASH_AD    @"hideSplashAd"        // 开屏广告
+#define GC_PREF_FOG          @"hideFog"             // 白雾 / 上拉闪白
+#define GC_PREF_BLUR         @"hideBlur"            // 顶部高斯模糊带
+#define GC_PREF_TABBAR_HINT  @"hideTabBarHint"      // 底栏「上拉发现」引导
+#define GC_PREF_ALIGN        @"alignWidgets"        // 控件位置归位
+#define GC_PREF_DARKEN       @"darkenWidgets"       // 深色模式统一压白
+#define GC_PREF_NARROW       @"narrowBar"           // 底栏胶囊缩窄
+
+// 便捷入口：一律默认 NO（关）
+#define GCOn(key)            GCPrefBool((key), NO)
+
+// 0.9.125（A6）：内置设置面板（双指长按打开）。
+//   独立文件 src/GCSettingPanel.m —— 纯 UIKit、零私有 API，
+//   不用 PreferenceLoader（那需要 Preferences.framework 头文件，SDK 里没有）。
+extern void GCInstallSettingGesture(void);
 
 // 0.9.18（A1）：底边间隙**按控件分开**，对表原生（搜索栏白底顶边 = 702.6pt）
 //   车机钮（连接车机 · WINDeviceInterconnectWidget）：原生底 652 → 间隙 50.6 → 取 50
@@ -2360,11 +2408,29 @@ static void Capture(id element) {
 // 0.9.4：统一窗口枚举入口（审计统一处理弃用警告；iOS 15+ 下 UIApplication.windows
 // 仍返回全部连接 scene 的窗口，对本插件「扫描广告窗口/清理」的用途语义更稳，
 // 故保留 .windows（场景 API 覆盖不到非前景 scene 的窗口），在此集中 suppress）。
+// 0.9.125（A7）：设置面板窗口（GCSettingPanel.m 创建）必须从「App 窗口」里排除。
+//   插件有 20 处调用本函数做全窗扫描（白雾 / 白蒙版 / 缩窄描边 / 广告窗 / 开屏守卫），
+//   面板若不排除：轻则每拍白扫一遍浪费，重则被当成「半透明白雾」直接隐藏 ——
+//   用户双指长按打开设置，面板一闪就没了。
+//   在唯一的窗口枚举入口做过滤，20 处调用一次覆盖，不会漏。
+extern BOOL GCPanelIsOwnWindow(UIWindow *w);
 static NSArray<UIWindow *> *GCAllWindows(void) {
+    NSArray<UIWindow *> *all;
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
-    return UIApplication.sharedApplication.windows;
+    all = UIApplication.sharedApplication.windows;
 #pragma clang diagnostic pop
+    // 绝大多数时刻没有面板窗口 —— 先判一次，命中就原样返回，零额外开销
+    BOOL anyPanel = NO;
+    for (UIWindow *w in all) {
+        if (GCPanelIsOwnWindow(w)) { anyPanel = YES; break; }
+    }
+    if (!anyPanel) return all;
+    NSMutableArray<UIWindow *> *out = [NSMutableArray arrayWithCapacity:all.count];
+    for (UIWindow *w in all) {
+        if (!GCPanelIsOwnWindow(w)) [out addObject:w];
+    }
+    return out;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -3773,6 +3839,7 @@ static void GCBtnTrace(UIWindow *win);             // probe57：前置声明
 //  ⚠ 只改 backgroundColor（模型层），不碰 frame/alpha/hidden。
 // ════════════════════════════════════════════════════════════════════
 static void GCStyleDarkenRoundWidgets(UIWindow *win) {
+    if (!GCOn(GC_PREF_DARKEN)) return;   // 0.9.125：设置开关（默认关）
     if (!win) return;
     if (!GCIsDarkAppearance(win)) return;    // 0.9.102：亮度判据（trait 不可信）
     static int busy;
@@ -4664,6 +4731,7 @@ static void GCStylePinTabItems(UIWindow *win) {
 //   四路并发，写 frame 会级联触发钩子，无守卫有自激风暴风险。
 static BOOL GCStylePinBusy = NO;
 static void GCStylePinWidgets(UIWindow *win) {
+    if (!GCOn(GC_PREF_ALIGN)) return;   // 0.9.125：设置开关（默认关）—— 关掉即完全不钉位
     if (GCStylePinBusy) {
 #ifdef GAODECLEAN_PROBE
         P8Busy++;
@@ -4722,6 +4790,7 @@ static void GCStylePinWidgets(UIWindow *win) {
 static GCStylePinDriver *GCStylePinDrv = nil;
 // 夹取主函数：只动胶囊 x/w（y/h 不动），伴生物按绝对几何同步 —— 幂等
 static void GCNarrowApply(UIView *anchor, BOOL isSearch) {
+    if (!GCOn(GC_PREF_NARROW)) return;   // 0.9.125：设置开关（默认关）
     if (!anchor || !anchor.window) return;
     // trial14：圆形风格全权接管；旧 240 夹取体退役（#if 0 保留备查）
     if (isSearch) GCStyleSearch(anchor); else GCStyleTab(anchor);
@@ -4947,6 +5016,7 @@ static void StripSlidablePan(void) {
     }
 }
 static void SweepFogOverlay(void) {
+    if (!GCOn(GC_PREF_FOG)) return;   // 0.9.125：设置开关（默认关）
     for (UIWindow *w in GCAllWindows()) {
         if (w.hidden || w.alpha < 0.02) continue;
         CGRect wb = w.bounds;
@@ -4991,6 +5061,7 @@ static void StripTabBarGestures(void) {
 }
 
 static void SealBlurOverlay(void) {
+    if (!GCOn(GC_PREF_BLUR)) return;   // 0.9.125：设置开关（默认关）
     Class mask = NSClassFromString(GCStrAt(90));
     if (mask) {
         SEL sh = @selector(setHidden:);
@@ -6118,6 +6189,7 @@ static void AlignMapTypeButton(UIView *capsule) {
 }
 
 static void AlignCornerWidgets(UIView *bar) {
+    if (!GCOn(GC_PREF_ALIGN)) return;   // 0.9.125：设置开关（默认关）
     if (!bar.window) return;
     UIWindow *win = bar.window;
     CGFloat barTop = [bar convertPoint:CGPointZero toView:win].y;
@@ -6365,6 +6437,7 @@ static void SweepTabBarHints(UIView *bar) {
 
 // item 级触发：item 一布局 / 一上树就查一次它自己。范围只有一棵小树。
 static void InstallTabBarHintHooks(void) {
+    if (!GCOn(GC_PREF_TABBAR_HINT)) return;   // 0.9.125：设置开关（默认关）
     TextGetterCache = [NSMutableDictionary dictionary];
     // 0.6.8：切到【首页】的那一瞬间就开快修窗（tick 检测最坏要等 200ms）。
     // 方法名拿不到就静默跳过 —— 上面 tick 里那条通道照样兜得住。
@@ -6424,6 +6497,7 @@ static void InstallTabBarHintHooks(void) {
 static NSInteger GCGuideLottieBlocked = 0;
 
 static void InstallTabBarGuideLottieBlock(void) {
+    if (!GCOn(GC_PREF_TABBAR_HINT)) return;   // 0.9.125：设置开关（默认关）
     Class cls = NSClassFromString(GCStrAt(149));
     SEL sel = NSSelectorFromString(GCStrAt(159));
     Method m = cls ? class_getInstanceMethod(cls, sel) : NULL;
@@ -6692,6 +6766,7 @@ static BOOL GCCIsAppOwnSplash(NSString *cn) {
 }
 
 static BOOL GCCIsSplashAd(UIView *v, UIWindow *win) {
+    if (!GCOn(GC_PREF_SPLASH_AD)) return NO;   // 0.9.125：设置开关（默认关）
     if (!v || v.hidden) return NO;
     NSString *cn = NSStringFromClass(v.class);
     if ([cn hasPrefix:GCStrAt(194)]) return NO;                    // 自己的视图
@@ -7208,6 +7283,7 @@ static UIView *GCBannerTopAncestor(UIView *v, UIWindow *win) {
 
 // 常驻扫描：每 3 拍（600ms）一次。横幅是异步落地的，不能只在启动窗口内跑。
 static void SweepTopBannerAds(void) {
+    if (!GCOn(GC_PREF_TOP_BANNER)) return;   // 0.9.125：设置开关（默认关）
     UIWindow *win = GCCMainWindow ?: (GCCMainWindow = [GCAllWindows() lastObject]);
     NSArray<UIWindow *> *wins = GCAllWindows();
     if (!win && wins.count) win = wins.lastObject;
@@ -7759,6 +7835,7 @@ static void InstallImmersiveStateHooks(void) {
 }
 
 static void InstallBarGeometryHooks(void) {
+    if (!GCOn(GC_PREF_ALIGN)) return;   // 0.9.125：设置开关（默认关）
     HookVoid(GCStrAt(269), GCStrAt(91), ^(id bar) {
         UIView *text = ObjectGetter(bar, GCStrAt(271));
         if ([text isKindOfClass:UIView.class]) text.hidden = YES;
@@ -7843,6 +7920,7 @@ static void InstallBarGeometryHooks(void) {
 }
 
 static void InstallBarContentHooks(void) {
+    if (!GCOn(GC_PREF_ALIGN)) return;   // 0.9.125：设置开关（默认关）
     // 0.4.50：hook didMoveToSuperview——app 重挂搜索栏时同步触发，父视图一被换立刻挂回 BarParent
     // 0.5.56：真正的机制查清了 —— app 切页时是把搜索栏 **removeFromSuperview**（不是 hidden，
     //         所以 0.5.54/0.5.55 的 layoutSubviews 强制可见 与 setHidden: 拦截全部无效）。
@@ -8018,167 +8096,172 @@ static void InstallPromoAndWidgetHooks(void) {
             view.hidden = YES; [ColdWidgets addObject:view];
         }
     });
-    // 0.9.15（A3）：**出生即藏** —— 只挂 layoutSubviews 还差一截。
-    //   diag 日志铁证：1.187s 上窗那一刻 tag 已是 template_mainmapRightBottom，
-    //   而 app 在同一毫秒内就把 frame 摆到 (339,281)=窗口系(339,340)；
-    //   首次 layoutSubviews 要等到 1.229s —— 中间 42ms（≈2.5 帧）足以渲染。
-    //   这条钩子在上窗瞬间按住它：判定用**精确 tag**，不会误伤同类的
-    //   「+/图层」圆钮（日志里那是 template_mainmapRightTop，不上屏就摆位不同）。
-    HookVoid(GCStrAt(128), GCStrAt(123), ^(UIView *view) {
-        if (view.window && !objc_getAssociatedObject(view, &AlignedKey) && IsRightBottomWidget(view)) {
-            view.hidden = YES; [ColdWidgets addObject:view];
-        }
-    });
-    // ==========================================================================
-    // 0.9.16（A1）：**真凶在这里** —— App 原生「轻量控件组」容器。
-    //   七轮（0.9.9~0.9.15）全部按 WINAJXCombinedWidgetView 施工，而 diag2 日志
-    //   逐拍铁证：中部裸露的 ⊙+↰ 胶囊是 WINLiteWidgetGroupView(339,340,44x88)
-    //   自身可见 + 它的毛玻璃 UIVisualEffectView + WINLocationView(⊙)；
-    //   同一时刻我们的控件是 hid1（藏得好好的）。
-    //   ⇒ 「藏宿主」挡不住「容器自身」，这就是为什么 0.9.7 也露、七轮修不掉。
-    //   判据用几何排除右上「+/图层」胶囊（它出生就在 y≈69 = 窗高 3.6%）：
-    //   只对 y 落在窗高 25% 以下的实例动手。
-    HookVoid(GCStrAt(132), GCStrAt(123), ^(UIView *v) {
-        // ★0.9.116（A2''）：与 setHidden: 那条同源 —— 已钉位就不按住。
-        if (!v.window || !GCCIsLiteGroupCapsule(v)) return;
-        BOOL pinned = objc_getAssociatedObject(v, &AlignedKey) != nil;
-        // ★0.9.121（A5）：补「钉位包络」判据，替代纯计时的 !SearchBarSettled。
-        //   铁证：本机首页是**圆钮底栏、没有搜索栏**（真机录像 5.997s 全程底栏
-        //   三个圆钮，无 WINQuickSearchBarV2）⇒ SearchBarSettled **永远是 NO**
-        //   ⇒ 这条钩子对 LiteGroup 外壳**永久按住**。而 pin 通道优先选的就是它
-        //     （GCStylePinWidgetsInner: cap = CachedLiteGroup ?: CachedRight）
-        //   ⇒ 就算 CachedRight 修对了，外壳还压着，屏幕照样看不见 = 第二道独立锁。
-        //   漏掉它，A1~A4 全部白修。
-        //   新判据：位置已落在胶囊钉位包络内 ⇒ 放行（不再依赖搜索栏是否存在）。
-        if (!pinned && !SearchBarSettled && !GCWidgetAtPinnedSlot(v)) {
-            v.hidden = YES; [ColdWidgets addObject:v];
-        }
-    });
-    // ★0.9.117（A1）：**胶囊容器 setHidden: 改为「拦截」而非「回调」**。
-    //   0.9.116 那条 HookVoid 只做「我们不主动按」，App 自己调 setHidden:YES 时
-    //   仍然直通 —— 探针 t=3.1s 实测 hid=1 就是这么来的。
-    //
-    //   ★★0.9.118 修正：类名拦错了。
-    //   探针 t=3.1s 的 P7Inst 段铁证：
-    //     右下控件 WINAJXCombinedWidgetView  win={{339,667},{44,88}} hid=1 key=1 ★缓存
-    //     路线按钮 WINRouteLineWidgetView     win={{339,711},{44,44}} hid=0 key=1
-    //     ⊙       WINLocationView            win={{339,667},{44,44}} hid=0
-    //   而被隐藏的容器是 **WINAJXCombinedWidgetView**，不是 WINLiteWidgetGroupView。
-    //   后者在 1.6s 就被 App 销毁（dump 里有 DISC Lite→新实例 new=0x0），
-    //   0.9.117 的 A1 挂在它身上，等于拦了个已经不存在的东西 ——
-    //   这解释了为什么 0.9.117 车机钮提前到 1.8s、胶囊却仍在 5.0s。
-    //
-    //   但 WINAJXCombinedWidgetView 是**共用类**：右上「+/图层」胶囊用的也是它。
-    //   所以必须用精确 tag 判据 IsRightBottomWidget（含 rightbottom/locate/location）
-    //   把右下那颗挑出来，绝不能用类名一刀切。
-    {
-        Class capCls = NSClassFromString(GCStrAt(128));
-        if (capCls) {
-            SEL sh = @selector(setHidden:);
-            Method m = class_getInstanceMethod(capCls, sh);
-            if (m) {
-                IMP orig = method_getImplementation(m);
-                const char *t = method_getTypeEncoding(m);
-                Replace(capCls, sh, imp_implementationWithBlock(^(UIView *self, BOOL hidden) {
-                    if (hidden && IsRightBottomWidget(self) &&
-                        GCShouldProtectPinnedWidget(self)) {
-                        // 已就位却被隐藏 → 拒绝本次隐藏（不递归：直接不调原实现）
-                        return;
-                    }
-                    if (!hidden && IsRightBottomWidget(self) && self.window &&
-                        !objc_getAssociatedObject(self, &AlignedKey)) {
-                        // 未钉位 → 继续沿用老规矩按住
-                        ((void (*)(id, SEL, BOOL))orig)(self, sh, YES);
-                        [ColdWidgets addObject:self];
-                        return;
-                    }
-                    ((void (*)(id, SEL, BOOL))orig)(self, sh, hidden);
-                }), t);
+    // ★0.9.125（A5）：以下整段是「控件归位」——按住 → 钉位 → 布局重排三条链，
+    //   缺任何一条都会让控件永久隐藏或乱跑，所以必须**整体**受一个开关控制。
+    //   默认关：装上插件后不干预任何控件位置，用户自己去设置里打开。
+    if (GCOn(GC_PREF_ALIGN)) {
+        // 0.9.15（A3）：**出生即藏** —— 只挂 layoutSubviews 还差一截。
+        //   diag 日志铁证：1.187s 上窗那一刻 tag 已是 template_mainmapRightBottom，
+        //   而 app 在同一毫秒内就把 frame 摆到 (339,281)=窗口系(339,340)；
+        //   首次 layoutSubviews 要等到 1.229s —— 中间 42ms（≈2.5 帧）足以渲染。
+        //   这条钩子在上窗瞬间按住它：判定用**精确 tag**，不会误伤同类的
+        //   「+/图层」圆钮（日志里那是 template_mainmapRightTop，不上屏就摆位不同）。
+        HookVoid(GCStrAt(128), GCStrAt(123), ^(UIView *view) {
+            if (view.window && !objc_getAssociatedObject(view, &AlignedKey) && IsRightBottomWidget(view)) {
+                view.hidden = YES; [ColdWidgets addObject:view];
+            }
+        });
+        // ==========================================================================
+        // 0.9.16（A1）：**真凶在这里** —— App 原生「轻量控件组」容器。
+        //   七轮（0.9.9~0.9.15）全部按 WINAJXCombinedWidgetView 施工，而 diag2 日志
+        //   逐拍铁证：中部裸露的 ⊙+↰ 胶囊是 WINLiteWidgetGroupView(339,340,44x88)
+        //   自身可见 + 它的毛玻璃 UIVisualEffectView + WINLocationView(⊙)；
+        //   同一时刻我们的控件是 hid1（藏得好好的）。
+        //   ⇒ 「藏宿主」挡不住「容器自身」，这就是为什么 0.9.7 也露、七轮修不掉。
+        //   判据用几何排除右上「+/图层」胶囊（它出生就在 y≈69 = 窗高 3.6%）：
+        //   只对 y 落在窗高 25% 以下的实例动手。
+        HookVoid(GCStrAt(132), GCStrAt(123), ^(UIView *v) {
+            // ★0.9.116（A2''）：与 setHidden: 那条同源 —— 已钉位就不按住。
+            if (!v.window || !GCCIsLiteGroupCapsule(v)) return;
+            BOOL pinned = objc_getAssociatedObject(v, &AlignedKey) != nil;
+            // ★0.9.121（A5）：补「钉位包络」判据，替代纯计时的 !SearchBarSettled。
+            //   铁证：本机首页是**圆钮底栏、没有搜索栏**（真机录像 5.997s 全程底栏
+            //   三个圆钮，无 WINQuickSearchBarV2）⇒ SearchBarSettled **永远是 NO**
+            //   ⇒ 这条钩子对 LiteGroup 外壳**永久按住**。而 pin 通道优先选的就是它
+            //     （GCStylePinWidgetsInner: cap = CachedLiteGroup ?: CachedRight）
+            //   ⇒ 就算 CachedRight 修对了，外壳还压着，屏幕照样看不见 = 第二道独立锁。
+            //   漏掉它，A1~A4 全部白修。
+            //   新判据：位置已落在胶囊钉位包络内 ⇒ 放行（不再依赖搜索栏是否存在）。
+            if (!pinned && !SearchBarSettled && !GCWidgetAtPinnedSlot(v)) {
+                v.hidden = YES; [ColdWidgets addObject:v];
+            }
+        });
+        // ★0.9.117（A1）：**胶囊容器 setHidden: 改为「拦截」而非「回调」**。
+        //   0.9.116 那条 HookVoid 只做「我们不主动按」，App 自己调 setHidden:YES 时
+        //   仍然直通 —— 探针 t=3.1s 实测 hid=1 就是这么来的。
+        //
+        //   ★★0.9.118 修正：类名拦错了。
+        //   探针 t=3.1s 的 P7Inst 段铁证：
+        //     右下控件 WINAJXCombinedWidgetView  win={{339,667},{44,88}} hid=1 key=1 ★缓存
+        //     路线按钮 WINRouteLineWidgetView     win={{339,711},{44,44}} hid=0 key=1
+        //     ⊙       WINLocationView            win={{339,667},{44,44}} hid=0
+        //   而被隐藏的容器是 **WINAJXCombinedWidgetView**，不是 WINLiteWidgetGroupView。
+        //   后者在 1.6s 就被 App 销毁（dump 里有 DISC Lite→新实例 new=0x0），
+        //   0.9.117 的 A1 挂在它身上，等于拦了个已经不存在的东西 ——
+        //   这解释了为什么 0.9.117 车机钮提前到 1.8s、胶囊却仍在 5.0s。
+        //
+        //   但 WINAJXCombinedWidgetView 是**共用类**：右上「+/图层」胶囊用的也是它。
+        //   所以必须用精确 tag 判据 IsRightBottomWidget（含 rightbottom/locate/location）
+        //   把右下那颗挑出来，绝不能用类名一刀切。
+        {
+            Class capCls = NSClassFromString(GCStrAt(128));
+            if (capCls) {
+                SEL sh = @selector(setHidden:);
+                Method m = class_getInstanceMethod(capCls, sh);
+                if (m) {
+                    IMP orig = method_getImplementation(m);
+                    const char *t = method_getTypeEncoding(m);
+                    Replace(capCls, sh, imp_implementationWithBlock(^(UIView *self, BOOL hidden) {
+                        if (hidden && IsRightBottomWidget(self) &&
+                            GCShouldProtectPinnedWidget(self)) {
+                            // 已就位却被隐藏 → 拒绝本次隐藏（不递归：直接不调原实现）
+                            return;
+                        }
+                        if (!hidden && IsRightBottomWidget(self) && self.window &&
+                            !objc_getAssociatedObject(self, &AlignedKey)) {
+                            // 未钉位 → 继续沿用老规矩按住
+                            ((void (*)(id, SEL, BOOL))orig)(self, sh, YES);
+                            [ColdWidgets addObject:self];
+                            return;
+                        }
+                        ((void (*)(id, SEL, BOOL))orig)(self, sh, hidden);
+                    }), t);
+                }
             }
         }
-    }
-    // ★0.9.117（A2）：车机钮 setHidden: 同样改「拦截」。
-    //   探针 t=3.1s 铁证：WINDeviceInterconnectWidget win={{10,608},{44,44}} hid=1 key=1
-    //   —— 位置对、已钉位、仍被 App 藏。三条安全阀同 A1。
-    {
-        Class carCls = NSClassFromString(GCStrAt(140));
-        if (carCls) {
-            SEL sh = @selector(setHidden:);
-            Method m = class_getInstanceMethod(carCls, sh);
-            if (m) {
-                IMP orig = method_getImplementation(m);
-                const char *t = method_getTypeEncoding(m);
-                Replace(carCls, sh, imp_implementationWithBlock(^(UIView *self, BOOL hidden) {
-                    if (hidden && GCShouldProtectPinnedWidget(self)) {
-                        return;      // 已就位却被隐藏 → 拒绝
-                    }
-                    if (!hidden && self.window &&
-                        !objc_getAssociatedObject(self, &AlignedKey)) {
-                        ((void (*)(id, SEL, BOOL))orig)(self, sh, YES);
-                        [ColdWidgets addObject:self];
-                        return;
-                    }
-                    ((void (*)(id, SEL, BOOL))orig)(self, sh, hidden);
-                }), t);
+        // ★0.9.117（A2）：车机钮 setHidden: 同样改「拦截」。
+        //   探针 t=3.1s 铁证：WINDeviceInterconnectWidget win={{10,608},{44,44}} hid=1 key=1
+        //   —— 位置对、已钉位、仍被 App 藏。三条安全阀同 A1。
+        {
+            Class carCls = NSClassFromString(GCStrAt(140));
+            if (carCls) {
+                SEL sh = @selector(setHidden:);
+                Method m = class_getInstanceMethod(carCls, sh);
+                if (m) {
+                    IMP orig = method_getImplementation(m);
+                    const char *t = method_getTypeEncoding(m);
+                    Replace(carCls, sh, imp_implementationWithBlock(^(UIView *self, BOOL hidden) {
+                        if (hidden && GCShouldProtectPinnedWidget(self)) {
+                            return;      // 已就位却被隐藏 → 拒绝
+                        }
+                        if (!hidden && self.window &&
+                            !objc_getAssociatedObject(self, &AlignedKey)) {
+                            ((void (*)(id, SEL, BOOL))orig)(self, sh, YES);
+                            [ColdWidgets addObject:self];
+                            return;
+                        }
+                        ((void (*)(id, SEL, BOOL))orig)(self, sh, hidden);
+                    }), t);
+                }
             }
         }
-    }
-    // ★0.9.117（A2'）：上窗瞬间也扶正一次 —— 覆盖「创建时自带 hidden=YES、
-    //   全程不调 setHidden:」这条路径（0.9.116 实测它会把控件按到 5.0s）。
-    HookVoid(GCStrAt(140), GCStrAt(123), ^(UIView *w) {
-        if (!w.window) return;
-        if (w.hidden && GCShouldProtectPinnedWidget(w)) w.hidden = NO;
-    });
-    // 0.9.14（A6 回退）：0.9.9（A3）给车机圆钮补的 setHidden:/setAlpha: 两条拦截已移除。
-    //   与右下钮同源的「未对齐拒绝显示」逻辑 —— 车机钮虽然靠类名能被 CachedCar 稳定找到
-    //   （不像右下钮依赖 getItemTag），但压 alpha 的自伤点（A2/A3 时报过「hidden 放行了、
-    //   控件仍全透明」）与拦截带来的显示时序扰动没有存在必要。0.9.7 只挂 layoutSubviews
-    //   一条，实测无跳动、无裸奔，恢复原样。
-    // 0.4.47：拦截两圆钮 setFrame:，对齐后 y 钉死，杜绝 app 挪回原生位置闪跳
-    HookWidgetSetFrame(GCStrAt(140), GCGapCar);
-    HookWidgetSetFrame(GCStrAt(128), GCGapCapsule);
-    // ---- 0.9.19（A3）：2D/3D（地图类型）圆钮 --------------------------------------
-    // 本机实测类名 = WINPermanentCompassView（Amap 17.00.2，44x44，父类 MapWidgetContainerView）。
-    // 真机 diag 铁证：App 只布局一次，且把它锚在**胶囊的冷启动瞬态位**(339,340) 上
-    //   ⇒ 按钮被摆到 y=283（原生 536.7），与「胶囊顶 − 57.3」的原生关系刚好差 254pt。
-    // 这里在它每次布局/上窗后立刻按「胶囊顶 − GCGapMapType」纠正，不必等 200ms 轮询；
-    //   未定格期间由 AlignMapTypeButton 内部判空返回（绝不拿瞬态位当锚）。
-    // ★0.9.114（A1）：这两个钩子整段删除。
-    //   它们挂在 WINPermanentCompassView（2D/3D 钮的原生类）的 layoutSubviews /
-    //   didMoveToWindow 上，回调里却去摆 AlignMapTypeButton(CachedRight)。
-    //   而 0.9.99 已把 2D/3D 钮常驻隐藏 —— 于是 GCCFindMapTypeButton 找不到真目标，
-    //   落到 ③ 兜底「BFS 序里第一个 40..48 方形」，抓到的正是右上胶囊里 44×44 的
-    //   「+」号，把它搬到「胶囊顶 − 13.3」。App 布局又把它拉回 ⇒ 两个通道拉锯。
-    //   真机录屏逐帧铁证（120fps，228 帧）：
-    //     t=1.000s +号出现 → 1.042~1.208s 消失 → 1.250s 回来
-    //     → 1.333~1.417s 再消失 → 1.458s 起稳定
-    //   即「消失→回来→再消失」闪两次，全程约 0.42s，与用户反馈完全一致。
-    //   2D/3D 既已移除，这套摆位逻辑本身也失去意义，一并停用。
-    // 0.5.19：拦截天气行 setFrame:，对齐后钉死到车机钮右边
-    // 0.5.1：线路按钮原生 hid=1，setHidden: 强制 NO，app 再藏也压不住
-    {
-        Class rc = NSClassFromString(GCStrAt(141));
-        SEL sh = @selector(setHidden:);
-        Method sm = class_getInstanceMethod(rc, sh);
-        if (sm) {
-            IMP so = method_getImplementation(sm);
-            Replace(rc, sh, imp_implementationWithBlock(^(UIView *self, __unused BOOL hidden) {
-                ((void (*)(id, SEL, BOOL))so)(self, sh, NO);
-            }), method_getTypeEncoding(sm));
+        // ★0.9.117（A2'）：上窗瞬间也扶正一次 —— 覆盖「创建时自带 hidden=YES、
+        //   全程不调 setHidden:」这条路径（0.9.116 实测它会把控件按到 5.0s）。
+        HookVoid(GCStrAt(140), GCStrAt(123), ^(UIView *w) {
+            if (!w.window) return;
+            if (w.hidden && GCShouldProtectPinnedWidget(w)) w.hidden = NO;
+        });
+        // 0.9.14（A6 回退）：0.9.9（A3）给车机圆钮补的 setHidden:/setAlpha: 两条拦截已移除。
+        //   与右下钮同源的「未对齐拒绝显示」逻辑 —— 车机钮虽然靠类名能被 CachedCar 稳定找到
+        //   （不像右下钮依赖 getItemTag），但压 alpha 的自伤点（A2/A3 时报过「hidden 放行了、
+        //   控件仍全透明」）与拦截带来的显示时序扰动没有存在必要。0.9.7 只挂 layoutSubviews
+        //   一条，实测无跳动、无裸奔，恢复原样。
+        // 0.4.47：拦截两圆钮 setFrame:，对齐后 y 钉死，杜绝 app 挪回原生位置闪跳
+        HookWidgetSetFrame(GCStrAt(140), GCGapCar);
+        HookWidgetSetFrame(GCStrAt(128), GCGapCapsule);
+        // ---- 0.9.19（A3）：2D/3D（地图类型）圆钮 --------------------------------------
+        // 本机实测类名 = WINPermanentCompassView（Amap 17.00.2，44x44，父类 MapWidgetContainerView）。
+        // 真机 diag 铁证：App 只布局一次，且把它锚在**胶囊的冷启动瞬态位**(339,340) 上
+        //   ⇒ 按钮被摆到 y=283（原生 536.7），与「胶囊顶 − 57.3」的原生关系刚好差 254pt。
+        // 这里在它每次布局/上窗后立刻按「胶囊顶 − GCGapMapType」纠正，不必等 200ms 轮询；
+        //   未定格期间由 AlignMapTypeButton 内部判空返回（绝不拿瞬态位当锚）。
+        // ★0.9.114（A1）：这两个钩子整段删除。
+        //   它们挂在 WINPermanentCompassView（2D/3D 钮的原生类）的 layoutSubviews /
+        //   didMoveToWindow 上，回调里却去摆 AlignMapTypeButton(CachedRight)。
+        //   而 0.9.99 已把 2D/3D 钮常驻隐藏 —— 于是 GCCFindMapTypeButton 找不到真目标，
+        //   落到 ③ 兜底「BFS 序里第一个 40..48 方形」，抓到的正是右上胶囊里 44×44 的
+        //   「+」号，把它搬到「胶囊顶 − 13.3」。App 布局又把它拉回 ⇒ 两个通道拉锯。
+        //   真机录屏逐帧铁证（120fps，228 帧）：
+        //     t=1.000s +号出现 → 1.042~1.208s 消失 → 1.250s 回来
+        //     → 1.333~1.417s 再消失 → 1.458s 起稳定
+        //   即「消失→回来→再消失」闪两次，全程约 0.42s，与用户反馈完全一致。
+        //   2D/3D 既已移除，这套摆位逻辑本身也失去意义，一并停用。
+        // 0.5.19：拦截天气行 setFrame:，对齐后钉死到车机钮右边
+        // 0.5.1：线路按钮原生 hid=1，setHidden: 强制 NO，app 再藏也压不住
+        {
+            Class rc = NSClassFromString(GCStrAt(141));
+            SEL sh = @selector(setHidden:);
+            Method sm = class_getInstanceMethod(rc, sh);
+            if (sm) {
+                IMP so = method_getImplementation(sm);
+                Replace(rc, sh, imp_implementationWithBlock(^(UIView *self, __unused BOOL hidden) {
+                    ((void (*)(id, SEL, BOOL))so)(self, sh, NO);
+                }), method_getTypeEncoding(sm));
+            }
         }
-    }
-    cls = NSClassFromString(GCStrAt(128));
-    sel = @selector(setHidden:);
-    method = class_getInstanceMethod(cls, sel);
-    if (method) {
-        IMP original = method_getImplementation(method);
-        Replace(cls, sel, imp_implementationWithBlock(^(UIView *self, BOOL hidden) {
-            // 0.9.14（A1 回退）：W1 系列的「未对齐拒绝显示」已全量移除。
-            // 六轮复验 + 0.9.7 对照实证：拦截与 app 布局打仗是裸露根源，
-            // 0.9.7「不干预 + AlignOneWidget 找到才搬」才是正确语义。
-            // setHidden: 直通，只保留 IsHiddenMapPromo 强制隐藏。
-            ((void (*)(id, SEL, BOOL))original)(self, sel, hidden || IsHiddenMapPromo(self));
-        }), method_getTypeEncoding(method));
+        cls = NSClassFromString(GCStrAt(128));
+        sel = @selector(setHidden:);
+        method = class_getInstanceMethod(cls, sel);
+        if (method) {
+            IMP original = method_getImplementation(method);
+            Replace(cls, sel, imp_implementationWithBlock(^(UIView *self, BOOL hidden) {
+                // 0.9.14（A1 回退）：W1 系列的「未对齐拒绝显示」已全量移除。
+                // 六轮复验 + 0.9.7 对照实证：拦截与 app 布局打仗是裸露根源，
+                // 0.9.7「不干预 + AlignOneWidget 找到才搬」才是正确语义。
+                // setHidden: 直通，只保留 IsHiddenMapPromo 强制隐藏。
+                ((void (*)(id, SEL, BOOL))original)(self, sel, hidden || IsHiddenMapPromo(self));
+            }), method_getTypeEncoding(method));
+        }
     }
 }
 
@@ -8356,6 +8439,14 @@ __attribute__((constructor)) static void Initialize(void) {
                 }
 #endif
                 [pdl addToRunLoop:NSRunLoop.mainRunLoop forMode:NSRunLoopCommonModes];
+            }
+            // ★0.9.125（A6）：挂「双指长按打开设置」手势。
+            //   key window 此刻可能还没设好（App 还在建首页），所以做几拍重试；
+            //   GCInstallSettingGesture 内部有 installed 幂等标记，重复调用无副作用。
+            GCInstallSettingGesture();
+            for (int i = 1; i <= 6; i++) {
+                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(i * 0.5 * NSEC_PER_SEC)),
+                               dispatch_get_main_queue(), ^{ GCInstallSettingGesture(); });
             }
         });
 
