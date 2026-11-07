@@ -22,7 +22,7 @@ include $(THEOS)/makefiles/common.mk
 TWEAK_NAME = GaodeClean
 
 # 源码与本地链完全同源：src/GaodeClean.m（+ GCCGeometry.h）
-GaodeClean_FILES = src/GaodeClean.m src/GCSettingPanel.m
+GaodeClean_FILES = src/GaodeClean.m
 GaodeClean_CFLAGS = -fobjc-arc -fmodules -Isrc -Wall -Wextra -Wno-unused-parameter \
                     -fvisibility=hidden -fno-ident
 # 0.9.21（A1）加固：-Wl,-x 剥掉全部本地符号，-Wl,-dead_strip 去死代码；

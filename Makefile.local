@@ -46,7 +46,7 @@ OUT        ?= dist
 # 0.9.18：打包用的 control（调试包可传 CONTROL=... 带 +diag3 版本，避免产出
 #   名字冒充正式包、内容却是调试构建的 deb —— 本轮就踩过这个坑）
 CONTROL    ?= control
-SRC        := src/GaodeClean.m src/GCSettingPanel.m
+SRC        := src/GaodeClean.m
 HDR        := src/GCCGeometry.h
 
 # 0.9.14（A9）：正式包剥离诊断日志（GCLog → 空操作）。
@@ -140,11 +140,6 @@ check:
 	@echo "check: 外壳放行单测"
 	@gcc -O2 -Wall -Wextra -o /tmp/shell_release_test tests/shell_release_test.c -lm \
 	  && /tmp/shell_release_test | tail -3
-# 0.9.125（A8）：设置项一致性 —— 锁住「tweak 侧键名」与「面板侧键名」完全对齐。
-#   两边任一改了忘了另一边，症状是「开关点了没反应」，上机才发现最贵。
-	@echo "check: 设置项一致性单测"
-	@gcc -O2 -Wall -Wextra -o /tmp/prefs_test tests/prefs_test.c \
-	  && /tmp/prefs_test | tail -3
 # 0.9.20（A2）：混淆回环自测 —— 用与运行时同一份解码数学把 295 条串解回明文，
 # 逐条比对 + 校验头内 FNV 摘要；这一步保证「加密后仍 100% 解得原串」。
 	@$(CLANG) -O2 -Wall -Wextra -I src -o /tmp/obf_selftest scripts/obf_selftest.c \

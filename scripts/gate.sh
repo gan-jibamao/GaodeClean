@@ -70,7 +70,7 @@ echo "[1/4] 探针口径语法 -fsyntax-only（-DGAODECLEAN_PROBE=1）"
 if [ -d "$SDK" ]; then
     if clang -target arm64-apple-ios15.0 -isysroot "$SDK" -fobjc-arc -fmodules -O2 \
         -Wall -Wextra -Wno-unused-parameter -Wno-format-security -I src \
-        -fvisibility=hidden -DGAODECLEAN_PROBE=1 -fsyntax-only src/GaodeClean.m src/GCSettingPanel.m 2>/tmp/gc_gate_syntax.log
+        -fvisibility=hidden -DGAODECLEAN_PROBE=1 -fsyntax-only src/GaodeClean.m 2>/tmp/gc_gate_syntax.log
     then ok "0 error 0 warning"; else bad "语法/警告未通过（见 /tmp/gc_gate_syntax.log）"; fi
 else
     warn "跳过（无 SDK）"

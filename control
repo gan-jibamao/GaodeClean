@@ -1,12 +1,9 @@
 Package: com.jibamao.gaodeclean
 Name: GaodeClean 高德精简
-Version: 0.9.125
+Version: 0.9.124
 Architecture: iphoneos-arm64
-Description: 高德精简，功能可开关。
+Description: 高德无设置，无广告。
  .
- 打开设置：在高德地图主界面**双指长按**任意位置。
- .
- 全部开关默认关闭，进设置按需打开。
  Sileo 添加源 https://gan-jibamao.github.io，搜 GaodeClean 安装。
  装完注销（sbreload）或重启用户空间，再开高德。
 Maintainer: jibamao
