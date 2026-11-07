@@ -72,6 +72,25 @@ static int looks_like_close(const char *cn, const char *al, int interactive) {
 typedef struct { double x, y, w, h; } R;
 static R rect(double x, double y, double w, double h) { R r = {x, y, w, h}; return r; }
 
+// ★0.9.126（A1）：纯结构判据（与源文件 GCCIsBannerStripShape 逐行对应）
+//   完全不看文案 —— 只看宽/高/顶部带。三次漏网的根因就是拿文案当判据。
+static int is_banner_strip_shape(R r, double ww, double wh) {
+    if (ww < 1 || wh < 1) return 0;
+    if (!isfinite(r.w) || !isfinite(r.h)) return 0;
+    if (r.w < ww * 0.45 || r.w > ww * 0.85) return 0;   // 一条通栏（上界避开满宽搜索框）
+    if (r.h < 20 || r.h > 160) return 0;                // 一条扁条
+    if (r.y + r.h / 2 > wh * 0.33) return 0;            // 顶部带（用中心判）
+    return 1;
+}
+
+// ★0.9.126：关闭控件的双几何约束（与源文件 GCCStripHasRightClose 的几何部分对应）
+//   relX/relY = 关闭控件中心相对整条横幅的位置（0..1）
+static int is_close_at_right(double relX, double relY) {
+    if (relX < 0.85) return 0;                      // 最右侧 15%
+    if (relY < 0.15 || relY > 0.85) return 0;       // 大致居中（±35%）
+    return 1;
+}
+
 // 形状判据（与源文件 GCCIsTopBannerShape 逐行对应）
 static int is_top_banner_shape(R r, double ww, double wh) {
     double w = r.w, h = r.h;
@@ -312,6 +331,73 @@ int main(void) {
         // ③ 文本节点必须在顶部带内（POI 卡片的【】在中部）
         ck(90.7 <= WH * 0.33, "真机文案 y=90.7pt（10.6% 屏高）→ 在顶部带内");
         ck(!(420.0 <= WH * 0.33), "中部 POI 文案 y=420pt（49%）→ 排除");
+    }
+
+    // ★0.9.126（A1）：纯结构通道 —— 三次漏网换来的结论
+    //   0.9.123 靠【】、0.9.124 靠【】+共同祖先，老大换了两次文案就漏了两次。
+    //   这条通道完全不看文案，只看几何 + 结构。
+    printf("\n[11] 纯结构通道（0.9.126 A1）—— 不看任何文案\n");
+    {
+        // 三条真机截图实测几何（1179×2556 @3x → 393×852pt）
+        ck(is_banner_strip_shape(rect(66.7, 75.7, 259.7, 30.6), WW, WH),
+           "签到红包 66.7/75.7/259.7x30.6（66% 宽）→ 命中");
+        ck(is_banner_strip_shape(rect(69.7, 75.7, 256.7, 30.6), WW, WH),
+           "出行补贴 69.7/75.7/256.7x30.6（65% 宽）→ 命中");
+        ck(is_banner_strip_shape(rect(66.7, 75.7, 259.7, 30.6), WW, WH),
+           "吃喝玩乐 同几何 → 命中（**文案不同不影响判定**）");
+
+        // ★核心：这三条的文案分别含【】、含【】、不含【】—— 判据必须一致命中
+        ck(is_banner_strip_shape(rect(66.7, 75.7, 259.7, 30.6), WW, WH) &&
+           is_banner_strip_shape(rect(69.7, 75.7, 256.7, 30.6), WW, WH) &&
+           is_banner_strip_shape(rect(66.7, 75.7, 259.7, 30.6), WW, WH),
+           "★ 三条文案完全不同（含【】/含【】/不含【】）→ 结构判据一律命中");
+
+        // 其它机型留余量
+        ck(is_banner_strip_shape(rect(46.0, 76.0, 300.0, 32.0), WW, WH),
+           "大机型变体 300pt 宽（76%）→ 命中，有余量");
+
+        printf("\n[12] 结构通道的防误伤（误伤比漏更严重）\n");
+        // 天气行：真机 y≈735（86% 屏高），远在顶部带外
+        ck(!is_banner_strip_shape(rect(10, 735, 373, 30), WW, WH),
+           "天气行 y=735（86% 屏高）→ 排除");
+        // 搜索栏：真机 y≈702
+        ck(!is_banner_strip_shape(rect(24, 702, 345, 44), WW, WH),
+           "搜索栏 y=702 → 排除");
+        // 搜索框顶部变体：宽 88% 超过上界
+        ck(!is_banner_strip_shape(rect(24, 60, 345, 44), WW, WH),
+           "搜索框顶部变体 88% 宽 → 排除（上界 85%）");
+        // 右上 +/图层 胶囊：窄
+        ck(!is_banner_strip_shape(rect(339, 52, 44, 65), WW, WH),
+           "右上胶囊 44x65（11% 宽）→ 排除");
+        // 右下 ⊙/↰
+        ck(!is_banner_strip_shape(rect(339, 667, 44, 88), WW, WH),
+           "右下胶囊 → 排除");
+        // 底栏
+        ck(!is_banner_strip_shape(rect(80, 589, 233, 54), WW, WH),
+           "底栏三圆钮区 y=589 → 排除");
+        // 窄气泡
+        ck(!is_banner_strip_shape(rect(150, 80, 100, 30), WW, WH),
+           "窄气泡 25% 宽 → 排除");
+        // 全屏广告（归开屏守卫管，这里不能抢）
+        ck(!is_banner_strip_shape(rect(0, 0, 393, 852), WW, WH),
+           "全屏 393x852 → 排除（超高）");
+        // 顶部大容器
+        ck(!is_banner_strip_shape(rect(0, 60, 393, 200), WW, WH),
+           "顶部容器 393x200 → 排除（超高）");
+        // 太扁的
+        ck(!is_banner_strip_shape(rect(66, 76, 260, 12), WW, WH),
+           "高 12pt → 排除（不像横幅）");
+
+        printf("\n[13] 关闭控件的双几何约束（0.9.126 新增第二道）\n");
+        // 真机实测：✕ 在横幅内相对 x=94.9%、y=45.5%
+        ck(is_close_at_right(0.949, 0.455), "真机 ✕ 94.9% / 45.5% → 认");
+        ck(!is_close_at_right(0.60, 0.50), "相对 x=60% → 不认（太靠左）");
+        ck(!is_close_at_right(0.80, 0.50), "相对 x=80% → 不认（未达 85% 门槛）");
+        ck(is_close_at_right(0.86, 0.50), "相对 x=86% → 认（刚过门槛）");
+        ck(!is_close_at_right(0.95, 0.05), "x 对但 y=5%（贴边）→ 不认");
+        ck(!is_close_at_right(0.95, 0.95), "x 对但 y=95% → 不认");
+        ck(is_close_at_right(0.95, 0.20), "x 对 + y=20%（51%−31%，在 ±35% 内）→ 认");
+        ck(!is_close_at_right(0.95, 0.10), "x 对 + y=10%（差 40%）→ 不认");
     }
 
     printf("\n═══════════════════════════════════════\n");

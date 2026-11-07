@@ -18,7 +18,7 @@
 // ---- jibamao 个人标识（编译进 dylib，可用 strings 核对）----
 static NSString *const kGCAuthor      = @"jibamao";
 static NSString *const kGCRepo        = @"https://gan-jibamao.github.io/";
-static NSString *const kGCVersion     = @"0.9.124";
+static NSString *const kGCVersion     = @"0.9.126";
 
 // 0.9.18（A1）：底边间隙**按控件分开**，对表原生（搜索栏白底顶边 = 702.6pt）
 //   车机钮（连接车机 · WINDeviceInterconnectWidget）：原生底 652 → 间隙 50.6 → 取 50
@@ -7025,8 +7025,92 @@ static BOOL GCSubtreeHasOpsNotice(UIView *v) {
     return (notice && close);
 }
 
-// 完整判据。被隐藏过的一律不再重复处理（用关联对象打标，幂等）。
+// ═══════════════════════════════════════════════════════════════════════════
+//  0.9.126（A1）：**纯结构通道** —— 不看任何文案，只看几何 + 结构
+//
+//  为什么必须换思路：
+//    0.9.123 靠「文案含【】」，老大换了个文案（「你的出行补贴」）就漏。
+//    0.9.124 靠「形状 + 【】共同祖先」，老大又换（「你的吃喝玩乐补贴待查收，来领 →」）
+//    —— 这条**完全没有【】**，还是漏。
+//    三次都是同一个错误：**用文案内容当判据**。文案是运营随便改的，改一次漏一次。
+//
+//  真机实测（三张截图，1179×2556 @3x → 393×852pt）：
+//    签到红包    x 200..978 宽 259.7pt（66%）  y 75.7..106.3 高 30.6pt
+//    出行补贴    x 209..978 宽 256.7pt（65%）  y 75.7..106.3 高 30.6pt
+//    吃喝玩乐    x 200..978 宽 259.7pt（66%）  y 75.7..106.3 高 30.6pt
+//  ⇒ 同一个组件，几何**完全一致**，只有文字在变。
+//
+//  所以判据改成只看**结构不变量**：
+//    ① 宽 45%~105% 屏宽（一条通栏；窄气泡不算）
+//    ② 高 20~160pt（一条扁条；大容器不算）
+//    ③ 中心落在屏幕顶部 33% 内
+//    ④ **右侧必须有真实关闭控件**（关键必要条件 —— 地图自己的控件没有 ✕）
+//    ⑤ **子树里不能有输入控件**（搜索栏必须有 UITextField，横幅不会有）
+//    ⑥ 不是已钉位的首页原生控件（车机钮/胶囊/天气行…）
+//
+//  第 ④ 条是这条通道的**核心保护**：不加它，天气行、搜索栏、POI 卡片都会中招。
+//  第 ⑤ 条是搜索栏的第二道防线（冷启动早期 SearchBarView 还没缓存，④ 可能只靠 ✕ 挡住，
+//  而搜索栏右侧确实有按钮 —— 所以必须有 ⑤）。
+// ═══════════════════════════════════════════════════════════════════════════
+
+// 被隐藏过的横幅打标（幂等）—— 声明必须在所有使用点之前
 static char BannerHiddenKey;
+
+// 结构判据（只判几何，不碰文案）
+static BOOL GCCIsBannerStripShape(UIView *v, UIWindow *win) {
+    if (!v || !win) return NO;
+    CGFloat ww = win.bounds.size.width, wh = win.bounds.size.height;
+    if (ww < 1 || wh < 1) return NO;
+    CGRect r = [v convertRect:v.bounds toView:win];
+    CGFloat w = CGRectGetWidth(r), h = CGRectGetHeight(r);
+    if (!isfinite(w) || !isfinite(h)) return NO;
+    if (w < ww * 0.45 || w > ww * 0.85) return NO;   // 一条通栏，但不像全屏/满宽搜索框
+    if (h < 20 || h > 160) return NO;                // 一条扁条
+    if (CGRectGetMidY(r) > wh * 0.33) return NO;     // 顶部带（用中心判，比顶边稳）
+    return YES;
+}
+
+// 子树里是否有「右侧的真实关闭控件」
+static BOOL GCCStripHasRightClose(UIView *v) {
+    if (!v) return NO;
+    CGFloat vw = CGRectGetWidth(v.bounds);
+    CGFloat vh = CGRectGetHeight(v.bounds);
+    if (vw < 1 || vh < 1) return NO;
+    NSMutableArray *q = [NSMutableArray arrayWithObject:v];
+    for (NSUInteger i = 0; i < q.count && q.count < 80; i++) {
+        UIView *s = q[i];
+        if (s != v && (s.hidden || s.alpha < 0.02)) continue;
+        if (GCCLooksLikeCloseControl(s)) {
+            CGRect cr = [s convertRect:s.bounds toView:v];
+            if (!isfinite(cr.origin.x) || !isfinite(cr.origin.y)) { [q addObjectsFromArray:s.subviews]; continue; }
+            // 两个几何约束，缺一不可（0.9.126 新增第二道）：
+            //   ① 水平：必须落在横幅**最右侧 15%** 内 —— 实测 ✕ 在 x≈305/326 = 93%
+            //   ② 垂直：必须大致居中（关闭按钮从不贴边）
+            // 只判 ① 不够：横幅整条 userInteractionEnabled=YES 时，任何文字叶子都可能
+            // 被 ④ 的几何兜底认成「关闭控件」，那会让判据在别处误伤。
+            CGFloat midx = CGRectGetMidX(cr);
+            CGFloat midy = CGRectGetMidY(cr);
+            if (midx < vw * 0.85) { [q addObjectsFromArray:s.subviews]; continue; }
+            if (fabs(midy - vh / 2) > vh * 0.35) { [q addObjectsFromArray:s.subviews]; continue; }
+            return YES;
+        }
+        [q addObjectsFromArray:s.subviews];
+    }
+    return NO;
+}
+
+// 完整结构判据
+static BOOL GCCIsStructuralOpsBanner(UIView *v, UIWindow *win) {
+    if (!v || v.hidden || v.alpha < 0.02 || !win) return NO;
+    if (objc_getAssociatedObject(v, &BannerHiddenKey)) return NO;
+    if (GCCIsPinnedHomeView(v) || GCCAncestryIsPinnedHome(v)) return NO;
+    if (GCCSubtreeHasInput(v)) return NO;                 // ⑤ 搜索栏挡在这里
+    if (!GCCIsBannerStripShape(v, win)) return NO;        // ①②③
+    if (!GCCStripHasRightClose(v)) return NO;             // ④
+    return YES;
+}
+
+// 完整判据。被隐藏过的一律不再重复处理（用关联对象打标，幂等）。
 static BOOL GCCIsTopBannerAd(UIView *v, UIWindow *win) {
     if (!v || v.hidden || v.alpha < 0.02 || !win) return NO;
     if (objc_getAssociatedObject(v, &BannerHiddenKey)) return NO;
@@ -7216,7 +7300,33 @@ static void SweepTopBannerAds(void) {
         if (![w isKindOfClass:UIWindow.class] || w.hidden) continue;
         if (w.bounds.size.width < 1 || w.bounds.size.height < 1) continue;
 
-        // ★0.9.124（A2）：**先跑文案直取通道** —— 它不以形状为入口，最不容易被结构变化坑掉。
+        // ★0.9.126（A1）：**结构通道优先** —— 不看任何文案，只看几何 + 结构。
+        //   这是三次漏网换来的结论：文案是运营随便改的，靠文案判必然改一次漏一次。
+        //   BFS 到 6 层、上限 900，命中即收。
+        {
+            NSMutableArray *qs = [NSMutableArray arrayWithObject:w];
+            NSMutableArray *ds = [NSMutableArray arrayWithObject:@0];
+            NSUInteger visitedS = 0;
+            for (NSUInteger i = 0; i < qs.count && visitedS < 900; i++) {
+                UIView *v = qs[i];
+                int d = [ds[i] intValue];
+                visitedS++;
+                if (v != w) {
+                    if (GCCIsStructuralOpsBanner(v, w)) {
+                        // 收到「这一条」本身，不再往上爬（往上会爬到整块首页）
+                        GCHideTopBannerAd(v, "struct");
+                        return;
+                    }
+                }
+                if (d >= 6) continue;
+                for (UIView *c in v.subviews) {
+                    [qs addObject:c];
+                    [ds addObject:@(d + 1)];
+                }
+            }
+        }
+
+        // ★0.9.124（A2）：文案直取通道（保留作兜底）—— 它不以形状为入口，
         //   只扫顶部带内的节点（BFS 到 8 层、上限 1200），命中即收。
         {
             NSMutableArray *q0 = [NSMutableArray arrayWithObject:w];
