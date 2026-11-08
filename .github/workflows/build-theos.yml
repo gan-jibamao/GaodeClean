@@ -119,7 +119,34 @@ jobs:
               TC_URL="https://github.com/L1ghtmann/llvm-project/releases/latest/download/iOSToolchain-${ARCH}.tar.xz"
             fi
             echo "toolchain: $TC_URL"
-            curl -sL "$TC_URL" | tar -xJf - -C "$THEOS/toolchain/"
+            # ★0.9.129（A13）：下载加**重试 + 完整性校验**。
+            #   起因：2026-11-08 连续两次 CI 挂在这一行 ——
+            #     第一次 `xz: (stdin): File format not recognized`（拿到了非 xz 内容）
+            #     第二次 `curl: (22) The requested URL returned error: 504`
+            #   都是 GitHub releases 的临时故障，与代码无关，但会把发版卡死。
+            #   `curl | tar` 管道还有个隐患：curl 失败时 tar 仍会读空流，错误信息看不出根因。
+            #   改为：先下到文件 → 校验 xz 头 → 再解包；失败重试 3 次（间隔递增）。
+            TC_FILE="/tmp/ios-toolchain.tar.xz"
+            OK=0
+            for try in 1 2 3 4 5; do
+              rm -f "$TC_FILE"
+              if curl -fsSL --retry 3 --retry-delay 5 --retry-all-errors \
+                      --connect-timeout 20 --max-time 600 \
+                      -o "$TC_FILE" "$TC_URL"; then
+                # xz 魔数：fd 37 7a 58 5a 00
+                if [ "$(head -c 6 "$TC_FILE" | od -An -tx1 | tr -d ' \n')" = "fd377a585a00" ]; then
+                  OK=1; break
+                fi
+                echo "尝试 $try：内容不是 xz（前 32 字节：$(head -c 32 "$TC_FILE" | tr -d '\0'))"
+              else
+                echo "尝试 $try：curl 失败（exit $?）"
+              fi
+              sleep $((try * 10))
+            done
+            [ "$OK" = "1" ] || { echo "工具链下载 5 次均失败，放弃"; exit 1; }
+            ls -la "$TC_FILE"
+            tar -xJf "$TC_FILE" -C "$THEOS/toolchain/"
+            rm -f "$TC_FILE"
           fi
           echo "THEOS=$THEOS" >> $GITHUB_ENV
           echo "--- theos 自检 ---"
