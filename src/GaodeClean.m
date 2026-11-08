@@ -78,6 +78,7 @@ static NSString *GCBoundaryKey(void) {
 
 // This tweak changes UI only. No network interception or modification of the IPA.
 static char TextKey, StateKey, LimitKey, ForcedKindKey, ForcedPathKey;
+static char GCSampleMaskedKey;   // 0.9.128：blankArea 是否被采样临时隐藏
 static NSHashTable<UIView *> *Pages;
 static NSHashTable *NearbyControllers;
 static NSHashTable *TabControllers;
@@ -168,10 +169,11 @@ static volatile int GCNeedReprobeDark;
 // 0.9.127（A10）：blankArea（插件自己铺的空白层）在主题亮度采样时必须临时排除，
 //   否则会「采到我们自己的白 → 判成亮色 → 保持白」自锁。
 //   类定义在后，这里先声明采样用的两个类方法。
-@interface GCCBlankArea : UIView
-+ (void)gcBeginSampleMask;
-+ (void)gcEndSampleMask;
-@end
+// 0.9.128（A10）：主题亮度采样时必须临时藏起「插件自己铺的空白层」，否则会自锁。
+//   实现放在 GCCBlankArea 定义之后，这里只放 C 函数原型（不引用类，避免重复声明）。
+static NSHashTable *GCAllBlankAreas(void);
+static void GCBlankMaskBegin(void);
+static void GCBlankMaskEnd(void);
 
 static BOOL GCIsDarkAppearance(UIWindow *win) {
     // ★0.9.105（冷启动白钮 1.5 秒的铁证驱动）：
@@ -264,14 +266,14 @@ static BOOL GCIsDarkAppearance(UIWindow *win) {
                 // ★守卫：渲染若抛异常，必须保证恢复 alpha —— 否则 blankArea 会永久不可见，
                 //   那比白块更糟（地图会从「我的」页底下透出来）。
                 UIImage *img = nil;
-                [GCCBlankArea gcBeginSampleMask];
+                GCBlankMaskBegin();
                 @try {
                     img = [ren imageWithActions:^(UIGraphicsImageRendererContext *ctx) {
                         [win drawViewHierarchyInRect:CGRectMake(-sx, -sy, sz.width, sz.height)
                                    afterScreenUpdates:NO];
                     }];
                 } @finally {
-                    [GCCBlankArea gcEndSampleMask];
+                    GCBlankMaskEnd();
                 }
                 CGImageRef cg = img.CGImage;
                 if (cg) {
@@ -1737,26 +1739,11 @@ static void AlignOneWidget(UIView *bar, UIView *w, CGFloat barTop, CGFloat gap);
 //   页面布局一变就可能再次重叠。这里再加一道**结构性保证**：
 //   采样前把所有 blankArea 临时设 alpha=0，采样后立刻恢复。
 //   drawViewHierarchyInRect:afterScreenUpdates:NO 是同步渲染，中间不会上屏，所以不闪。
-+ (NSHashTable<GCCBlankArea *> *)gcAllBlankAreas {
-    static NSHashTable *t;
-    static dispatch_once_t once;
-    dispatch_once(&once, ^{ t = [NSHashTable weakObjectsHashTable]; });
-    return t;
-}
-+ (void)gcBeginSampleMask {
-    for (GCCBlankArea *v in [GCCBlankArea gcAllBlankAreas]) {
-        if (v.alpha != 0) { v.alpha = 0; v.tag = 1; }   // tag=1 标记「是我临时隐藏的」
-    }
-}
-+ (void)gcEndSampleMask {
-    for (GCCBlankArea *v in [GCCBlankArea gcAllBlankAreas]) {
-        if (v.tag == 1) { v.alpha = 1; v.tag = 0; }
-    }
-}
 - (void)didMoveToSuperview {
     [super didMoveToSuperview];
-    if (self.superview) [[GCCBlankArea gcAllBlankAreas] addObject:self];
-    else [[GCCBlankArea gcAllBlankAreas] removeObject:self];
+    // 登记/注销到弱引用表（GCAllBlankAreas 见文件顶部原型）
+    if (self.superview) [GCAllBlankAreas() addObject:self];
+    else [GCAllBlankAreas() removeObject:self];
 }
 
 // ★0.9.127（A4）：trait 变化时重新解析底色。
@@ -1777,6 +1764,30 @@ static void AlignOneWidget(UIView *bar, UIView *w, CGFloat barTop, CGFloat gap);
     if (self.backgroundColor != self.desiredFill) self.backgroundColor = self.desiredFill;
 }
 @end
+
+// 0.9.128（A10）：blankArea 的弱引用表 + 采样遮罩（原型在文件顶部）
+static NSHashTable *GCAllBlankAreas(void) {
+    static NSHashTable *t;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ t = [NSHashTable weakObjectsHashTable]; });
+    return t;
+}
+static void GCBlankMaskBegin(void) {
+    for (GCCBlankArea *v in GCAllBlankAreas()) {
+        if (v.alpha != 0) {
+            v.alpha = 0;
+            objc_setAssociatedObject(v, &GCSampleMaskedKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        }
+    }
+}
+static void GCBlankMaskEnd(void) {
+    for (GCCBlankArea *v in GCAllBlankAreas()) {
+        if (objc_getAssociatedObject(v, &GCSampleMaskedKey)) {
+            v.alpha = 1;
+            objc_setAssociatedObject(v, &GCSampleMaskedKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        }
+    }
+}
 
 @interface GCCState : NSObject
 @property(nonatomic, copy) NSString *path;
