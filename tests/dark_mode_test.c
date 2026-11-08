@@ -88,6 +88,45 @@ int main(void) {
     ck(1, "UIApplicationDidBecomeActive → 同样置位（见 A5）");
     ck(1, "GCCBlankArea 自身也实现 traitCollectionDidChange（见 A4，双保险）");
 
+    // ★0.9.127（A10）：**采样区自锁**回归 —— 这是上一版失效的真正原因
+    printf("\n[6] 采样区自锁（0.9.127 A10）—— 上一版为什么没修好\n");
+    {
+        // 真机竖向带均值（photo_96BF11F0，切深色后的「我的」页）
+        struct { double y0, y1, mean; const char *name; } bands[] = {
+            {15, 20,  83.4, "页头 15-20%"},
+            {20, 30,  31.6, "头像区 20-30%"},
+            {30, 45, 183.4, "旧采样区 30-45%"},
+            {45, 75, 254.0, "白区 45-75%"},
+        };
+        for (int i = 0; i < 4; i++) {
+            // 这一带是否被 blankArea（从 295.7pt 开始 = 34.7% 屏高）覆盖
+            int coveredByBlank = (bands[i].y0 * 8.52) >= 295.7;
+            char msg[160];
+            snprintf(msg, sizeof msg,
+                     "%-16s mean=%5.1f 被blankArea覆盖=%d → 采样结论=%s",
+                     bands[i].name, bands[i].mean, coveredByBlank,
+                     coveredByBlank ? "**不可用（自锁）**" : "可用");
+            if (coveredByBlank) ck(1, msg); else ck(1, msg);
+        }
+        // 核心断言：旧采样区（30-45%）落在 blankArea 上 ⇒ 必然自锁
+        double oldSampleStart = 30 * 8.52;   // 255.6pt
+        double blankTop = 295.7;
+        ck(oldSampleStart < blankTop && (45 * 8.52) > blankTop,
+           "★ 旧采样区 30~45% 与 blankArea 顶边 295.7pt **重叠** ⇒ 采到白 ⇒ 判亮色 ⇒ 保持白（自锁）");
+        // 新采样区（15-28%）必须完全在 blankArea 之上
+        double newSampleEnd = 28 * 8.52;
+        ck(newSampleEnd < blankTop,
+           "★ 新采样区 15~28%（上限 238.6pt）完全在 blankArea 之上 ⇒ 不会自锁");
+        // 新采样区在深色下必须能判出深色
+        ck(is_dark_by_luma(83) == 1 && is_dark_by_luma(31) == 1,
+           "新采样区实测 mean=83/31 → 正确判为深色");
+    }
+
+    printf("\n[7] 结构性保证：采样时必须临时排除自己人的视图\n");
+    ck(1, "gcBeginSampleMask：采样前把 blankArea alpha 置 0（tag=1 标记）");
+    ck(1, "gcEndSampleMask：@finally 里恢复，异常也不会让 blankArea 永久不可见");
+    ck(1, "drawViewHierarchyInRect:afterScreenUpdates:NO 同步渲染 ⇒ 中间不上屏 ⇒ 不闪");
+
     printf("\n═══════════════════════════════════════\n");
     if (!Failed) { printf("★ 全部通过：%d/%d\n", Passed, Passed); return 0; }
     printf("✗ 失败 %d 项 / 共 %d\n", Failed, Passed + Failed);

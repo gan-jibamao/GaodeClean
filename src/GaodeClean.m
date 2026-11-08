@@ -18,7 +18,7 @@
 // ---- jibamao 个人标识（编译进 dylib，可用 strings 核对）----
 static NSString *const kGCAuthor      = @"jibamao";
 static NSString *const kGCRepo        = @"https://gan-jibamao.github.io/";
-static NSString *const kGCVersion     = @"0.9.127";
+static NSString *const kGCVersion     = @"0.9.128";
 
 // 0.9.18（A1）：底边间隙**按控件分开**，对表原生（搜索栏白底顶边 = 702.6pt）
 //   车机钮（连接车机 · WINDeviceInterconnectWidget）：原生底 652 → 间隙 50.6 → 取 50
@@ -165,6 +165,14 @@ static NSMutableSet<NSString *> *GCStyleLayerHookedClasses(void);   // trial26�
 //        不直接写结论（切换瞬间采样不可信），只保证「立刻重采」而不是「用旧值等 0.15s」。
 static volatile int GCNeedReprobeDark;
 
+// 0.9.127（A10）：blankArea（插件自己铺的空白层）在主题亮度采样时必须临时排除，
+//   否则会「采到我们自己的白 → 判成亮色 → 保持白」自锁。
+//   类定义在后，这里先声明采样用的两个类方法。
+@interface GCCBlankArea : UIView
++ (void)gcBeginSampleMask;
++ (void)gcEndSampleMask;
+@end
+
 static BOOL GCIsDarkAppearance(UIWindow *win) {
     // ★0.9.105（冷启动白钮 1.5 秒的铁证驱动）：
     //   probe58 视频逐帧实测：t=1.07s~2.53s 按钮亮度恒 237~239（纯白），t=2.57 才落到 54。
@@ -235,14 +243,36 @@ static BOOL GCIsDarkAppearance(UIWindow *win) {
             CGSize sz = win.bounds.size;
             if (sz.width > 40 && sz.height > 40) {
                 // 采样地图中部空白带：x 5%~35%、y 30%~45%
-                CGFloat sx = sz.width * 0.05f, sy = sz.height * 0.30f;
-                CGFloat sw2 = sz.width * 0.30f, sh2 = sz.height * 0.15f;
+                // ★0.9.127（A9）：**采样区必须避开插件自己铺的视图** —— 这是自锁的根源。
+                //   真机铁证（photo_96BF11F0，切深色后的「我的」页竖带均值）：
+                //     y 15~20%  mean=83.4   ← 深色
+                //     y 20~30%  mean=31.6   ← 深色
+                //     y 30~45%  mean=183.4  ← **被 blankArea 的白污染（旧采样区就在这里）**
+                //     y 45~75%  mean=254.0  ← 全是白的
+                //   旧采样区 y30~45% 正好压在 GCCBlankArea（从足迹卡底边 295.7pt 到底）上，
+                //   于是：blankArea 是白的 → 采到白 → 判成亮色 → blankArea 保持白。
+                //   **自锁死循环**，我上一版加的深色判定因此完全空转。
+                //   改到 y 15%~28%：这一段是头像区/页头，不会被 blankArea 覆盖，
+                //   深色下实测 83/31，亮色下会接近 240+，区分度足够。
+                CGFloat sx = sz.width * 0.05f, sy = sz.height * 0.15f;
+                CGFloat sw2 = sz.width * 0.30f, sh2 = sz.height * 0.13f;
                 CGSize small = CGSizeMake(4, 4);
                 UIGraphicsImageRenderer *ren = [[UIGraphicsImageRenderer alloc] initWithSize:small];
-                UIImage *img = [ren imageWithActions:^(UIGraphicsImageRendererContext *ctx) {
-                    [win drawViewHierarchyInRect:CGRectMake(-sx, -sy, sz.width, sz.height)
-                               afterScreenUpdates:NO];
-                }];
+                // ★0.9.127（A10）：采样前临时隐藏插件自己铺的 blankArea，
+                //   采完立刻恢复 —— 保证「截到的亮度反映的是高德画的，不是我们画的」。
+                //   这是结构性保证；A9 挪采样区只是位置上的规避，布局一变就可能再重叠。
+                // ★守卫：渲染若抛异常，必须保证恢复 alpha —— 否则 blankArea 会永久不可见，
+                //   那比白块更糟（地图会从「我的」页底下透出来）。
+                UIImage *img = nil;
+                [GCCBlankArea gcBeginSampleMask];
+                @try {
+                    img = [ren imageWithActions:^(UIGraphicsImageRendererContext *ctx) {
+                        [win drawViewHierarchyInRect:CGRectMake(-sx, -sy, sz.width, sz.height)
+                                   afterScreenUpdates:NO];
+                    }];
+                } @finally {
+                    [GCCBlankArea gcEndSampleMask];
+                }
                 CGImageRef cg = img.CGImage;
                 if (cg) {
                     unsigned char px[4 * 4 * 4] = {0};
@@ -1695,6 +1725,39 @@ static void AlignOneWidget(UIView *bar, UIView *w, CGFloat barTop, CGFloat gap);
     return self;
 }
 - (void)absorb:(__unused UIGestureRecognizer *)gesture {}
+
+// ★0.9.127（A10）：**把自己登记到一个弱引用集合里**，供主题亮度采样时临时排除。
+//
+//   为什么需要：GCIsDarkAppearance 靠「截屏取亮度」判断深/浅色。
+//   而这块 blankArea 是插件自己铺的纯白视图（深色 bug 未修时），
+//   采样区一旦压在它上面，就会「采到白 → 判成亮色 → blankArea 保持白」= **自锁**。
+//   真机就是这么自锁的（photo_96BF11F0：采样区 y30~45% 均值 183，因为压在 white 上）。
+//
+//   A9 已经把采样区挪到 y15%~28%（页头），但那是「位置上的规避」——
+//   页面布局一变就可能再次重叠。这里再加一道**结构性保证**：
+//   采样前把所有 blankArea 临时设 alpha=0，采样后立刻恢复。
+//   drawViewHierarchyInRect:afterScreenUpdates:NO 是同步渲染，中间不会上屏，所以不闪。
++ (NSHashTable<GCCBlankArea *> *)gcAllBlankAreas {
+    static NSHashTable *t;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ t = [NSHashTable weakObjectsHashTable]; });
+    return t;
+}
++ (void)gcBeginSampleMask {
+    for (GCCBlankArea *v in [GCCBlankArea gcAllBlankAreas]) {
+        if (v.alpha != 0) { v.alpha = 0; v.tag = 1; }   // tag=1 标记「是我临时隐藏的」
+    }
+}
++ (void)gcEndSampleMask {
+    for (GCCBlankArea *v in [GCCBlankArea gcAllBlankAreas]) {
+        if (v.tag == 1) { v.alpha = 1; v.tag = 0; }
+    }
+}
+- (void)didMoveToSuperview {
+    [super didMoveToSuperview];
+    if (self.superview) [[GCCBlankArea gcAllBlankAreas] addObject:self];
+    else [[GCCBlankArea gcAllBlankAreas] removeObject:self];
+}
 
 // ★0.9.127（A4）：trait 变化时重新解析底色。
 //   根因：UpdateMask 只在 setBounds:/setContentOffset: 里跑，**切主题不触发它**
