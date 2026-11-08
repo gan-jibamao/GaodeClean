@@ -18,7 +18,7 @@
 // ---- jibamao 个人标识（编译进 dylib，可用 strings 核对）----
 static NSString *const kGCAuthor      = @"jibamao";
 static NSString *const kGCRepo        = @"https://gan-jibamao.github.io/";
-static NSString *const kGCVersion     = @"0.9.131";
+static NSString *const kGCVersion     = @"0.9.132";
 
 // 0.9.18（A1）：底边间隙**按控件分开**，对表原生（搜索栏白底顶边 = 702.6pt）
 //   车机钮（连接车机 · WINDeviceInterconnectWidget）：原生底 652 → 间隙 50.6 → 取 50
@@ -257,41 +257,80 @@ static BOOL GCIsDarkAppearance(UIWindow *win) {
                 //   **自锁死循环**，我上一版加的深色判定因此完全空转。
                 //   改到 y 15%~28%：这一段是头像区/页头，不会被 blankArea 覆盖，
                 //   深色下实测 83/31，亮色下会接近 240+，区分度足够。
-                CGFloat sx = sz.width * 0.05f, sy = sz.height * 0.15f;
-                CGFloat sw2 = sz.width * 0.30f, sh2 = sz.height * 0.13f;
-                CGSize small = CGSizeMake(4, 4);
-                UIGraphicsImageRenderer *ren = [[UIGraphicsImageRenderer alloc] initWithSize:small];
-                // ★0.9.127（A10）：采样前临时隐藏插件自己铺的 blankArea，
-                //   采完立刻恢复 —— 保证「截到的亮度反映的是高德画的，不是我们画的」。
-                //   这是结构性保证；A9 挪采样区只是位置上的规避，布局一变就可能再重叠。
-                // ★守卫：渲染若抛异常，必须保证恢复 alpha —— 否则 blankArea 会永久不可见，
-                //   那比白块更糟（地图会从「我的」页底下透出来）。
+                // ★0.9.132（A19）：**采样实现重写** —— 原实现从第一版起就从未采到过指定区域。
+                //
+                //   原代码：
+                //     ren = [[UIGraphicsImageRenderer alloc] initWithSize:CGSizeMake(4,4)];
+                //     [win drawViewHierarchyInRect:CGRectMake(-sx,-sy,sz.width,sz.height) ...];
+                //   这里的意图是「把窗口偏移 (sx,sy) 后画进 4×4 画布，从而只取采样区」。
+                //   但 UIGraphicsImageRenderer 的 context 已经是 4×4，绘制一个 393×852 的
+                //   矩形进去会被**整体缩放**到画布 —— 偏移量 sx/sy 与内容无关（内容总是从
+                //   绘制原点开始铺），拿到的其实是**整屏平均**。
+                //
+                //   探针铁证（P64/LUMA）：同一采样点在 66 / 30 / 244 之间跳变，
+                //   而 y15%~28% 的页头区不可能出现 244。
+                //     · 首页（深色地图占大部分）→ 66
+                //     · 「我的」页（白块占 65%）→ 244
+                //     · 启动页（纯白）→ 238
+                //   三个值都等于「整屏平均」，完全符合上面的分析。
+                //
+                //   新实现：把窗口按比例缩进一个**小但完整**的画布（保留全屏长宽比），
+                //   再在这张缩略图上取矩形区域内的像素做平均。这样偏移与区域都真实生效。
+                // ★性能：按 1/4 分辨率渲染（内容几何不变，只是像素少 → 内存 1/16）。
+                //   然后绘制时把窗口缩放进这块画布；裁剪坐标按同一比例换算。
+                const CGFloat SCALE = 0.25f;
+                CGSize canvas = CGSizeMake(MAX(24.f, floorf(sz.width  * SCALE)),
+                                           MAX(24.f, floorf(sz.height * SCALE)));
+                UIGraphicsImageRenderer *ren = [[UIGraphicsImageRenderer alloc] initWithSize:canvas];
                 UIImage *img = nil;
                 GCBlankMaskBegin();
                 @try {
                     img = [ren imageWithActions:^(UIGraphicsImageRendererContext *ctx) {
-                        [win drawViewHierarchyInRect:CGRectMake(-sx, -sy, sz.width, sz.height)
+                        [win drawViewHierarchyInRect:CGRectMake(0, 0, canvas.width, canvas.height)
                                    afterScreenUpdates:NO];
                     }];
                 } @finally {
                     GCBlankMaskEnd();
                 }
                 CGImageRef cg = img.CGImage;
+                // 采样区（相对整屏的比例）：x 5%~35%、y 15%~28%
+                const int COLS = 4, ROWS = 4;
+                int mean = 0;
                 if (cg) {
-                    unsigned char px[4 * 4 * 4] = {0};
-                    CGColorSpaceRef cs = CGColorSpaceCreateDeviceRGB();
-                    CGContextRef c2 = CGBitmapContextCreate(px, 4, 4, 8, 4 * 4, cs,
-                                                            kCGImageAlphaPremultipliedLast);
-                    CGColorSpaceRelease(cs);
-                    if (c2) {
-                        CGContextDrawImage(c2, CGRectMake(0, 0, 4, 4), cg);
-                        CGContextRelease(c2);
-                        int sum = 0;
-                        for (int k = 0; k < 16; k++)
-                            sum += (px[k*4]*30 + px[k*4+1]*59 + px[k*4+2]*11) / 100;
-                        int mean = sum / 16;
-                        // ★0.9.103：mean==0 表示 drawViewHierarchyInRect 渲染失败（返回全黑），
-                        //   不是「屏幕很暗」。probe56 日志首条 LUMA mean=0 就是这种情况。
+                    // 把整屏缩略图按采样区裁出来再缩到 4×4 —— 等价于「对区域内取平均」
+                    size_t cw = CGImageGetWidth(cg), ch = CGImageGetHeight(cg);
+                    if (cw > 0 && ch > 0) {
+                        // 裁剪坐标按 canvas 尺寸换算（与绘制的缩放一致）
+                        size_t rx = (size_t)((float)cw * 0.05f);
+                        size_t ry = (size_t)((float)ch * 0.15f);
+                        size_t rw = (size_t)((float)cw * 0.30f);
+                        size_t rh = (size_t)((float)ch * 0.13f);
+                        if (rw < 1) rw = 1;
+                        if (rh < 1) rh = 1;
+                        if (rx + rw > cw) rw = cw - rx;
+                        if (ry + rh > ch) rh = ch - ry;
+                        CGImageRef crop = CGImageCreateWithImageInRect(cg, CGRectMake(rx, ry, rw, rh));
+                        if (crop) {
+                            unsigned char px[4 * 4 * 4] = {0};
+                            CGColorSpaceRef cs = CGColorSpaceCreateDeviceRGB();
+                            CGContextRef c2 = CGBitmapContextCreate(px, COLS, ROWS, 8, COLS * 4, cs,
+                                                                    kCGImageAlphaPremultipliedLast);
+                            CGColorSpaceRelease(cs);
+                            if (c2) {
+                                CGContextDrawImage(c2, CGRectMake(0, 0, COLS, ROWS), crop);
+                                CGContextRelease(c2);
+                                int sum = 0;
+                                for (int k = 0; k < COLS * ROWS; k++)
+                                    sum += (px[k*4]*30 + px[k*4+1]*59 + px[k*4+2]*11) / 100;
+                                mean = sum / (COLS * ROWS);
+                            }
+                            CGImageRelease(crop);
+                        }
+                    }
+                }
+                if (1) {
+                    {
+                        // ★0.9.103：mean==0 表示渲染失败（返回全黑），不是「屏幕很暗」。
                         //   若把失败当成深色，亮色模式下会误压白 ⇒ 必须排除。
                         if (mean > 0) { hasValid = YES; dark = (mean < 140); sampledThisRound = YES; }
                         #ifdef GAODECLEAN_PROBE
@@ -302,7 +341,6 @@ static BOOL GCIsDarkAppearance(UIWindow *win) {
                         #endif
                     }
                 }
-                (void)sw2; (void)sh2;
             }
         } @catch (__unused NSException *e) {}
     }

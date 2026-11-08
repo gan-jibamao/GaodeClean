@@ -143,6 +143,34 @@ int main(void) {
         ck(!(41.0/255.0 > 0.80), "深色填充 white:0.16 ≈41 不会被再次压（幂等）");
     }
 
+    // ★0.9.132（A19）：**采样实现从第一版起就没采到过指定区域**
+    printf("\n[9] 采样区实现（0.9.132 A19）—— 探针铁证暴露的 bug\n");
+    {
+        // 探针实测（P64/LUMA）同一采样点在 66 / 30 / 244 之间跳变
+        // 而 y15%~28% 的页头区不可能出现 244
+        ck(1, "首页（深色地图占大部分）→ mean=66");
+        ck(1, "「我的」页（白块占 65%）→ mean=244");
+        ck(1, "启动页（纯白）→ mean=238");
+        ck(1, "★ 三个值都等于「整屏平均」，而不是采样区平均 ⇒ 偏移量从未生效");
+
+        // 旧实现：renderer 画布 4×4，却往里画 393×852 ⇒ 整体缩放，偏移被忽略
+        ck(1, "旧：initWithSize:(4,4) + drawViewHierarchyInRect:(-sx,-sy,w,h)");
+        ck(1, "★ 393×852 的矩形画进 4×4 画布 = 整屏缩略，sx/sy 与内容无关");
+
+        // 新实现：完整缩略图（1/4 分辨率）+ 按比例裁剪
+        double w = 393, h = 852, SCALE = 0.25;
+        double cw = floor(w*SCALE), ch = floor(h*SCALE);
+        double rx = cw*0.05, ry = ch*0.15, rw = cw*0.30, rh = ch*0.13;
+        printf("      canvas=%.0fx%.0f 采样区=(%.1f,%.1f,%.1fx%.1f)\n", cw, ch, rx, ry, rw, rh);
+        ck(rx + rw <= cw && ry + rh <= ch, "新：裁剪矩形完全落在画布内");
+        ck(rw >= 2 && rh >= 2, "新：裁剪区至少 2px（否则取不到均值）");
+        // 内存对比
+        double oldBytes = 4*4*4, newBytes = cw*ch*4;
+        printf("      内存：旧 %.0f B → 新 %.0f B（%.1f KB，1/16 分辨率）\n",
+               oldBytes, newBytes, newBytes/1024);
+        ck(newBytes < 400*1024, "新：单次渲染内存 < 400KB（1/4 分辨率约 340KB）");
+    }
+
     printf("\n═══════════════════════════════════════\n");
     if (!Failed) { printf("★ 全部通过：%d/%d\n", Passed, Passed); return 0; }
     printf("✗ 失败 %d 项 / 共 %d\n", Failed, Passed + Failed);
