@@ -18,7 +18,7 @@
 // ---- jibamao 个人标识（编译进 dylib，可用 strings 核对）----
 static NSString *const kGCAuthor      = @"jibamao";
 static NSString *const kGCRepo        = @"https://gan-jibamao.github.io/";
-static NSString *const kGCVersion     = @"0.9.128";
+static NSString *const kGCVersion     = @"0.9.129";
 
 // 0.9.18（A1）：底边间隙**按控件分开**，对表原生（搜索栏白底顶边 = 702.6pt）
 //   车机钮（连接车机 · WINDeviceInterconnectWidget）：原生底 652 → 间隙 50.6 → 取 50
@@ -1563,6 +1563,59 @@ static NSString *P43One(NSString *name, UIView *v, UIWindow *win) {
             name, m.origin.x, m.origin.y, m.origin.x + o.x, m.origin.y + o.y];
 }
 
+#ifdef GAODECLEAN_PROBE
+@class GCCState;   // 定义在后，此处前置声明
+// probe63：**空白区（blankArea）诊断** —— 回答「深色下那块白到底是谁」。
+//   老大反馈连续三版都还是白。可能是：
+//     ① blankArea 上色没生效
+//     ② 那块白根本不是 blankArea，是高德自己的页面底色
+//   这条探针把两边都打出来，一次装机就能定案。
+static void P63BlankProbe(void) {
+    static double last;
+    double now = CACurrentMediaTime();
+    if (now - last < 1.0) return;
+    last = now;
+    UIWindow *w = nil;
+    for (UIWindow *x in GCAllWindows()) { if (x.isKeyWindow) { w = x; break; } }
+    if (!w) return;
+    if (!GCProbeBuf6) GCProbeBuf6 = [NSMutableString string];
+    BOOL dark = GCIsDarkAppearance(w);
+    [GCProbeBuf6 appendString:[NSString stringWithFormat:
+        @"\nt=%.1f P63 dark=%d trait=%ld pages=%lu\n",
+        now, dark ? 1 : 0, (long)w.traitCollection.userInterfaceStyle,
+        (unsigned long)Pages.allObjects.count]];
+    for (UIView *page in Pages.allObjects) {
+        NSString *cls = NSStringFromClass(page.class);
+        CGColorRef bgc = page.backgroundColor.CGColor;
+        const CGFloat *comp = bgc ? CGColorGetComponents(bgc) : NULL;
+        size_t n = bgc ? CGColorGetNumberOfComponents(bgc) : 0;
+        id st = objc_getAssociatedObject(page, &StateKey);
+        // 用 KVC 取值，规避「GCCState 定义在后」的编译器限制（探针只在调试包用）
+        UIView *ba = [st respondsToSelector:@selector(blankArea)] ? [st valueForKey:@"blankArea"] : nil;
+        BOOL matched = [st respondsToSelector:@selector(matched)] ? [[st valueForKey:@"matched"] boolValue] : NO;
+        [GCProbeBuf6 appendString:[NSString stringWithFormat:
+            @"   page %@ kind=%ld win=%@ bg(n=%zu)=%.2f,%.2f,%.2f,%.2f\n",
+            cls, (long)0, page.window ? @"Y" : @"n", n,
+            comp && n > 0 ? comp[0] : -1, comp && n > 1 ? comp[1] : -1,
+            comp && n > 2 ? comp[2] : -1, comp && n > 3 ? comp[3] : -1]];
+        if (ba) {
+            CGColorRef bcg = ba.backgroundColor.CGColor;
+            const CGFloat *bc = bcg ? CGColorGetComponents(bcg) : NULL;
+            size_t bn = bcg ? CGColorGetNumberOfComponents(bcg) : 0;
+            CGRect br = [ba convertRect:ba.bounds toView:w];
+            [GCProbeBuf6 appendString:[NSString stringWithFormat:
+                @"     blankArea a=%.2f hid=%d frameInWin=(%.0f,%.0f,%.0f,%.0f) color(n=%zu)=%.2f,%.2f,%.2f,%.2f matched=%d\n",
+                ba.alpha, ba.hidden ? 1 : 0, br.origin.x, br.origin.y, br.size.width, br.size.height,
+                bn, bc && bn > 0 ? bc[0] : -1, bc && bn > 1 ? bc[1] : -1,
+                bc && bn > 2 ? bc[2] : -1, bc && bn > 3 ? bc[3] : -1,
+                matched ? 1 : 0]];
+        } else {
+            [GCProbeBuf6 appendString:@"     blankArea = (nil)\n"];
+        }
+    }
+}
+#endif
+
 static void P43Snap(void) {
     double now = P7Now();
     if (now - P43Last < 1.0) return;
@@ -1992,7 +2045,33 @@ static void UpdateMask(UIView *page) {
                 }
             }
         }
-        if (!usable) background = UIColor.systemBackgroundColor;
+        // ★0.9.129（A11）：**深色时用固定深色值，不能用 systemBackgroundColor**。
+        //   probe55 / probe61 早就记录过：高德**不跟随系统 trait**
+        //   （实测 TRAIT style=1 但画面是深色地图，winStyle=1 override=1）。
+        //   所以 systemBackgroundColor 在高德这个进程里会被解析成**白色** ——
+        //   这就是「改了还是白」的最终原因，我前面几版都栽在这一步。
+        //   深色下直接用与高德深色底栏一致的固定值（white:0.05，≈RGB 13），
+        //   亮色下才用 systemBackgroundColor（那时它确实是白的，正好）。
+        if (!usable) {
+            static BOOL sDarkForFill; static double sDarkForFillT;
+            double t3 = CACurrentMediaTime();
+            if (t3 - sDarkForFillT > 0.3) {
+                UIWindow *pw3 = page.window ?: GCAnyMainWindow();
+                sDarkForFill = pw3 ? GCIsDarkAppearance(pw3) : NO;
+                sDarkForFillT = t3;
+            }
+            if (sDarkForFill) {
+                // 与真机深色背景 RGB(8,9,13) 对齐
+                static UIColor *darkFill;
+                static dispatch_once_t onceDF;
+                dispatch_once(&onceDF, ^{
+                    darkFill = [UIColor colorWithWhite:(13.0 / 255.0) alpha:1.0];
+                });
+                background = darkFill;
+            } else {
+                background = UIColor.systemBackgroundColor;
+            }
+        }
         // 幂等写入：颜色相同就不写（layer 不触发重绘）
         // desiredFill 供 GCCBlankArea 自己在 trait 变化时重新应用（见 A4）
         if (state.blankArea.desiredFill != background) state.blankArea.desiredFill = background;
@@ -4835,6 +4914,9 @@ static void GCStylePinWidgets(UIWindow *win) {
     P37Sample();
     P39Sample();
     P43Snap();
+#ifdef GAODECLEAN_PROBE
+    P63BlankProbe();
+#endif
     P41HookWeatherWrites();
 #endif
     GCStylePinBusy = NO;
