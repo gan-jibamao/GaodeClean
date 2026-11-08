@@ -158,11 +158,27 @@ jobs:
             #   `curl | tar` 管道还有个隐患：curl 失败时 tar 仍会读空流，错误信息看不出根因。
             #   改为：先下到文件 → 校验 xz 头 → 再解包；失败重试 3 次（间隔递增）。
             TC_FILE="/tmp/ios-toolchain.tar.xz"
+            # ★0.9.130（A17'）：与 ldid 同一策略 —— 优先走 **api.github.com 的 asset 端点**。
+            #   起因：2026-11-08 GitHub Releases 的 objects.githubusercontent.com 大面积 504，
+            #   而 api.github.com 正常。工具链 ~86MB 不适合入仓，所以走 API 下载。
+            if [ "$ARCH" = "x86_64" ]; then TC_ASSET=124862108; else TC_ASSET=124872377; fi
             OK=0
             for try in 1 2 3 4 5; do
               rm -f "$TC_FILE"
+              # ① API asset 端点（绕开 objects CDN）
+              if curl -fsSL -H "Authorization: Bearer ${{ github.token }}" \
+                      -H "Accept: application/octet-stream" \
+                      --connect-timeout 20 --max-time 900 \
+                      -o "$TC_FILE" \
+                      "https://api.github.com/repos/L1ghtmann/llvm-project/releases/assets/${TC_ASSET}"; then
+                if [ "$(head -c 6 "$TC_FILE" | od -An -tx1 | tr -d ' \n')" = "fd377a585a00" ]; then
+                  OK=1; break
+                fi
+                echo "尝试 $try：API 端点内容不是 xz，回退直链"
+              fi
+              # ② Releases 直链
               if curl -fsSL --retry 3 --retry-delay 5 --retry-all-errors \
-                      --connect-timeout 20 --max-time 600 \
+                      --connect-timeout 20 --max-time 900 \
                       -o "$TC_FILE" "$TC_URL"; then
                 # xz 魔数：fd 37 7a 58 5a 00
                 if [ "$(head -c 6 "$TC_FILE" | od -An -tx1 | tr -d ' \n')" = "fd377a585a00" ]; then
