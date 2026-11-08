@@ -18,7 +18,7 @@
 // ---- jibamao 个人标识（编译进 dylib，可用 strings 核对）----
 static NSString *const kGCAuthor      = @"jibamao";
 static NSString *const kGCRepo        = @"https://gan-jibamao.github.io/";
-static NSString *const kGCVersion     = @"0.9.129";
+static NSString *const kGCVersion     = @"0.9.130";
 
 // 0.9.18（A1）：底边间隙**按控件分开**，对表原生（搜索栏白底顶边 = 702.6pt）
 //   车机钮（连接车机 · WINDeviceInterconnectWidget）：原生底 652 → 间隙 50.6 → 取 50
@@ -185,6 +185,7 @@ static BOOL GCIsDarkAppearance(UIWindow *win) {
     //   本版：失败不写缓存（保留 hasValid 标记）；有效值只缓存 0.5s；
     //         从未采到有效值前「保守按深色」—— 深色下早压是对的，亮色下也只是先暗后亮一瞬。
     static BOOL cached; static double lastT; static BOOL hasValid;
+    BOOL sampledThisRound = NO;   // 0.9.130（A14）：本轮是否真的采到有效亮度
     // ★0.9.127（A2）：主题切换作废信号（见 GInvalidateDarkCache）
     if (GCNeedReprobeDark) { GCNeedReprobeDark = 0; hasValid = 0; lastT = 0; }
     static BOOL wasMapReady; static double lastMapScan;
@@ -292,7 +293,7 @@ static BOOL GCIsDarkAppearance(UIWindow *win) {
                         // ★0.9.103：mean==0 表示 drawViewHierarchyInRect 渲染失败（返回全黑），
                         //   不是「屏幕很暗」。probe56 日志首条 LUMA mean=0 就是这种情况。
                         //   若把失败当成深色，亮色模式下会误压白 ⇒ 必须排除。
-                        if (mean > 0) { hasValid = YES; dark = (mean < 140); }
+                        if (mean > 0) { hasValid = YES; dark = (mean < 140); sampledThisRound = YES; }
                         #ifdef GAODECLEAN_PROBE
                         if (!GCProbeBuf6) GCProbeBuf6 = [NSMutableString string];
                         [GCProbeBuf6 appendString:[NSString stringWithFormat:
@@ -306,8 +307,20 @@ static BOOL GCIsDarkAppearance(UIWindow *win) {
         } @catch (__unused NSException *e) {}
     }
     if (!hasValid) return YES;    // 从未采到有效亮度 ⇒ 保守按深色（宁可早暗，不要白闪）
-    cached = dark;
-    return dark;
+    // ★0.9.130（A14）：**采样没有真正跑过时，绝不能覆盖缓存**。
+    //   真机铁证（老大：「切换后马上又会变白」）：
+    //     ① trait 报亮色（高德恒为 Light）⇒ dark 初始为 NO
+    //     ② 采样没跑（mapReady=NO，或 sz 非法，或渲染 mean=0 被忽略）
+    //     ③ 走到这里时 dark 仍是初始 NO、hasValid 又早在首页阶段为 YES
+    //     ⇒ cached = NO（亮色）⇒ 刚写进去的深色值立刻被覆盖回白。
+    //   「先变深、随即变白」就是这么来的。
+    //   修法：只有**本次真的采到了有效值**才写缓存；否则沿用上一次的结论。
+    if (sampledThisRound) {
+        cached = dark;
+    } else if (!hasValid) {
+        return YES;
+    }
+    return cached;
 }
 
 static UIColor *GCStyleFillColor(UIView *ref) {
@@ -1814,7 +1827,15 @@ static void AlignOneWidget(UIView *bar, UIView *w, CGFloat barTop, CGFloat gap);
 }
 - (void)gcApplyFill {
     if (!self.desiredFill) return;
+    // ★0.9.130（A16）：view 与 layer **双写**。
+    //   项目里已有铁证（BTN57，0.9.107）：两者会不一致，而**渲染以 layer 为准**。
+    //   只写 view.backgroundColor 时，看起来赋值成功了，实际画出来的仍是 layer 的旧色
+    //   —— 这正是「改完还是白」的另一种可能。
     if (self.backgroundColor != self.desiredFill) self.backgroundColor = self.desiredFill;
+    CGColorRef want = self.desiredFill.CGColor;
+    if (!self.layer.backgroundColor || !CGColorEqualToColor(self.layer.backgroundColor, want)) {
+        self.layer.backgroundColor = want;
+    }
 }
 @end
 
@@ -2052,14 +2073,22 @@ static void UpdateMask(UIView *page) {
         //   这就是「改了还是白」的最终原因，我前面几版都栽在这一步。
         //   深色下直接用与高德深色底栏一致的固定值（white:0.05，≈RGB 13），
         //   亮色下才用 systemBackgroundColor（那时它确实是白的，正好）。
-        if (!usable) {
-            static BOOL sDarkForFill; static double sDarkForFillT;
+        // ★0.9.130（A15）：深色判定提前，且**深色下一律用固定值**，不透传任何动态色。
+        //   真机铁证（老大：「切换后马上又会变白」）：
+        //     page.backgroundColor 若是**动态色**，赋值给 blankArea 后并不会"自动跟随" ——
+        //     它是在**高德进程的 trait 环境**下解析的，而高德恒报 Light ⇒ 解析成白。
+        //     所以「透传动态色」这条路在高德里根本不成立，必须固定值。
+        static BOOL sDarkForFill; static double sDarkForFillT;
+        {
             double t3 = CACurrentMediaTime();
             if (t3 - sDarkForFillT > 0.3) {
                 UIWindow *pw3 = page.window ?: GCAnyMainWindow();
                 sDarkForFill = pw3 ? GCIsDarkAppearance(pw3) : NO;
                 sDarkForFillT = t3;
             }
+        }
+        if (sDarkForFill) usable = NO;   // 深色：显式丢弃一切来源，下面用固定值
+        if (!usable) {
             if (sDarkForFill) {
                 // 与真机深色背景 RGB(8,9,13) 对齐
                 static UIColor *darkFill;
@@ -2077,6 +2106,14 @@ static void UpdateMask(UIView *page) {
         if (state.blankArea.desiredFill != background) state.blankArea.desiredFill = background;
         if (state.blankArea.backgroundColor != background)
             state.blankArea.backgroundColor = background;
+        // ★A16：layer 同步双写（渲染以 layer 为准，只写 view 可能看不见效果）
+        {
+            CGColorRef want = background.CGColor;
+            if (!state.blankArea.layer.backgroundColor ||
+                !CGColorEqualToColor(state.blankArea.layer.backgroundColor, want)) {
+                state.blankArea.layer.backgroundColor = want;
+            }
+        }
         state.blankArea.frame = CGRectMake(page.bounds.origin.x, page.bounds.origin.y + height,
                                             page.bounds.size.width, MAX(0, page.bounds.size.height - height));
         // 0.7.3：原来每帧无条件 bringSubviewToFront —— 父视图层级每帧重排。
