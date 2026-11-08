@@ -86,19 +86,38 @@ jobs:
             aarch64) L=ldid_linux_aarch64 ;;
             *) echo "不支持的架构 $ARCH"; exit 1 ;;
           esac
-          URL_LDID="https://github.com/ProcursusTeam/ldid/releases/download/v2.1.5-procursus7/${L}"
-          # 0.9.129（A13'）：同样加**重试** —— 2026-11-08 GitHub Releases 多次 504，
-          #   一次失败就卡死发版不值当。5 次、间隔递增。
-          OK2=0
-          for try in 1 2 3 4 5; do
-            if sudo curl -fsSL --retry 3 --retry-delay 5 --retry-all-errors \
-                        --connect-timeout 20 --max-time 300 \
-                        -o /usr/local/bin/ldid "$URL_LDID"; then
-              OK2=1; break
-            fi
-            echo "ldid 尝试 $try 失败，重试…"
-            sleep $((try * 8))
-          done
+          # ★0.9.130（A17）：优先用**仓库内自带的 ldid**。
+          #   起因：2026-11-08 GitHub Releases 的 asset CDN 大面积 504，
+          #   同一份代码的 roothide job 成功、rootless job 失败（纯概率），发版被卡死。
+          #   ldid 是 2.9MB 的静态二进制，直接入仓最稳，且版本固定、可复现。
+          #   三级回退：仓库内 → API asset 端点 → Releases 直链。
+          if [ -x "tools/ldid/${L}" ]; then
+            echo "ldid: 用仓库内自带副本 tools/ldid/${L}"
+            sudo cp "tools/ldid/${L}" /usr/local/bin/ldid
+            OK2=1
+          else
+            OK2=0
+            API_ID=""
+            [ "$ARCH" = "x86_64" ] && API_ID="92097311" || API_ID="92097309"
+            URL_LDID="https://github.com/ProcursusTeam/ldid/releases/download/v2.1.5-procursus7/${L}"
+            for try in 1 2 3 4 5; do
+              # ① 先试 API asset 端点（走 api.github.com，绕开 objects.githubusercontent.com）
+              if [ -n "$API_ID" ] && sudo curl -fsSL -H "Authorization: Bearer ${{ github.token }}" \
+                   -H "Accept: application/octet-stream" --max-time 120 \
+                   -o /usr/local/bin/ldid \
+                   "https://api.github.com/repos/ProcursusTeam/ldid/releases/assets/${API_ID}"; then
+                OK2=1; break
+              fi
+              # ② 再试 Releases 直链
+              if sudo curl -fsSL --retry 2 --retry-delay 3 --retry-all-errors \
+                   --connect-timeout 20 --max-time 300 \
+                   -o /usr/local/bin/ldid "$URL_LDID"; then
+                OK2=1; break
+              fi
+              echo "ldid 尝试 $try 失败，重试…"
+              sleep $((try * 8))
+            done
+          fi
           [ "$OK2" = "1" ] || { echo "ldid 下载 5 次均失败"; exit 1; }
           sudo chmod +x /usr/local/bin/ldid
           ldid -h 2>&1 | head -3 || true
