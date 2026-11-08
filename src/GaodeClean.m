@@ -18,7 +18,7 @@
 // ---- jibamao 个人标识（编译进 dylib，可用 strings 核对）----
 static NSString *const kGCAuthor      = @"jibamao";
 static NSString *const kGCRepo        = @"https://gan-jibamao.github.io/";
-static NSString *const kGCVersion     = @"0.9.126";
+static NSString *const kGCVersion     = @"0.9.127";
 
 // 0.9.18（A1）：底边间隙**按控件分开**，对表原生（搜索栏白底顶边 = 702.6pt）
 //   车机钮（连接车机 · WINDeviceInterconnectWidget）：原生底 652 → 间隙 50.6 → 取 50
@@ -155,6 +155,16 @@ static NSMutableSet<NSString *> *GCStyleLayerHookedClasses(void);   // trial26�
 //    亮色地图通常 200+，阈值取 140 安全。
 //  成本：只读 8×8 像素、5Hz 级调用（每 1s 更新一次缓存），可忽略。
 // ════════════════════════════════════════════════════════════════════
+// ★0.9.127（A2）：主题切换时**立刻作废**深色判定的缓存。
+//   起因：老大反馈「系统切深色，高德跟随切换」之后表现不对。
+//   成因：GCIsDarkAppearance 的结论缓存 0.15 秒 —— 平时够快，但切主题是**一次性事件**，
+//        而且切换瞬间屏幕正在重绘，drawViewHierarchyInRect 采到的可能是中间态。
+//        旧的「缓存 0.15s + 采样失败不写缓存」在启动期设计得很好，但没考虑「运行中切主题」。
+//   做法：外部（traitCollectionDidChange 钩子 / 回到前台）把 GCNeedReprobeDark 置 1，
+//        GCIsDarkAppearance 下一次调用就把 hasValid 清掉 ⇒ 立刻重新采样。
+//        不直接写结论（切换瞬间采样不可信），只保证「立刻重采」而不是「用旧值等 0.15s」。
+static volatile int GCNeedReprobeDark;
+
 static BOOL GCIsDarkAppearance(UIWindow *win) {
     // ★0.9.105（冷启动白钮 1.5 秒的铁证驱动）：
     //   probe58 视频逐帧实测：t=1.07s~2.53s 按钮亮度恒 237~239（纯白），t=2.57 才落到 54。
@@ -165,6 +175,8 @@ static BOOL GCIsDarkAppearance(UIWindow *win) {
     //   本版：失败不写缓存（保留 hasValid 标记）；有效值只缓存 0.5s；
     //         从未采到有效值前「保守按深色」—— 深色下早压是对的，亮色下也只是先暗后亮一瞬。
     static BOOL cached; static double lastT; static BOOL hasValid;
+    // ★0.9.127（A2）：主题切换作废信号（见 GInvalidateDarkCache）
+    if (GCNeedReprobeDark) { GCNeedReprobeDark = 0; hasValid = 0; lastT = 0; }
     static BOOL wasMapReady; static double lastMapScan;
     double now = CACurrentMediaTime();
     if (hasValid && now - lastT < 0.15 && now > lastT) return cached;   // 0.9.106：0.5→0.15，快跟随
@@ -1668,6 +1680,7 @@ static void AlignOneWidget(UIView *bar, UIView *w, CGFloat barTop, CGFloat gap);
 // Explore and Mine are opaque pages. Their removed area must consume touches,
 // rather than exposing the shared map behind the page as the home sheet does.
 @interface GCCBlankArea : UIView
+@property(nonatomic, strong) UIColor *desiredFill;   // 0.9.127：期望底色（动态色）
 @end
 @implementation GCCBlankArea
 - (instancetype)initWithFrame:(CGRect)frame {
@@ -1682,6 +1695,24 @@ static void AlignOneWidget(UIView *bar, UIView *w, CGFloat barTop, CGFloat gap);
     return self;
 }
 - (void)absorb:(__unused UIGestureRecognizer *)gesture {}
+
+// ★0.9.127（A4）：trait 变化时重新解析底色。
+//   根因：UpdateMask 只在 setBounds:/setContentOffset: 里跑，**切主题不触发它**
+//   ⇒ blankArea 的颜色停在旧值，深色下整片白（老大截图 photo_5E96916A 就是它）。
+//   A3 已经把颜色改成动态色对象；这里再兜一层：trait 一变就立刻重新应用一次，
+//   不依赖外部是否记得调 UpdateMasks()。
+- (void)traitCollectionDidChange:(UITraitCollection *)previous {
+    [super traitCollectionDidChange:previous];
+    [self gcApplyFill];
+}
+- (void)didMoveToWindow {
+    [super didMoveToWindow];
+    [self gcApplyFill];
+}
+- (void)gcApplyFill {
+    if (!self.desiredFill) return;
+    if (self.backgroundColor != self.desiredFill) self.backgroundColor = self.desiredFill;
+}
 @end
 
 @interface GCCState : NSObject
@@ -1843,11 +1874,56 @@ static void UpdateMask(UIView *page) {
         state.previousMask = nil;
         if (!state.blankArea) state.blankArea = [[GCCBlankArea alloc] initWithFrame:CGRectZero];
         if (state.blankArea.superview != page) [page addSubview:state.blankArea];
+        // ★0.9.127（A3）：**不要把背景色解析成固定值**。
+        //   原写法用 getRed:... 只是为了判断透明度，但取到的 RGB 是在**当前 trait** 下
+        //   解析出来的具体值；若把解析后的颜色再赋回去，主题切换后就停在旧色。
+        //   现在的做法：
+        //     ① 优先直接透传 page.backgroundColor 这个**动态色对象**（它会随 trait 自动解析）
+        //     ② page 没有不透明底色时，用 systemBackgroundColor（本身就是动态色）
+        //   同时新增 A4：主题切换时主动调 UpdateMasks()，见 GCMasksReprobeOnThemeChange。
         UIColor *background = page.backgroundColor;
-        CGFloat alpha = 0;
-        if (!background || ![background getRed:NULL green:NULL blue:NULL alpha:&alpha] || alpha < 0.99)
-            background = UIColor.systemBackgroundColor;
-        state.blankArea.backgroundColor = background;
+        BOOL usable = NO;
+        if (background) {
+            CGFloat a = 0;
+            // 只借 getRed: 判 alpha，**不采用它的解析结果**
+            if ([background getRed:NULL green:NULL blue:NULL alpha:&a] && a >= 0.99) usable = YES;
+        }
+        // ★0.9.127（A6）：**深色模式下不许用浅色底**。
+        //   真机截图（photo_5E96916A）铁证：切深色后这块是 RGB(254,254,254) 纯白，
+        //   而正常深色背景是 RGB(8,9,13)。
+        //   说明 page.backgroundColor 在这个页面上是「固定浅色」而不是动态色 ——
+        //   高德把「我的」页背景写死成浅色，指望它跟随 trait 是不可靠的。
+        //   所以再加一道：当前判定为深色却拿到浅色底时，直接改用系统深色背景。
+        //
+        //   ★性能守卫：UpdateMask 挂在 setBounds:（每次滚动都跑），
+        //   而 GCIsDarkAppearance 内部是**全屏 drawViewHierarchyInRect**。
+        //   在这里每拍调一次 = 滚动卡顿。所以只在「需要决定颜色」时问一次，
+        //   且用 0.3s 的本地节流缓存（滚动中 far 多次也只问一次）。
+        if (usable) {
+            static BOOL sDarkCache; static double sDarkT;
+            double now2 = CACurrentMediaTime();
+            if (now2 - sDarkT > 0.3) {
+                UIWindow *pw = page.window ?: GCAnyMainWindow();
+                sDarkCache = pw ? GCIsDarkAppearance(pw) : NO;
+                sDarkT = now2;
+            }
+            if (sDarkCache) {
+                UIColor *probe = background;
+                if (@available(iOS 13.0, *)) probe = [background resolvedColorWithTraitCollection:
+                                                      [UITraitCollection traitCollectionWithUserInterfaceStyle:UIUserInterfaceStyleDark]];
+                CGFloat r = 0, g = 0, b = 0, a = 1;
+                if ([probe getRed:&r green:&g blue:&b alpha:&a]) {
+                    CGFloat luma = 0.299 * r + 0.587 * g + 0.114 * b;
+                    if (luma > 0.80) usable = NO;   // 深色模式下却是浅色底 ⇒ 丢弃
+                }
+            }
+        }
+        if (!usable) background = UIColor.systemBackgroundColor;
+        // 幂等写入：颜色相同就不写（layer 不触发重绘）
+        // desiredFill 供 GCCBlankArea 自己在 trait 变化时重新应用（见 A4）
+        if (state.blankArea.desiredFill != background) state.blankArea.desiredFill = background;
+        if (state.blankArea.backgroundColor != background)
+            state.blankArea.backgroundColor = background;
         state.blankArea.frame = CGRectMake(page.bounds.origin.x, page.bounds.origin.y + height,
                                             page.bounds.size.width, MAX(0, page.bounds.size.height - height));
         // 0.7.3：原来每帧无条件 bringSubviewToFront —— 父视图层级每帧重排。
@@ -6859,14 +6935,35 @@ static BOOL GCCLooksLikeCloseControl(UIView *v) {
     //     c. 是横幅子树里的**叶子**（subviews 为空），排除容器
     //   位置校验（靠右）在 GCCBannerHasLegalAdMark 里用横幅坐标另判。
     if (![v isKindOfClass:UIControl.class]) {
-        BOOL interactive = v.userInteractionEnabled ||
-                           (v.superview && v.superview.userInteractionEnabled);
-        if (interactive && v.subviews.count == 0) {
+        // ★0.9.127（A1）：交互性向上查 4 层，不再只看父级一层。
+        //   真机上关闭按钮的点击热区经常挂到「按钮容器」或更上层的整条横幅上，
+        //   尤其是深色主题用的是另一套资源（✕ 常被换成另一个 UIImageView），
+        //   层级关系与亮色不完全一致 ⇒ 只看父级一层会在深色下失效。
+        BOOL interactive = NO;
+        UIView *p = v;
+        for (int i = 0; i < 4 && p; i++, p = p.superview) {
+            if (p.userInteractionEnabled) { interactive = YES; break; }
+        }
+        if (v.subviews.count == 0) {
             CGSize sz = v.bounds.size;
-            if (sz.width > 0 && sz.height > 0 &&
-                sz.width <= 44 && sz.height <= 44 &&
-                sz.width >= 8 && sz.height >= 8) {
-                return YES;
+            BOOL sized = (sz.width > 0 && sz.height > 0 &&
+                          sz.width <= 44 && sz.height <= 44 &&
+                          sz.width >= 8 && sz.height >= 8);
+            if (sized) {
+                // 快通道：可交互 ⇒ 直接认（最可靠，亮/深色通用）
+                if (interactive) return YES;
+                // ★0.9.127 深色兜底：不可交互也认，但**附加两条静态约束**，
+                //   避免把纯粹的装饰图层当成关闭控件：
+                //     ① 必须带图像内容或类名可判（不是裸 UIView 空壳）
+                //     ② 长宽比接近正方（关闭按钮都是方形图标；商品图/角标常是长条）
+                NSString *lcn = NSStringFromClass(v.class).lowercaseString;
+                BOOL iconish = [v isKindOfClass:UIImageView.class] ||
+                               [lcn containsString:@"close"] ||
+                               [lcn containsString:@"dismiss"] || [lcn containsString:@"btn"] ||
+                               [lcn containsString:@"button"] || [lcn containsString:@"icon"];
+                CGFloat ar = (sz.height > 0) ? (sz.width / sz.height) : 0;
+                BOOL squareish = (ar > 0.6 && ar < 1.67);
+                if (iconish && squareish) return YES;
             }
         }
     }
@@ -8443,6 +8540,41 @@ __attribute__((constructor)) static void Initialize(void) {
             CachedRoute = nil;
         }];
 #pragma clang diagnostic pop
+        // ★0.9.127（A5）：**主题切换时要主动刷新**。
+        //   根因：UpdateMask（负责给 blankArea 上色、给 page 装 clip mask）只挂在
+        //   setBounds:/setContentOffset: 三条滚动钩子上 ⇒ 切主题不会触发它
+        //   ⇒ 探索/我的页下半屏的空白层停在旧色，深色下整片白
+        //   （老大截图 photo_5E96916A 就是这块）。
+        //
+        //   两个触发源，覆盖不同情形：
+        //     ① traitCollectionDidChange —— 挂在 UIViewController 基类上，
+        //        系统切深色/浅色、改字号、旋转都会走到；只在真的变了才响应。
+        //     ② UIApplicationDidBecomeActive —— 有些场景（切换外观后回到 App）
+        //        trait 变化发生在后台，回到前台才需要重算。
+        {
+            Class vcCls = NSClassFromString(@"UIViewController");
+            SEL tcd = NSSelectorFromString(@"traitCollectionDidChange:");
+            Method m = vcCls ? class_getInstanceMethod(vcCls, tcd) : NULL;
+            if (m) {
+                IMP orig = method_getImplementation(m);
+                const char *t = method_getTypeEncoding(m);
+                Replace(vcCls, tcd, imp_implementationWithBlock(^(UIViewController *self, UITraitCollection *prev) {
+                    ((void (*)(id, SEL, id))orig)(self, tcd, prev);
+                    // 只在「深/浅色真的变了」时动手，其余 trait 变化（字号/尺寸）不管
+                    if (@available(iOS 13.0, *)) {
+                        if (prev && prev.userInterfaceStyle == self.traitCollection.userInterfaceStyle) return;
+                    }
+                    GCNeedReprobeDark = 1;      // 让深色判定立刻重采（A2）
+                    UpdateMasks();              // 重算 blankArea 底色与遮罩
+                }), t);
+            }
+            [NSNotificationCenter.defaultCenter addObserverForName:UIApplicationDidBecomeActiveNotification
+                                                            object:nil queue:NSOperationQueue.mainQueue
+                                                        usingBlock:^(__unused NSNotification *note) {
+                GCNeedReprobeDark = 1;
+                UpdateMasks();
+            }];
+        }
         // Recheck after asynchronous cards and cell reuse; only attached target pages are scanned.
         dispatch_async(dispatch_get_main_queue(), ^{
             Schedule();

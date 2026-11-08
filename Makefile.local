@@ -140,6 +140,11 @@ check:
 	@echo "check: 外壳放行单测"
 	@gcc -O2 -Wall -Wextra -o /tmp/shell_release_test tests/shell_release_test.c -lm \
 	  && /tmp/shell_release_test | tail -3
+# 0.9.127（A8）：深色模式底色判定 —— 锁住「深色下不许用浅色底」。
+#   起因：切深色后「我的」页下半屏整片白 RGB(254,254,254)，正常深色是 RGB(8,9,13)。
+	@echo "check: 深色模式单测"
+	@gcc -O2 -Wall -Wextra -o /tmp/dark_mode_test tests/dark_mode_test.c -lm \
+	  && /tmp/dark_mode_test | tail -3
 # 0.9.20（A2）：混淆回环自测 —— 用与运行时同一份解码数学把 295 条串解回明文，
 # 逐条比对 + 校验头内 FNV 摘要；这一步保证「加密后仍 100% 解得原串」。
 	@$(CLANG) -O2 -Wall -Wextra -I src -o /tmp/obf_selftest scripts/obf_selftest.c \
