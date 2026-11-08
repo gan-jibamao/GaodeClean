@@ -1578,6 +1578,51 @@ static NSString *P43One(NSString *name, UIView *v, UIWindow *win) {
 
 #ifdef GAODECLEAN_PROBE
 @class GCCState;   // 定义在后，此处前置声明
+// probe64：**底部圆钮诊断** —— 回答「为什么『我的』页两个圆钮不跟随深色」。
+//   老大连续两版反馈：我的页圆钮 RGB(224,224,224)，首页正常 36~57。
+//   这条探针把每拍的关键事实打全：谁调用的、win 是哪个、深色判定结果、
+//   遍历到几个候选、每个候选的尺寸/位置/底色/是否被压。
+static void P64KnobProbe(UIWindow *win, const char *phase) {
+    static double last;
+    double now = CACurrentMediaTime();
+    if (now - last < 0.5) return;
+    last = now;
+    if (!win) return;
+    if (!GCProbeBuf6) GCProbeBuf6 = [NSMutableString string];
+    BOOL dark = GCIsDarkAppearance(win);
+    UIColor *fill = GCStyleFillColor(win);
+    [GCProbeBuf6 appendString:[NSString stringWithFormat:
+        @"\nt=%.1f P64[%s] win=%@ dark=%d fill=%.2f,%.2f,%.2f trait=%ld keyWin=%d\n",
+        now, phase, NSStringFromClass(win.class), dark ? 1 : 0,
+        ({ CGFloat r=0,g=0,b=0,a=0; [fill getRed:&r green:&g blue:&b alpha:&a]; r; }),
+        ({ CGFloat r=0,g=0,b=0,a=0; [fill getRed:&r green:&g blue:&b alpha:&a]; g; }),
+        ({ CGFloat r=0,g=0,b=0,a=0; [fill getRed:&r green:&g blue:&b alpha:&a]; b; }),
+        (long)win.traitCollection.userInterfaceStyle, win.isKeyWindow ? 1 : 0]];
+    CGFloat sh = win.bounds.size.height;
+    NSMutableArray *stack = [NSMutableArray arrayWithObject:win];
+    NSUInteger budget = 900; int cand = 0;
+    while (stack.count && budget--) {
+        UIView *v = [stack lastObject]; [stack removeLastObject];
+        if (v.hidden || v.alpha < 0.05f) continue;
+        if (v.subviews.count < 60) [stack addObjectsFromArray:v.subviews];
+        CGRect r = [v convertRect:v.bounds toView:win];
+        if (r.size.width < 42 || r.size.width > 100) continue;
+        if (r.size.height < 42 || r.size.height > 62) continue;
+        if (fabs(r.size.width - r.size.height) > 46) continue;
+        if (CGRectGetMidY(r) < sh * 0.85) continue;
+        cand++;
+        if (cand > 6) continue;
+        UIColor *bg = v.backgroundColor;
+        CGFloat rr=0,gg=0,bb=0,aa=0;
+        BOOL ok = bg ? [bg getRed:&rr green:&gg blue:&bb alpha:&aa] : NO;
+        CGFloat luma = ok ? (0.299*rr + 0.587*gg + 0.114*bb) : -1;
+        [GCProbeBuf6 appendString:[NSString stringWithFormat:
+            @"   cand#%d %@ win=(%.0f,%.0f,%.0f,%.0f) bg=%d(%.2f,%.2f,%.2f,a=%.2f) luma=%.2f shouldDarken=%d\n",
+            cand, NSStringFromClass(v.class), r.origin.x, r.origin.y, r.size.width, r.size.height,
+            bg ? 1 : 0, rr, gg, bb, aa, luma, (ok && luma > 0.80) ? 1 : 0]];
+    }
+    [GCProbeBuf6 appendString:[NSString stringWithFormat:@"   → 底部候选共 %d 个\n", cand]];
+}
 // probe63：**空白区（blankArea）诊断** —— 回答「深色下那块白到底是谁」。
 //   老大反馈连续三版都还是白。可能是：
 //     ① blankArea 上色没生效
@@ -4946,6 +4991,9 @@ static void GCStylePinWidgets(UIWindow *win) {
     GCStylePinBusy = YES;
     GCStylePinWidgetsInner(win);
     GCStyleDarkenRoundWidgets(win);   // 0.9.101：深色下统一压白（底栏圆钮等，无条件执行）
+#ifdef GAODECLEAN_PROBE
+    P64KnobProbe(win, "pin");
+#endif
 #ifdef GAODECLEAN_PROBE
     P33Watch(CachedCar, 0);
     P33Watch((UIView *)(CachedLiteGroup && CachedLiteGroup.window ? CachedLiteGroup : CachedRight), 1);
