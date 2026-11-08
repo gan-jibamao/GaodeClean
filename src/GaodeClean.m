@@ -18,7 +18,7 @@
 // ---- jibamao 个人标识（编译进 dylib，可用 strings 核对）----
 static NSString *const kGCAuthor      = @"jibamao";
 static NSString *const kGCRepo        = @"https://gan-jibamao.github.io/";
-static NSString *const kGCVersion     = @"0.9.130";
+static NSString *const kGCVersion     = @"0.9.131";
 
 // 0.9.18（A1）：底边间隙**按控件分开**，对表原生（搜索栏白底顶边 = 702.6pt）
 //   车机钮（连接车机 · WINDeviceInterconnectWidget）：原生底 652 → 间隙 50.6 → 取 50
@@ -4045,10 +4045,17 @@ static void GCStyleDarkenRoundWidgets(UIWindow *win) {
     if (busy) return;
     busy = 1;
     CGFloat sh = win.bounds.size.height;
-    UIView *root = (CachedTabBar && CachedTabBar.window) ? CachedTabBar.superview : win;
-    if (!root) root = win;
+    // ★0.9.131（A18）：**root 必须用窗口，不能用 CachedTabBar.superview**。
+    //   真机铁证（老大：「我的」页两个圆钮还是白，回首页正常）：
+    //     CachedTabBar 是 __weak，只在它自己的 layoutSubviews 里更新。
+    //     切到「我的」页后底栏是另一个实例，而缓存还指着首页那个
+    //     ⇒ root=CachedTabBar.superview 遍历的是**首页那棵树**，
+    //     「我的」页的按钮根本没被走到 ⇒ 保持白色。
+    //   窗口根遍历更贵，但预算 400 节点已经够用，且这是唯一正确的范围。
+    UIView *root = win ?: (CachedTabBar ? CachedTabBar.superview : nil);
+    if (!root) return;
     NSMutableArray<UIView *> *stack = [NSMutableArray arrayWithObject:root];
-    NSUInteger budget = 400;
+    NSUInteger budget = 900;   // 窗口根比子树大，预算相应放宽
     UIColor *fill = GCStyleFillColor(win);
     while (stack.count && budget--) {
         UIView *v = [stack lastObject]; [stack removeLastObject];

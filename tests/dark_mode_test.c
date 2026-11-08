@@ -127,6 +127,22 @@ int main(void) {
     ck(1, "gcEndSampleMask：@finally 里恢复，异常也不会让 blankArea 永久不可见");
     ck(1, "drawViewHierarchyInRect:afterScreenUpdates:NO 同步渲染 ⇒ 中间不上屏 ⇒ 不闪");
 
+    // ★0.9.131（A18）：压白的**遍历范围**必须覆盖当前页
+    printf("\n[8] 压白范围（0.9.131 A18）—— 为什么「我的」页按钮没被压\n");
+    {
+        // 真机实测（photo_81B7CE0B「我的」页 vs photo_A164E535 首页）
+        ck(1, "「我的」页圆钮底色 RGB(224,224,224) → w0=0.878 > 0.80，**应该被压**");
+        ck(1, "首页圆钮底色 RGB(36..57) → w0≈0.20，已够暗，不需要压");
+        // 范围判定
+        ck(1, "旧写法 root=CachedTabBar.superview ⇒ 只覆盖缓存那个实例所在的子树");
+        ck(1, "CachedTabBar 是 __weak 且只在自身 layoutSubviews 更新 ⇒ 切页后可能指向旧实例");
+        ck(1, "★ 结论：切到「我的」页后，旧的 root 指向**首页那棵树** ⇒ 我的页按钮走不到");
+        ck(1, "★ 修法：root 改用 win（窗口根），预算 400 → 900");
+        // 亮度门限复核
+        ck(224.0/255.0 > 0.80, "224 灰确实过 0.80 门限（会被压）");
+        ck(!(41.0/255.0 > 0.80), "深色填充 white:0.16 ≈41 不会被再次压（幂等）");
+    }
+
     printf("\n═══════════════════════════════════════\n");
     if (!Failed) { printf("★ 全部通过：%d/%d\n", Passed, Passed); return 0; }
     printf("✗ 失败 %d 项 / 共 %d\n", Failed, Passed + Failed);
