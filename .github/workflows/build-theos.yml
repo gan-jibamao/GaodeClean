@@ -314,47 +314,40 @@ jobs:
           files: artifacts/*
           generate_release_notes: false
           body: |
-            > 高德地图 UI 精简 · 纯运行时 hook · 不抓网络、不改 IPA
+            > 高德地图界面精简 · 纯运行时 hook · 不抓网络、不改 IPA
 
-            ## 这个版本装哪个
+            ## 装哪个
 
-            | 你的越狱环境 | 下载这个 |
+            | 你的越狱环境 | 下载 |
             | --- | --- |
-            | **RootHide / roothide**（隐根） | `*_iphoneos-arm64e.deb` |
-            | **rootless / Dopamine** | `*_iphoneos-arm64.deb` |
+            | **rootless / Dopamine / palera1n** | `*_iphoneos-arm64.deb` |
+            | **RootHide（隐根）** | `*_iphoneos-arm64e.deb` |
 
-            两个架构**不要同时装**。装完请注销（sbreload）或重启用户空间再打开高德。
+            两个架构**不要同时装**。装完注销（`sbreload`）或重启用户空间，再打开高德。
+            也可以直接从软件源装：`https://gan-jibamao.github.io/`
 
-            ## 0.9.123 —— 胶囊 1.275 秒残差根除 · 顶部运营条移除
+            ## 功能
 
-            - **胶囊不再「时快时慢」**：0.9.120 的字符串判据里有一句
-              「有 tag 就按 tag 定论，其它值 = NO」—— 这句把整条几何兜底**短路**了。
-              只要高德写进一个不含约定关键词的 tag（版本后缀、灰度变体名都算），
-              右下 ⊙/↰ 胶囊就永远认不出来、永远被按住。已改为「tag 命中走快通道，
-              未命中继续走几何兜底」，不再依赖 tag 的字面内容。
-            - **外壳与内层各自钉位、各自打标记**：`WINAJXCombinedWidgetView`（承载 ⊙/↰ 图标）
-              与 `WINLiteWidgetGroupView`（承载毛玻璃底）是两个视图、被两条不同通路控制，
-              互斥二选一必然漏掉另一半。
-            - **移除顶部运营通知条**（「请查收：【你的签到红包】」这类）：它没有任何
-              「广告/赞助/推广」字样，旧的「角标 + 关闭控件」双证判据必然漏掉；
-              新增独立通道（文案含中文方括号【】+ 右侧真实关闭控件 + 顶部通栏形状）。
+            - **去广告**：开屏广告、顶部运营横幅、顶部运营通知条（按结构判定，不看文案）
+            - **去干扰**：底栏上滑白雾/闪白、顶部模糊带、首页白块、底栏「上拉发现」引导
+            - **修布局**：定位/路线胶囊、连接车机、搜索栏、天气行按原生关系归位；
+              切页不闪、冷启动不在屏幕中部裸奔
+            - **深色模式**：底栏圆钮/胶囊/搜索钮跟随系统压深，「我的」页白底一并处理
+            - **全版本自适应**：按类名与几何特征判定，不绑定 App 版本号
 
-            ## 功能一览
+            ## 更新内容
 
-            - 根除底栏「上拉发现」引导提示与上拉白雾/闪白
-            - 移除顶部运营横幅与运营通知条、去开屏广告、去首页白块
-            - 搜索栏、天气行、连接车机、2D/3D、定位/路线胶囊按原生关系归位
-            - 冷启动：连接车机钮与 ⊙/↰ 胶囊同一拍出现，全程不在屏幕中部闪出
-            - 切页与切换 2D/3D 不再跳动
-            - 版本限制已取消：全版本自适应（按类名与几何特征判定，不依赖具体版本号）
+            本版变更见 [`HISTORY.md`](https://github.com/gan-jibamao/GaodeClean/blob/main/HISTORY.md)
+            最新章节（含根因分析与验证记录）。
 
             ## 校验
 
-            安装前请核对本页的 `SHA256SUMS.txt`。附件中的 `Source.zip` 是 `git archive` 生成的干净快照，
-            不含 `dist/`、`packages/`、`.theos/` 等构建产物。
+            安装前请核对本页的 `SHA256SUMS.txt`。附件中的 `Source.zip` 是 `git archive`
+            生成的干净快照，不含 `dist/`、`packages/`、`.theos/` 等构建产物。
 
-            ## 构建说明
+            ## 构建
 
-            由 GitHub Actions 构建：`ubuntu-latest` + roothide theos（commit 固定）+ iPhoneOS SDK（commit 固定），
-            `FINALPACKAGE=1` 双架构各出一包，并跑 `scripts/verify_deb.sh` 门禁
-            （载荷路径 / 架构切片 / 依赖 / 过滤器 / 版本串一致性 / 日志与探针零残留）。
+            由 GitHub Actions 构建：`ubuntu-latest` + roothide theos（commit 固定）
+            + iPhoneOS SDK（commit 固定），`FINALPACKAGE=1` 双架构各出一包，
+            并跑 `scripts/verify_deb.sh` 门禁（载荷路径 / 架构切片 / 依赖 /
+            过滤器 / 版本串一致性 / arm64e 链式绑定 / 日志与探针零残留）。
