@@ -18,7 +18,7 @@
 // ---- jibamao 个人标识（编译进 dylib，可用 strings 核对）----
 static NSString *const kGCAuthor      = @"jibamao";
 static NSString *const kGCRepo        = @"https://gan-jibamao.github.io/";
-static NSString *const kGCVersion     = @"0.9.132";
+static NSString *const kGCVersion     = @"0.9.133";
 
 // 0.9.18（A1）：底边间隙**按控件分开**，对表原生（搜索栏白底顶边 = 702.6pt）
 //   车机钮（连接车机 · WINDeviceInterconnectWidget）：原生底 652 → 间隙 50.6 → 取 50
@@ -34,7 +34,6 @@ static const CGFloat GCGapMapType = 13.3;
 //   即「胶囊顶 − 13.3 = 钮底；钮底 − 44 = 钮顶」⇒ 钮顶 = 胶囊顶 − 57.3。
 //   probe9 铁证：原生 win y = 609.7 = 667 − 57.3。原为裸数字，收敛为具名常量，防改一处漏一处。
 //   注：钮的尺寸不在此处写死 —— 一律用当前 frame 的 wr.size，App 改尺寸时自动跟随。
-static const CGFloat GCBtnAboveCapTop = 57.3;
 // 0.9.98（A3）：SearchBarView 尚未就绪时，用「底栏底 − 52.4」估算搜索栏顶
 //   实测 702.6 − 755 ≈ −52.4；三处兜底同值同义，收敛为常量防漂移。
 static const CGFloat GCSearchTopFromPin = 52.4;
@@ -119,7 +118,6 @@ static int GCCapEntered;                 // probe52：GCCapTrace 进入计数（
 #endif
 // 0.9.16（A2）：App 原生「轻量控件组」容器（中部裸露胶囊的真身，见 A1）
 static __weak UIView *CachedLiteGroup;
-static __weak UIView *Cached2D;          // trial27：2D/3D 模式圆钮（缩放时 App 重排会撂回原生位）
 static NSHashTable<UIView *> *GCWeatherHeldRows;   // 0.9.3：冷启动被扣留的天气行（锚点未就绪期间不显示）
 static __weak id CachedTabs;
 static __weak UIView *SearchBarView;   // 0.5.58   // 0.5.55：用于判断当前是否「首页」选中
@@ -468,7 +466,6 @@ static void GCProbeTick6(void);                      // probe6：定时取证（
 static void GCProbeTick7(void);                      // probe7：pin 链路取证（前置声明）
 #endif
 #ifdef GAODECLEAN_PROBE
-static void P19Tick(void);                            // probe20：三钮偶发位移（前置声明）
 #endif
 #ifdef GAODECLEAN_PROBE
 // ══ probe7 全局状态（tick/pin/discover 均可见；正式包整块不编译）══
@@ -476,10 +473,7 @@ static double P7T0;
 static int P7NTicks, P7DiscCalls, P7DiscSkips, P7PinCalls, P7WTicks;
 static int P7Writes[6];      // 0=车机 1=右胶囊 2=路线 3=2D 4=天气行 5=保留
 static int P7Solid;          // trial30：2D 钮「实心钉」触发次数（alpha/白底写入）
-static CGFloat P7Dx31, P7Dy31;   // trial31：2D 钮父容器 presentation 平移差（诊断跳动来源）
 typedef struct { float t, dx, dy; } P32Sample;
-static P32Sample P32Dev[6];      // trial32：2D 钮逐帧偏差样本（最近 6 次）
-static int P32DevN, P32DevI;     // trial32：偏差帧总数 / 环下标
 static int P7WGates[3];      // 0=通过 1=bar非视图 2=评估
 static double P7FirstSeen[6], P7FirstPin[6], P7FirstKey;
 static __weak UIView *P7LastPW;
@@ -588,9 +582,9 @@ static int P37Fixed = 5;   // 前 5 个为固定目标（车机/胶囊/路线/2D
 static void P37RefreshTargets(void) {
     int n = 0;
     UIView *cap = (CachedLiteGroup && CachedLiteGroup.window) ? (UIView *)CachedLiteGroup : (UIView *)CachedRight;
-    UIView *fixed[5] = { CachedCar, cap, CachedRoute, Cached2D, P7RowMir };
-    const char *fn[5] = { "车机", "胶囊", "路线", "2D钮", "天气行" };
-    for (int i = 0; i < 5 && n < P37_MAX; i++) {
+    UIView *fixed[4] = { CachedCar, cap, CachedRoute, P7RowMir };
+    const char *fn[4] = { "车机", "胶囊", "路线", "天气行" };
+    for (int i = 0; i < 4 && n < P37_MAX; i++) {
         if (!fixed[i]) continue;
         P37V[n] = fixed[i];
         snprintf(P37Name[n], sizeof(P37Name[n]), "%s", fn[i]);
@@ -1372,14 +1366,11 @@ static void P37Sample(void) {
 //   probe11 教训：故障态只出现在特定时刻，固定时间采样永远错过（5 段采样全是 735/实心）。
 //   A1 天气行偏移看门狗：|行顶-735|>8 持续 0.2s ⇒ 当场把「祖先链 model/pres + 对齐计数 +
 //      全部天气类实例坐标」拼成快照字符串存下（最多 3 份）。
-//   A2 2D 钮「无墨」看门狗：每帧算墨量（自身 bgA + 子树每层 alpha/opacity/contents/hidden），
-//      状态翻转 ⇒ 当场把完整子树拼成快照（最多 3 份）。
 static NSMutableArray<NSString *> *P39Wx, *P39Ink;
-static int P39WxBadFrames, P39LastInkBad = -1;
+static int P39WxBadFrames;
 static double P39WxSince;
 static int P39AlignCalls, P39AlignWrites, P39AlignSkipCar, P39AlignSkipReenter;
 static int P37ParentFix, P37FreeFix;   // trial37：父容器拉回次数 / 游离天气实例归位次数
-
 static NSString *P39Chain(UIView *v) {
     NSMutableString *s = [NSMutableString string];
     int n = 0;
@@ -1388,21 +1379,6 @@ static NSString *P39Chain(UIView *v) {
         [s appendFormat:@"%@ model=%@ pres=%@ a=%.2f h=%d | ",
             NSStringFromClass(p.class), NSStringFromCGRect(p.layer.frame),
             pl ? NSStringFromCGRect(pl.frame) : @"(nil)", p.alpha, (int)p.hidden];
-    }
-    return s;
-}
-static NSString *P39Subtree(UIView *v) {
-    NSMutableString *s = [NSMutableString string];
-    NSMutableArray *q = [NSMutableArray array];
-    if (v) [q addObject:v];
-    int n = 0;
-    while (q.count && n < 40) {
-        UIView *x = q.firstObject; [q removeObjectAtIndex:0]; n++;
-        [s appendFormat:@"%@ f=%@ a=%.2f op=%.2f h=%d cts=%d bgA=%.2f | ",
-            NSStringFromClass(x.class), NSStringFromCGRect(x.frame), x.alpha,
-            x.layer.opacity, (int)x.hidden, x.layer.contents ? 1 : 0,
-            x.backgroundColor ? CGColorGetAlpha(x.backgroundColor.CGColor) : 0];
-        [q addObjectsFromArray:x.subviews];
     }
     return s;
 }
@@ -1445,28 +1421,6 @@ static void P39Sample(void) {
         }
     } else {
         P39WxBadFrames = 0;
-    }
-    // ── A2 2D 钮「无墨」看门狗
-    UIView *b = Cached2D;
-    if (b && b.window) {
-        CGFloat bgA = b.backgroundColor ? CGColorGetAlpha(b.backgroundColor.CGColor) : 0;
-        BOOL anyContent = NO;
-        NSMutableArray *q = [NSMutableArray arrayWithObject:b];
-        for (NSUInteger i = 0; i < q.count && i < 40; i++) {
-            UIView *x = q[i];
-            [q addObjectsFromArray:x.subviews];
-            if (x.layer.contents && x.alpha > 0.05 && !x.hidden && x.layer.opacity > 0.05) anyContent = YES;
-        }
-        int inkBad = anyContent ? 0 : 1;   // probe13：只看内容层（bgA 是我们写的白底，不算墨）
-        if (inkBad != P39LastInkBad) {
-            P39LastInkBad = inkBad;
-            NSMutableString *s = [NSMutableString stringWithFormat:
-                @"t=%.1f 状态=%@ 按钮=%@ win=%@ a=%.2f bgA=%.2f 子树: ",
-                t, inkBad ? @"无墨透明" : @"有墨可见", NSStringFromClass(b.class),
-                NSStringFromCGRect([b convertRect:b.bounds toView:nil]), b.alpha, bgA];
-            [s appendString:P39Subtree(b)];
-            P39Store(P39Ink, s);
-        }
     }
 }
 // ══ probe14：真身定位（纯只读）══
@@ -1551,10 +1505,9 @@ static NSString *P41LottieList(void) {
                 }
                 if (p == p.window) break;
             }
-            [s appendFormat:@"[w%d]%@ %@ a=%.2f h=%d%@%@ / ", wi,
+            [s appendFormat:@"[w%d]%@ %@ a=%.2f h=%d%@ / ", wi,
                 NSStringFromClass(v.class), NSStringFromCGRect(r),
                 v.alpha, (int)v.hidden,
-                (v.window == Cached2D.window && Cached2D && CGRectEqualToRect(r, [Cached2D convertRect:Cached2D.bounds toView:nil])) ? @"★同位" : @"",
                 bad];
         }
     }
@@ -1723,14 +1676,6 @@ static void P43Snap(void) {
     NSMutableString *s = [NSMutableString stringWithFormat:@"t=%.0f ", now];
     [s appendString:P43One(@"车机", CachedCar, w)];
     [s appendString:P43One(@"胶囊", CachedRight, w)];
-    [s appendString:P43One(@"2D钮", Cached2D, w)];
-    if (Cached2D) {   // trial42(A4)：环(2D钮) 与 内容 必须同行对比 —— 截图铁证两者差 90.3pt
-        for (UIView *c2 in Cached2D.subviews)
-            if ([NSStringFromClass(c2.class) isEqualToString:@"WINAJXCombinedItemView"]) {
-                [s appendString:P43One(@"2D内容", c2, w)];
-                break;
-            }
-    }
     [s appendString:P43One(@"天气", (UIView *)P7RowMir, w)];
     [s appendString:P43One(@"底栏", CachedTabBar, w)];
     if (CachedTabBar)   // trial44：记录底栏 transform（a=缩放, ty=平移）—— 判定 App 是否用缩放挤按钮
@@ -1750,50 +1695,6 @@ static void P43Snap(void) {
 }
 #endif
 
-static NSString *P40BtnInfo(void) {
-    NSMutableString *s = [NSMutableString string];
-    UIView *b = Cached2D;
-    if (!b) return @"Cached2D=nil";
-    [s appendString:@"祖先链: "];
-    int n = 0;
-    for (UIView *p = b; p && n < 14; p = p.superview, n++) {
-        [s appendFormat:@"%@ h=%d a=%.2f op=%.2f | ",
-            NSStringFromClass(p.class), (int)p.hidden, p.alpha, p.layer.opacity];
-        if (p == p.window) break;
-    }
-    UIWindow *w = b.window;
-    if (w) [s appendFormat:@"window h=%d a=%.2f bounds=%@ key=%d | ",
-        (int)w.hidden, w.alpha, NSStringFromCGRect(w.bounds), (int)w.isKeyWindow];
-    [s appendString:@"候选: "];
-    Class cItem = NSClassFromString(@"WINAJXCombinedItemView");
-    Class cLot = NSClassFromString(@"LOTAnimationView");
-    int cnt = 0;
-    for (UIWindow *ww in GCAllWindows()) {
-        NSMutableArray *q = [NSMutableArray arrayWithObject:ww];
-        for (NSUInteger i = 0; i < q.count && q.count < 2000; i++) {
-            UIView *v = q[i];
-            [q addObjectsFromArray:v.subviews];
-            if (!v.window) continue;
-            CGRect r = [v convertRect:v.bounds toView:nil];
-            if (r.size.width < 30 || r.size.width > 60) continue;
-            if (fabs(r.size.width - r.size.height) > 10) continue;
-            if (CGRectGetMidX(r) < v.window.bounds.size.width - 64) continue;
-            BOOL hit = NO;
-            NSMutableArray *qq = [NSMutableArray arrayWithObject:v];
-            for (NSUInteger k = 0; k < qq.count && k < 20; k++) {
-                UIView *x = qq[k];
-                [qq addObjectsFromArray:x.subviews];
-                if ((cItem && [x isKindOfClass:cItem]) || (cLot && [x isKindOfClass:cLot])) { hit = YES; break; }
-            }
-            if (!hit) continue;
-            cnt++;
-            [s appendFormat:@"%@ %@ a=%.2f h=%d%@ / ", NSStringFromClass(v.class), NSStringFromCGRect(r),
-                v.alpha, (int)v.hidden, (v == b) ? @"★我们盯的" : @""];
-        }
-    }
-    if (!cnt) [s appendString:@"(无)"];
-    return s;
-}
 #endif
 #endif
 
@@ -3346,22 +3247,7 @@ static void GCProbeDump7(NSString *reason) {
             }
         }
     }
-    if (Cached2D)   // trial27：2D 钮自证行；trial30 补 alpha/白底α/实心钉；trial31 补父容器 Δ 与父类名
-        [o appendFormat:@"2D钮 %@ win=%@ hid=%d a=%.2f bgA=%.2f 实心=%d sup=%@ d=(%.1f,%.1f)\n",
-            NSStringFromClass(Cached2D.class),
-            NSStringFromCGRect([Cached2D convertRect:Cached2D.bounds toView:nil]), Cached2D.hidden,
-            Cached2D.alpha,
-            Cached2D.backgroundColor ? CGColorGetAlpha(Cached2D.backgroundColor.CGColor) : 0,
-            P7Solid, NSStringFromClass(Cached2D.superview.class), P7Dx31, P7Dy31];
 #ifdef GAODECLEAN_PROBE
-    if (Cached2D) {   // trial32：跳动取证 —— 偏差帧总数 + 最近 6 个样本（t=秒, dx/dy=偏离目标的 pt）
-        NSMutableString *p32s = [NSMutableString string];
-        for (int i32 = 0; i32 < 6; i32++) {
-            if (P32Dev[i32].t <= 0) continue;
-            [p32s appendFormat:@"(t=%.1f dx=%.1f dy=%.1f) ", P32Dev[i32].t, P32Dev[i32].dx, P32Dev[i32].dy];
-        }
-        [o appendFormat:@"P32偏差: 帧数=%d 最近=%@\n", P32DevN, p32s.length ? p32s : @"(无)"];
-    }
     {   // trial34：消失事件（时间 / 哪个钮 / 现或隐 / 原因 / 当时窗口系坐标）
         NSMutableString *e34 = [NSMutableString string];
         for (int i34 = 0; i34 < 12; i34++) {
@@ -3438,7 +3324,6 @@ static void GCProbeDump7(NSString *reason) {
         }
         [o appendString:@"\n"];
         [o appendFormat:@"P40天气实例: %@\n", P40WeatherList()];
-        [o appendFormat:@"P40 2D钮: %@\n", P40BtnInfo()];
     }
 #endif
     if (CachedCar) {
@@ -3493,207 +3378,6 @@ __attribute__((unused)) static void GCProbeTick7(void) {
 }
 #endif
 
-#ifdef GAODECLEAN_PROBE
-// ══════════════════════════════════════════════════════════════════════════
-// probe19：底栏三钮（首页/搜索/我的）偶发位移取证 —— 偏差触发式，60fps
-//
-// 为什么要新探针：probe16/17/18 都是 1Hz 采样，三钮 span 恒为 0.00，
-//   说明位移发生在两次采样之间（亚秒级）。定时 dump 天生抓不到。
-// 做法：每帧比对锁定基线，偏离 > 0.5pt 才开事件，记录前后各 1.5s 的逐帧轨迹。
-// 同时给三钮的 setFrame:/setCenter:/setTransform: 挂钩，抓"谁写的"，
-//   probe20 起改为零 swizzle，写入者信息由 GCStylePinTabItems 的纠正量间接给出。
-// 性质：纯只读，不修改任何视图属性。
-// ══════════════════════════════════════════════════════════════════════════
-#define P19_N 12
-static __weak UIView *P19View[P19_N];
-static CGRect P19Base[P19_N];
-static BOOL   P19Has[P19_N];
-static int    P19Persist[P19_N];   // probe22：连续偏离帧数（超 300 采纳新基线）
-static long   P19Noise = 0;        // probe22：非三钮（面板等）偏离计数，只统计不刷日志
-static int    P19EventFrames = 0;
-static NSMutableString *P19Log;
-static int    P19EventNo = 0, P19Dumps = 0;
-
-static void P19Flush(NSString *reason) {
-    if (P19Dumps >= 40 || !P19Log.length) return;
-    P19Dumps++;
-    NSMutableString *o = [NSMutableString stringWithFormat:
-        @"\n########## probe21 %@ #%d build=%@ ##########\n", reason, P19Dumps, kGCVersion];
-    [o appendString:@"候选: "];
-    for (int i = 0; i < P19_N; i++)
-        [o appendFormat:@"[%d]%@ base=%@  ", i,
-            P19View[i] ? NSStringFromClass(P19View[i].class) : @"nil",
-            P19Has[i] ? NSStringFromCGRect(P19Base[i]) : @"-"];
-    [o appendFormat:@"面板噪声偏离计数(非三钮,已忽略)=%ld\n", P19Noise];
-    [o appendString:P19Log];
-    @try {
-        NSString *dir = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES).firstObject;
-        NSString *path = [dir stringByAppendingPathComponent:@"GaodeClean-probe21.txt"];
-        // ★probe21(A5)：追加写入 —— probe20 用 writeToFile:atomically:YES 每次都覆盖，
-        //   用户从剪贴板只能拿到最后一份，前面 17 次事件全丢。现在累积保留全部事件。
-        NSData *data = [o dataUsingEncoding:NSUTF8StringEncoding];
-        NSFileManager *fm = [NSFileManager defaultManager];
-        if (![fm fileExistsAtPath:path]) {
-            [data writeToFile:path atomically:YES];
-        } else {
-            NSFileHandle *fh = [NSFileHandle fileHandleForWritingAtPath:path];
-            if (fh) { @try { [fh seekToEndOfFile]; [fh writeData:data]; } @finally { [fh closeFile]; } }
-        }
-    } @catch (__unused NSException *e19b) {}
-    // 剪贴板只放摘要，避免覆盖用户内容太狠；完整记录在 Documents 文件里。
-    @try {
-        NSString *brief = o.length > 4000 ? [o substringToIndex:4000] : o;
-        [UIPasteboard generalPasteboard].string = [NSString stringWithFormat:
-            @"[probe21] %@ #%d build=%@\n完整记录见 Documents/GaodeClean-probe21.txt\n\n%@",
-            reason, P19Dumps, kGCVersion, brief];
-    } @catch (__unused NSException *e19a) {}
-    NSLog(@"[probe21] %@ #%d 已落盘 (%lu 字符)", reason, P19Dumps, (unsigned long)o.length);
-    [P19Log setString:@""];
-}
-
-// ★probe20(A1)：setter 钩子已全部删除 —— probe19 的 setFrame:/setCenter:/setTransform:
-//   对同一实现做了重复挂钩（当时误以为 WINTabBarSubItem 是 WINTabBarItem 的子类，
-//   probe42 实测两者并无继承关系：白名单判继承 ⇒ SUBhook=0），使"原实现"指向自身，
-//   真机崩溃报告 510 帧同一返回地址 0x114d0 = 纯自递归栈溢出（EXC_BAD_ACCESS / 栈区地址）。
-//   现在改为零 swizzle：只用"我们自己 pin 的纠正量"间接证明 App 动过。
-//   注：probe42 的挂钩改用「运行时类捕获 + 跨组去重」，且 Replace() 先 class_addMethod，
-//       根本上不会再出现"原实现指向自身"。
-static void P19NoteCorr(NSString *cls, CGFloat dx) {
-    if (!P19Log) P19Log = [NSMutableString string];
-    [P19Log appendFormat:@"  CORR %@ 原偏移=%.1fpt t=%.2f\n", cls, dx, CACurrentMediaTime()];
-    if (P19EventFrames <= 0) P19EventFrames = 90;   // 纠正即视为事件，抓前后轨迹
-}
-
-static void P19Discover(void) {
-    UIWindow *win = CachedTabBar.window;
-    if (!win) return;
-    CGFloat sh = win.bounds.size.height;
-    NSMutableArray<UIView *> *cand = [NSMutableArray array];
-    NSMutableArray<UIView *> *q = [NSMutableArray arrayWithObject:win];
-    NSUInteger budget = 1200;
-    while (q.count && budget--) {
-        UIView *v = [q lastObject]; [q removeLastObject];
-        [q addObjectsFromArray:v.subviews];
-        if (v.hidden || v.alpha < 0.05f) continue;
-        CGRect r = [v convertRect:v.bounds toView:win];
-        if (r.size.width < 40 || r.size.width > 70) continue;
-        if (fabs(r.size.width - r.size.height) > 8) continue;
-        if (r.origin.y < sh * 0.85) continue;            // 底栏条带
-        // ★probe21(A1)：必须在屏幕内。probe20 只设了下界，结果把 y=930~1048（屏高 852）
-        //   的面板元素也收了进来，7 个 AJXContainerView 占满槽位，把「我的」挤出候选列表。
-        if (CGRectGetMaxY(r) > sh + 1) continue;
-        if (r.origin.y < 0) continue;
-        // ★probe21(A2)：父链必须归属底栏；若不在底栏子树（如中间搜索钮），
-        //   则要求与底栏矩形相交，避免把碰巧同高度的面板元素当成按钮。
-        BOOL inBar = NO;
-        for (UIView *a = v; a; a = a.superview) {
-            if (a == CachedTabBar || [NSStringFromClass(a.class) containsString:@"WINTabBar"]) { inBar = YES; break; }
-        }
-        if (!inBar && CachedTabBar.window) {
-            CGRect br = [CachedTabBar convertRect:CachedTabBar.bounds toView:win];
-            if (!CGRectIntersectsRect(r, br)) continue;
-        }
-        [cand addObject:v];
-    }
-    // 去掉"父视图也在候选里"的内层重复（SubItem 与 Item 同矩形，只留外层）
-    NSMutableArray<UIView *> *top = [NSMutableArray array];
-    for (UIView *v in cand) {
-        BOOL nested = NO;
-        for (UIView *a = v.superview; a; a = a.superview)
-            if ([cand containsObject:a]) { nested = YES; break; }
-        if (!nested) [top addObject:v];
-    }
-    [top sortUsingComparator:^NSComparisonResult(UIView *a, UIView *b) {
-        return [a convertRect:a.bounds toView:win].origin.x < [b convertRect:b.bounds toView:win].origin.x
-               ? NSOrderedAscending : NSOrderedDescending;
-    }];
-    // ★probe21(A3)：同一 x（±20pt）只留第一个 —— 噪声不会再挤掉真实按钮。
-    NSMutableArray<UIView *> *uniq = [NSMutableArray array];
-    for (UIView *v in top) {
-        CGFloat x = [v convertRect:v.bounds toView:win].origin.x;
-        BOOL dup = NO;
-        for (UIView *u in uniq)
-            if (fabs([u convertRect:u.bounds toView:win].origin.x - x) < 20) { dup = YES; break; }
-        if (!dup) [uniq addObject:v];
-    }
-    for (int i = 0; i < P19_N; i++) {
-        UIView *v = (i < (int)uniq.count) ? uniq[i] : nil;
-        if (v == P19View[i]) continue;
-        P19View[i] = v; P19Has[i] = NO;
-        if (v) {
-            P19Base[i] = [v convertRect:v.bounds toView:win];
-            P19Has[i] = YES;
-        }
-    }
-}
-
-static void P19Tick(void) {
-    static int fc = 0;
-    fc++;
-    if (fc % 30 == 0) P19Discover();
-    if (!P19Log) P19Log = [NSMutableString string];
-    UIView *bar = CachedTabBar;
-    if (!bar || !bar.window) return;
-    if (fc == 1800 && P19EventNo == 0) P19Flush(@"30s无事件(基线)");
-    // ★持续偏离兜底：事件永不结束（App 一直偏着 / 我们 pin 失效）时，
-    //   每 300 帧（5s）强制落盘一次，并对日志长度设上限，避免内存无限增长。
-    if (P19EventFrames > 0 && (fc % 300 == 0 || P19Log.length > 200000)) P19Flush(@"事件持续");
-    for (int i = 0; i < P19_N; i++) {
-        UIView *v = P19View[i];
-        if (!v || !v.window || !P19Has[i]) continue;
-        CGRect r = [v convertRect:v.bounds toView:nil];
-        CGRect pb = CGRectNull;
-        @try {
-            CALayer *pl = (CALayer *)v.layer.presentationLayer;
-            if (pl) pb = [pl convertRect:pl.bounds toLayer:nil];
-        } @catch (__unused NSException *e19c) {}
-        CGFloat dx = CGRectGetMidX(r) - CGRectGetMidX(P19Base[i]);
-        CGFloat dy = CGRectGetMidY(r) - CGRectGetMidY(P19Base[i]);
-        // ★probe22(A3)：只有 WINTabBarItem（首页/我的）才算事件。
-        //   probe21 里 AJXContainerView 的面板收起（dy=160）占了 232/288 帧，把日志撑满。
-        NSString *cn = NSStringFromClass(v.class);
-        if (![cn containsString:@"WINTabBarItem"]) { P19Noise++; continue; }
-        BOOL dev = (fabs(dx) > 0.5 || fabs(dy) > 0.5);
-        // ★probe22：撤掉钉位后 App 可能自主把按钮停在 ±60。若长期稳定偏离，
-        //   说明那是 App 的新常态 —— 采纳为新基线，否则事件永不结束、日志无限增长。
-        if (dev) {
-            if (++P19Persist[i] > 300) {   // 5 秒
-                [P19Log appendFormat:@"采纳新基线 i=%d %@ win=%@ (原基线 %@)\n",
-                    i, cn, NSStringFromCGRect(r), NSStringFromCGRect(P19Base[i])];
-                P19Base[i] = r; P19Persist[i] = 0;
-                continue;
-            }
-        } else {
-            P19Persist[i] = 0;
-        }
-        if (dev && P19EventFrames <= 0) {
-            P19EventFrames = 90;
-            [P19Log appendFormat:@"\n===== 事件%d 起 t=%.2f =====\n", ++P19EventNo, CACurrentMediaTime()];
-        }
-        if (P19EventFrames > 0) {
-            // ★probe21(A4)：只记录真正动了的索引 —— probe20 每帧打印全部 8 个，
-            //   8×30=240 行里 210 行是噪声，真实位移被淹没。静止时每 10 帧补一行快照。
-            if (dev) {
-                [P19Log appendFormat:@"t=%.2f i=%d %@ dx=%.1f dy=%.1f win=%@ pres=%@ anim=%@ tr=(%.2f,%.2f,%.2f,%.2f) sup=%@ supF=%@ bar=%@\n",
-                    CACurrentMediaTime(), i, NSStringFromClass(v.class), dx, dy,
-                    NSStringFromCGRect(r), CGRectIsNull(pb) ? @"-" : NSStringFromCGRect(pb),
-                    v.layer.animationKeys.count ? [v.layer.animationKeys componentsJoinedByString:@","] : @"-",
-                    v.transform.a, v.transform.b, v.transform.c, v.transform.d,
-                    NSStringFromClass(v.superview.class), NSStringFromCGRect(v.superview.frame),
-                    NSStringFromCGAffineTransform(bar.transform)];
-                P19EventFrames = 90;
-            } else if (fc % 10 == 0) {
-                [P19Log appendFormat:@"  .t=%.2f i=%d 静止 win=%@\n",
-                    CACurrentMediaTime(), i, NSStringFromCGRect(r)];
-            }
-            if (!dev && --P19EventFrames <= 0) {
-                [P19Log appendFormat:@"----- 事件%d 结束 -----\n", P19EventNo];
-                P19Flush(@"事件");
-            }
-        }
-    }
-}
-#endif  // GAODECLEAN_PROBE (probe19)
 
 // trial11：实例发现（缓存失效才 BFS）—— 从 AlignCornerWidgets 收归，pin 自给自足
 static void GCStyleDiscoverWidgets(UIWindow *win) {
@@ -3732,8 +3416,7 @@ static void GCStyleDiscoverWidgets(UIWindow *win) {
         if (!GCStyleGoneAt[3]) GCStyleGoneAt[3] = gnow;
         if (gnow - GCStyleGoneAt[3] > 1.0) { CachedLiteGroup = nil; GCStyleGoneAt[3] = 0; }
     } else GCStyleGoneAt[3] = 0;
-    if (Cached2D && !Cached2D.window) Cached2D = nil;   // trial27：2D 钮断链即清（App 真删时 BFS 重发现）
-    // ★trial50(A1)：Cached2D 已停用（0.9.29 无此缓存），不再参与"齐套"判定，
+    // ★trial50(A1)：2D/3D 钮已移除（0.9.29），不再参与"齐套"判定，
     //   否则恒缺员 ⇒ 每拍全树 BFS 白烧。
     // ★0.9.121（A4）：早退门必须剔除「脱窗」实例 —— 非 nil 不算齐套，得有 window。
     //   0.9.120（A2）加的 GCPinnedRightStrong 是**强引用**：App 毁掉实例后对象仍活着
@@ -3773,7 +3456,7 @@ static void GCStyleDiscoverWidgets(UIWindow *win) {
         }
         else if ([cn isEqualToString:GCStrAt(141)]) CachedRoute = v;
         else if (GCCIsLiteGroupCapsule(v)) CachedLiteGroup = v;
-        // ★trial50(A1)：撤除 trial27 的 GCStyleIs2DBtn 识别 —— 0.9.29 没有 Cached2D。
+        // ★trial50(A1)：撤除 trial27 的 2D 钮识别 —— 0.9.29 起已无该控件。
         //   它缓存的是 WINAJXCombinedWidgetView 里那个 cr=100 的 UIView（父容器常被 App 隐藏），
         //   与 0.9.29 使用的 WINPermanentCompassView 是两个不同实例，是后续所有 2D 钮问题的源头。
         if (CachedCar && CachedRight && CachedRoute && CachedLiteGroup) break;
@@ -3808,27 +3491,6 @@ static void GCStyleDiscoverWidgets(UIWindow *win) {
 //        └ UIVisualEffectView own={0,−76.36}
 //     UIView {339,609.7} cr=100 sub=1  ← 我们钉的 2D 钮（只剩一圈环）
 //   ⇒ 我们只钉了后者，前者（真正的白圆外观）从没管过 = 白圆与空环分离。
-static void GCStylePinTwinFaces(UIView *w) {
-    if (!w || !w.superview) return;
-    UIView *sv = w.superview;
-    CGRect wr = [w convertRect:w.bounds toView:nil];
-    for (UIView *sib in [sv.subviews copy]) {
-        if (sib == w) continue;
-        CGRect sr = [sib convertRect:sib.bounds toView:nil];
-        if (fabs(sr.origin.x - wr.origin.x) > 3.0 || fabs(sr.origin.y - wr.origin.y) > 3.0) continue;
-        if (fabs(sr.size.width - wr.size.width) > 3.0 || fabs(sr.size.height - wr.size.height) > 3.0) continue;
-        CGRect bb = sib.bounds;
-        for (UIView *face in [sib.subviews copy]) {
-            if (![face isMemberOfClass:[UIView class]]) continue;   // 只认纯 UIView（白底圆），不碰模糊层
-            if (face.subviews.count != 0) continue;
-            if (CGRectEqualToRect(face.frame, bb)) continue;
-            [CATransaction begin]; [CATransaction setDisableActions:YES];
-            [face.layer removeAllAnimations];
-            face.frame = bb;
-            [CATransaction commit];
-        }
-    }
-}
 // ★trial49(A1)：右侧空壳容器清理 —— 修 (339,610) 那圈 1px 灰环。
 //   证据：截图实测 x339-380 / y612-652 细环、内部完全透明（背景灰透出）；
 //         probe18 t=10.2~10.8 连续 5 次「同步位移 c11:UIVisualEffectView:610→632…682」
@@ -4240,13 +3902,12 @@ static void GCStylePinOne(UIView *v) {
     UIView *capNow = (CachedLiteGroup && CachedLiteGroup.window) ? CachedLiteGroup : CachedRight;
     BOOL isCar = (v == CachedCar);
     BOOL isCap = (capNow && v == capNow);
-    BOOL is2D = (v == Cached2D);                          // trial27
     // trial37（probe13 铁证）：hidden 期间**照钉几何**，只跳过可见性写入 ——
     //   旧 return 让 App 藏钮期间把它漂到 167/69（P37 流水 WINAJXCombinedWidgetView:167→69→667），
     //   复现时从错位跳回 = 老大说的「乱跑」。
 
     //   （旧守卫 alpha<0.5 就整帧跳过 ⇒ 切换时 App 淡出+下滑无人拦，视频 11.0s 铁证）
-    if (!isCar && !isCap && !is2D) return;
+    if (!isCar && !isCap) return;
     GCStylePinOneBusy = YES;
     @try {
         CGFloat sw = win.bounds.size.width;
@@ -4272,80 +3933,13 @@ static void GCStylePinOne(UIView *v) {
 #endif
             }
         }
-        else if (is2D) {                                  // trial29：帽顶上方 57.3pt = App 原生相对位
-            //   probe9 铁证：原生 win y=609.7 = capTop(667)-57.3；trial27 用 capTop-15-44=608
-            //   与原生差 1.7pt > 幂等容差 0.6 ⇒ 每帧拉锯（2D=198）。改用原生间距 ⇒ 收敛零拉锯，
-            //   缩放撂回叠帽态（top=capTop+33）时照样纠回。
-            CGRect capw = GCModelWinRect(capNow, win);  // trial43(D1)：模型层 —— 不再跟着 App 动画跑
-            g = CGRectMake(CGRectGetMidX(capw) - wr.size.width / 2,
-                           capw.origin.y - GCBtnAboveCapTop, wr.size.width, wr.size.height);
-            // ★trial30（老大 12:59 截图铁证：44pt 位置精准、内部全透明只剩 1px 环）：
-            //   钮的可见内容 = 自身 backgroundColor + Lottie 动画，App 在加载/切换态会淡掉或清底，
-            //   trial29 只钉几何 ⇒ 透明态无人纠正。这里补「实心钉」，幂等（达标即不写）。
-            if (!v.hidden) {
-                if (v.alpha < 0.999f) {
-                    [CATransaction begin]; [CATransaction setDisableActions:YES];
-                    v.alpha = 1.0f;
-                    [CATransaction commit];
-#ifdef GAODECLEAN_PROBE
-                    P7Solid++;
-#endif
-                }
-                // 0.9.100：原「2D 钮补白底」整段删除 ——
-                //   该钮已被 probe48 判定为「老大要移除的那颗」并常驻隐藏，
-                //   再给它补 whiteColor 只会在深色模式下刷出一块白。
-                (void)0;
-            }
-            // ★trial40：父容器被 App 隐藏时**边沿触发**拉回（0.3s 冷却），不再每帧对拉。
-            //   dump 铁证：WINAJXCombinedWidgetView h=1 时子钮 a=1.00 也画不出来 = 老大看到的「透明」。
-            {
-                static double sP40Last;
-                UIView *p40 = v.superview;
-                if (p40 && p40.window && !v.hidden
-                    && (p40.hidden || p40.alpha < 0.05f || p40.layer.opacity < 0.05f)) {
-                    double n40 = CACurrentMediaTime();
-                    if (n40 - sP40Last > 0.3) {
-                        sP40Last = n40;
-#ifdef GAODECLEAN_PROBE
-                        // probe49(A3)：自证 —— 我们到底有没有把父容器强行设出来？
-                        //   触发条件：p40.hidden || p40.alpha<0.05 || p40.opacity<0.05
-                        //   若这是 App 启动期的正常隐藏，我们就是把它提前拽亮了。
-                        P25Append([NSString stringWithFormat:
-                            @"t=%.2f P40-WRITE cls=%@ hid=%d→0 a=%.2f→1.00 op=%.2f→1.00 子=%@\n",
-                            P7Now(), @(class_getName(object_getClass(p40))),
-                            p40.hidden ? 1 : 0, p40.alpha, p40.layer.opacity,
-                            @(class_getName(object_getClass(v)))]);
-#endif
-                        [CATransaction begin]; [CATransaction setDisableActions:YES];
-                        p40.hidden = NO; p40.alpha = 1.0f; p40.layer.opacity = 1.0f;
-                        [CATransaction commit];
-                    }
-                }
-            }
-        } else g = CGRectMake(sw - 10 - wr.size.width, pinBottom - wr.size.height, wr.size.width, wr.size.height);
+        else g = CGRectMake(sw - 10 - wr.size.width, pinBottom - wr.size.height, wr.size.width, wr.size.height);
         CGRect local = [v.superview convertRect:g fromView:win];
         // ★trial33（老大：完全乱了，车机钮与 2D 钮不见）：trial32 的链式补偿被整体撤掉。
         //   判定：dump 采样时刻一切正常（车机 673 / 2D 609.7 / 天气 735），乱是采样之后才发生；
         //   trial32 唯一新增的写入路径就是这里 ⇒ 先撤写入，改为「只读取证」。
         //   本块不写任何几何/动画，物理上不可能影响布局。
 #ifdef GAODECLEAN_PROBE
-        if (is2D) {
-            CALayer *pl33 = v.layer.presentationLayer;
-            CALayer *svp33 = v.superview.layer.presentationLayer;
-            if (pl33 && svp33 && win.layer) {
-                CGRect presWin = [svp33 convertRect:pl33.frame toLayer:win.layer];
-                CGFloat dx33 = presWin.origin.x - g.origin.x;
-                CGFloat dy33 = presWin.origin.y - g.origin.y;
-                P7Dx31 = dx33; P7Dy31 = dy33;
-                if ((fabs(dx33) > 1.0 || fabs(dy33) > 1.0) && fabs(dx33) < 400 && fabs(dy33) < 400) {
-                    P32DevN++;
-                    P32Dev[P32DevI].t = (float)P7Now();
-                    P32Dev[P32DevI].dx = (float)dx33;
-                    P32Dev[P32DevI].dy = (float)dy33;
-                    P32DevI = (P32DevI + 1) % 6;
-                }
-            }
-        }
 #endif
         // ★trial41（截图铁证：3D 内容跑到 561pt、610pt 处只剩空圆环；缩放时首页/我的也跳）：
         //   根因 = 这些控件仍受 App 的 AutoLayout 约束管理 ⇒ 我们写 frame 被布局引擎覆盖，
@@ -4356,22 +3950,7 @@ static void GCStylePinOne(UIView *v) {
             [v.layer removeAllAnimations]; v.frame = local;
             [CATransaction commit];
 #ifdef GAODECLEAN_PROBE
-            if (is2D) {
-                CGRect c2 = capNow ? [capNow convertRect:capNow.bounds toView:win] : CGRectNull;
-                P7Write(3, wr, local, c2);
-            }
 #endif
-        }
-        if (is2D) {   // 内部内容（WINAJXCombinedItemView/LOTAnimationView）钉回自身 bounds
-            CGRect bb = CGRectMake(0, 0, local.size.width, local.size.height);
-            for (UIView *sv41 in [v.subviews copy]) {
-                if (!CGRectEqualToRect(sv41.frame, bb)) {
-                    [CATransaction begin]; [CATransaction setDisableActions:YES];
-                    [sv41.layer removeAllAnimations]; sv41.frame = bb;
-                    [CATransaction commit];
-                }
-            }
-            GCStylePinTwinFaces(v);   // trial43(D2)：把孪生容器的白底外观钉回 bounds（修白圆/空环分离）
         }
     } @catch (__unused NSException *e) {}
     GCStylePinOneBusy = NO;
@@ -4653,16 +4232,16 @@ static void GCStylePinWidgetsInner(UIWindow *win) {   // trial25(A2)：原体改
     {
         // ★0.9.123（A1）：外壳与内层是**两个视图**，两类钩子都要挂 ——
         //   原来的 `cap` 是"二选一"的产物，漏掉的那个类永远钩不上。
-        UIView *w26[4] = { car, CachedLiteGroup, CachedRight, Cached2D };
+        UIView *w26[3] = { car, CachedLiteGroup, CachedRight };
         // ★trial29：通用基类黑名单 —— probe9 铁证：2D 钮类 = 裸 UIView，trial27 把
         //   layoutSubviews/setFrame:/setCenter: 挂到了全 App 的 UIView 基类上 ⇒ 每个视图
         //   每次布局都进块 ⇒ 定位按钮触摸布局被干扰失效（点定位无法定位）。
-        //   基类实例只走帧级主动钉（下方 Cached2D 行）+ 容器钩兜底，绝不挂基类钩。
+        //   基类实例只走帧级主动钉 + 容器钩兜底，绝不挂基类钩。
         //   （CALayer 基类的 layer 钩 trial26 起已挂且录屏验证无副作用，指针过滤放行非目标。）
         static NSSet *bl29; static dispatch_once_t t29;
         dispatch_once(&t29, ^{ bl29 = [NSSet setWithObjects:@"UIView", @"UILabel", @"UIImageView",
             @"UIControl", @"UIButton", @"UIVisualEffectView", @"UIScrollView", @"UIStackView", nil]; });
-        for (int i26 = 0; i26 < 4; i26++) {
+        for (int i26 = 0; i26 < 3; i26++) {
             UIView *v26 = w26[i26];
             if (!v26) continue;
             NSString *cn26 = NSStringFromClass(v26.class);
@@ -4676,12 +4255,8 @@ static void GCStylePinWidgetsInner(UIWindow *win) {   // trial25(A2)：原体改
         }
     }
     GCStyleShellEnforce();                    // trial49(A1)：空壳容器（60fps，只碰缓存实例）
-#ifdef GAODECLEAN_PROBE
-    P19Tick();                                // ★probe20(A2)：必须在 pin 之前采样，否则自己的纠正会擦掉证据
-#endif
     GCStylePinTabItems(win);                  // trial42(A3)：首页/我的 每帧钉 x
     GCStylePinCapsuleFill();                  // ★trial54(A2)：搜索胶囊白底 60fps
-    if (Cached2D) GCStylePinOne(Cached2D);   // trial27：帧级主动钉（钩子通道只拦 App 写入，发现即纠）
 }
 // ★trial54(A2)：搜索胶囊白底 60fps 强制写回（与两钮同因：App 按帧重置成透明）。
 static void GCStylePinCapsuleFill(void) {
@@ -4908,9 +4483,6 @@ static void GCStylePinTabItems(UIWindow *win) {
         if (!CGAffineTransformIsIdentity(it.transform)) {   // trial44(E3)：App 用缩放把两钮往中间挤
             [CATransaction begin]; [CATransaction setDisableActions:YES];
             [it.layer removeAllAnimations];
-#ifdef GAODECLEAN_PROBE
-            P19NoteCorr(NSStringFromClass(it.class), 0.0);   // probe20：缩放挤位（transform 非单位阵）
-#endif
             it.transform = CGAffineTransformIdentity;
             [CATransaction commit];
         }
@@ -5035,7 +4607,6 @@ static void GCStylePinWidgets(UIWindow *win) {
 #ifdef GAODECLEAN_PROBE
     P33Watch(CachedCar, 0);
     P33Watch((UIView *)(CachedLiteGroup && CachedLiteGroup.window ? CachedLiteGroup : CachedRight), 1);
-    P33Watch(Cached2D, 2);
     if (++P26Tick >= 3) { P26Tick = 0; P26TreeDiff(win, (float)P7Now()); }
     GCStyleMapTypeAlign(win);   // trial51(A4)：2D/3D 钮帧级对齐（App 每帧都能挪，5Hz 追不上）
 #ifdef GAODECLEAN_PROBE
@@ -7260,7 +6831,7 @@ static BOOL GCCLooksLikeCloseControl(UIView *v) {
 static BOOL GCCIsPinnedHomeView(UIView *v) {
     if (!v) return NO;
     if (v == SearchBarView || v == CachedTabBar || v == CachedCar || v == CachedRight ||
-        v == CachedRoute || v == CachedLiteGroup || v == Cached2D) return YES;
+        v == CachedRoute || v == CachedLiteGroup) return YES;
     if (IsWeatherRowClass(NSStringFromClass(v.class))) return YES;
     return NO;
 }
