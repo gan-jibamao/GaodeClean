@@ -18,7 +18,7 @@
 // ---- jibamao 个人标识（编译进 dylib，可用 strings 核对）----
 static NSString *const kGCAuthor      = @"jibamao";
 static NSString *const kGCRepo        = @"https://gan-jibamao.github.io/";
-static NSString *const kGCVersion     = @"0.9.133";
+static NSString *const kGCVersion     = @"0.9.134";
 
 // 0.9.18（A1）：底边间隙**按控件分开**，对表原生（搜索栏白底顶边 = 702.6pt）
 //   车机钮（连接车机 · WINDeviceInterconnectWidget）：原生底 652 → 间隙 50.6 → 取 50
@@ -510,45 +510,12 @@ static void P7Write(int idx, CGRect before, CGRect after, CGRect contWin) {
 //   老大不记得触发时机 ⇒ 让程序自己记：下次 dump 直接给到消失时刻与原因。
 typedef struct { float t; int tag, alive, why; float x, y, w, h; } P33Ev;
 static P33Ev P33Evs[12];
-static int P33EvI, P33EvTotal, P33LastAlive[3] = {-1, -1, -1};
+static int P33EvTotal;
 static const char *P33TagName(int tag) { return tag == 0 ? "车机" : (tag == 1 ? "胶囊" : "2D钮"); }
 static const char *P33WhyName(int why) {
     switch (why) {
         case 1: return "脱窗"; case 2: return "hidden"; case 3: return "alpha0"; case 4: return "出屏";
         default: return "正常";
-    }
-}
-static void P33Watch(UIView *v, int tag) {
-    if (!v) return;
-    int alive = 1, why = 0;
-    if (!v.window) { alive = 0; why = 1; }
-    else if (v.hidden) { alive = 0; why = 2; }
-    else if (v.alpha < 0.05f) { alive = 0; why = 3; }
-    else {
-        CGRect r0 = [v convertRect:v.bounds toView:v.window];
-        if (r0.origin.y < -40 || r0.origin.y > v.window.bounds.size.height - 10) { alive = 0; why = 4; }
-    }
-    if (alive != P33LastAlive[tag]) {
-        P33LastAlive[tag] = alive;
-        CGRect r = v.window ? [v convertRect:v.bounds toView:v.window] : CGRectZero;
-        P33Evs[P33EvI].t = (float)P7Now();
-        P33Evs[P33EvI].tag = tag;
-        P33Evs[P33EvI].alive = alive;
-        P33Evs[P33EvI].why = why;
-        P33Evs[P33EvI].x = (float)r.origin.x; P33Evs[P33EvI].y = (float)r.origin.y;
-        P33Evs[P33EvI].w = (float)r.size.width; P33Evs[P33EvI].h = (float)r.size.height;
-        P33EvI = (P33EvI + 1) % 12;
-        P33EvTotal++;
-        // ★0.9.116（C-探针）：事件里补上当时的三道门控状态 ——
-        //   这是「App 晚创建」与「我们按住」的判据：
-        //     why=1(脱窗) 且 key=0  → App 还没把它挂上窗口，我们无能为力
-        //     why=2(hidden) 且 key=1 → 已钉位却仍被按，说明还有别的按住通道
-        //     why=2(hidden) 且 key=0 → 我们按的，等钉位即可放行
-        P7Note(@"P33EV %s%s %s r=(%.0f,%.0f,%.0f,%.0f) key=%d settled=%d cold=%ld",
-               P33TagName(tag), alive ? "现" : "隐", P33WhyName(why),
-               r.origin.x, r.origin.y, r.size.width, r.size.height,
-               objc_getAssociatedObject(v, &AlignedKey) ? 1 : 0,
-               SearchBarSettled, (long)ColdTicks);
     }
 }
 // ══ probe11：全局逐帧轨迹取证（纯只读，不写任何几何/透明度/动画）══
@@ -564,58 +531,17 @@ static void P33Watch(UIView *v, int tag) {
 #define P37_LOG 40
 typedef struct { float mx, my, px, py, mw, mh, a; short hid; short idx; } P37Cell;
 typedef struct { float t; short tag, from, to, a0, a1; } P37Jmp;   // from/to 为 pt（×1）
-static P37Cell P37Ring[P37_RING][P37_MAX];
-static float P37RT[P37_RING];
-static int P37RingI, P37RingN;
+static int P37RingN;
 static P37Cell P37Ev[P37_EVN][P37_EVF][P37_MAX];
 static float P37EvT[P37_EVN][P37_EVF];
 static int P37EvN[P37_EVN], P37EvCnt, P37EvTarget[P37_EVN];
 static P37Jmp P37JmpLog[P37_LOG];
-static int P37JmpI, P37JmpTotal;
+static int P37JmpTotal;
 static char P37Name[P37_MAX][72];
 static __weak UIView *P37V[P37_MAX];
-static int P37N, P37ScanTick, P37PtrSwap;
-static void *P37LastPtr[P37_MAX];
-static float P37LastPy[P37_MAX], P37LastPx[P37_MAX], P37Jumps[P37_MAX];
-static int P37Fixed = 5;   // 前 5 个为固定目标（车机/胶囊/路线/2D钮/天气行）
+static int P37N, P37PtrSwap;
+static float P37Jumps[P37_MAX];
 
-static void P37RefreshTargets(void) {
-    int n = 0;
-    UIView *cap = (CachedLiteGroup && CachedLiteGroup.window) ? (UIView *)CachedLiteGroup : (UIView *)CachedRight;
-    UIView *fixed[4] = { CachedCar, cap, CachedRoute, P7RowMir };
-    const char *fn[4] = { "车机", "胶囊", "路线", "天气行" };
-    for (int i = 0; i < 4 && n < P37_MAX; i++) {
-        if (!fixed[i]) continue;
-        P37V[n] = fixed[i];
-        snprintf(P37Name[n], sizeof(P37Name[n]), "%s", fn[i]);
-        n++;
-    }
-    P37Fixed = n;
-    // 容器子树补抓（MapWidgetContainerView 及同层），深度 ≤3、尺寸合理、去重
-    UIView *seed = CachedCar ? CachedCar.superview : nil;
-    if (!seed) seed = cap ? cap.superview : nil;
-    if (seed) {
-        NSMutableArray *q = [NSMutableArray arrayWithObject:seed];
-        int depthGuard = 0;
-        while (q.count && n < P37_MAX && depthGuard++ < 400) {
-            UIView *v = q.firstObject; [q removeObjectAtIndex:0];
-            CGRect r = [v convertRect:v.bounds toView:v.window];
-            BOOL dup = NO;
-            for (int i = 0; i < n; i++) if (P37V[i] == v) { dup = YES; break; }
-            if (!dup && v.window && r.size.width >= 16 && r.size.width <= 420 &&
-                r.size.height >= 14 && r.size.height <= 160 && n < P37_MAX) {
-                P37V[n] = v;
-                snprintf(P37Name[n], sizeof(P37Name[n]), "c%d:%s", n, NSStringFromClass(v.class).UTF8String ?: "?");
-                n++;
-            }
-            if (q.count + v.subviews.count < 120) [q addObjectsFromArray:v.subviews];
-        }
-    }
-    for (int i = n; i < P37_MAX; i++) { P37V[i] = nil; P37Name[i][0] = 0; }
-    // ⑤ 重扫后目标换了 ⇒ 重置位置/指针基线，避免把「我自己换目标」记成「App 换实例」
-    for (int i = 0; i < P37_MAX; i++) { P37LastPy[i] = 0; P37LastPx[i] = 0; P37LastPtr[i] = NULL; }
-    P37N = n;
-}
 // ══════════════════════════════════════════════════════════════════════════
 // ★probe25：逐帧「运动段落」日志
 //   事实：采样本来就是 60fps（CADisplayLink → P37Sample）。抓不到不是采样慢，是记录门槛：
@@ -625,14 +551,6 @@ static void P37RefreshTargets(void) {
 //   本块把记录精度提到帧级：同一目标的一次连续运动合并成一行（起止时刻+帧数+起止坐标+透明度），
 //   静止 3 帧收笔；每行立即追加到 Documents/GaodeClean-changes.txt，不等定时 dump。
 #define P25_QUIET 6          // 6帧：60fps=100ms / 120fps=50ms
-static BOOL  P25Act[P37_MAX], P25WasNil[P37_MAX];
-static float P25FromX[P37_MAX], P25FromY[P37_MAX], P25FromA[P37_MAX];
-static float P25LastX[P37_MAX], P25LastY[P37_MAX], P25LastA[P37_MAX];
-static float P25StartT[P37_MAX];
-static float P25LastT[P37_MAX];
-static float P25FromW[P37_MAX], P25FromH[P37_MAX], P25LastW[P37_MAX], P25LastH[P37_MAX];
-static int   P25Frames[P37_MAX], P25Quiet[P37_MAX];
-static int   P25FromHid[P37_MAX], P25LastHid[P37_MAX];
 static NSMutableString *P25Buf;
 
 static void P25Flush(void) {
@@ -656,314 +574,39 @@ static void P25Append(NSString *s) {
     if (P25Buf.length > 8192) P25Flush();
 }
 
-static NSString *P25Name(int i) {
-    NSString *s = [NSString stringWithUTF8String:P37Name[i]];
-    return s.length ? s : @"?";
-}
 
-static void P25Episode(int i, float x, float y, float w, float h, float a, int hid, float t) {
-    if (i < 0 || i >= P37_MAX) return;
-    if (P25WasNil[i]) {                    // 弱引用恢复：重置基线并记一行
-        P25WasNil[i] = NO; P25Act[i] = NO;
-        P25LastX[i] = x; P25LastY[i] = y; P25LastA[i] = a; P25LastHid[i] = hid;
-        P25Append([NSString stringWithFormat:@"t=%.2f FOUND %@ (%.1f,%.1f) a=%.2f\n",
-                   t, P25Name(i), x, y, a]);
-        return;
-    }
-    BOOL moved = (fabsf(x - P25LastX[i]) > 0.5f || fabsf(y - P25LastY[i]) > 0.5f
-                  || fabsf(w - P25LastW[i]) > 0.5f || fabsf(h - P25LastH[i]) > 0.5f
-                  || fabsf(a - P25LastA[i]) > 0.02f || hid != P25LastHid[i]);
-    if (moved) {
-        if (!P25Act[i]) {                  // 开新段落
-            P25Act[i] = YES;
-            P25FromX[i] = P25LastX[i]; P25FromY[i] = P25LastY[i];
-            P25FromA[i] = P25LastA[i]; P25FromHid[i] = P25LastHid[i];
-            P25FromW[i] = P25LastW[i]; P25FromH[i] = P25LastH[i];
-            P25StartT[i] = t; P25Frames[i] = 0;
-        }
-        P25LastX[i] = x; P25LastY[i] = y; P25LastA[i] = a; P25LastHid[i] = hid;
-        P25LastW[i] = w; P25LastH[i] = h; P25LastT[i] = t;
-        P25Frames[i]++; P25Quiet[i] = 0;
-    } else if (P25Act[i] && ++P25Quiet[i] >= P25_QUIET) {   // 静止 3 帧 → 收笔
-        P25Act[i] = NO;
-        P25Append([NSString stringWithFormat:
-            @"t=%.2f→%.2f (%d帧) %@ (%.1f,%.1f)→(%.1f,%.1f) d=(%+.1f,%+.1f) sz=%.0fx%.0f→%.0fx%.0f a=%.2f→%.2f hid=%d→%d\n",
-            P25StartT[i], P25LastT[i], P25Frames[i], P25Name(i),
-            P25FromX[i], P25FromY[i], P25LastX[i], P25LastY[i],
-            P25LastX[i] - P25FromX[i], P25LastY[i] - P25FromY[i],
-            P25FromW[i], P25FromH[i], P25LastW[i], P25LastH[i],
-            P25FromA[i], P25LastA[i], P25FromHid[i], P25LastHid[i]]);
-    }
-}
 
-static void *P25Ptr[P37_MAX];          // 独立实例基线：不被 P37RefreshTargets 清零
 
-static void P25Swap(int i, float x, float y, float a, int hid, float t) {
-    if (i < 0 || i >= P37_MAX) return;
-    P25Act[i] = NO; P25Quiet[i] = 0; P25WasNil[i] = NO;
-    P25LastX[i] = x; P25LastY[i] = y; P25LastA[i] = a; P25LastHid[i] = hid;
-    P25Append([NSString stringWithFormat:@"t=%.2f SWAP 槽位%d → %@ (基线重置)\n", t, i, P25Name(i)]);
-}
 
-static long P25FrameCnt;
-static double P25FpsT0;
-static void P25EnvOnce(void) {
-    static BOOL done;
-    if (done) return; done = YES;
-    id v = NSBundle.mainBundle.infoDictionary[@"CADisableMinimumFrameDurationOnPhone"];
-    P25Append([NSString stringWithFormat:@"环境: CADisableMinimumFrameDurationOnPhone=%@ 屏上限=%ld\n",
-               v ?: @"（缺失）", (long)UIScreen.mainScreen.maximumFramesPerSecond]);
-}
 
 // ── probe29(A2)：底栏 item 的渲染层状态（此前探针完全看不见 layer.mask）────
 // probe30(A1)：模型层读不出闪烁（alpha=1/bounds 84x54 全程不变），必须读表现层。
-static struct { CGRect b; float dia, a, pa; float pw, ph; int hid, mk, anim; int has; } P29T[2];
-static void P29Tab(int i, UIView *v, CGFloat dia, CAShapeLayer *mk) {
-    if (i < 0 || i > 1 || !v) return;
-    CGRect b = v.bounds; float a = (float)v.alpha;
-    CALayer *pl = v.layer.presentationLayer ?: v.layer;
-    float pa = (float)pl.opacity;                       // 屏幕上真实不透明度
-    float pw = (float)pl.bounds.size.width, ph = (float)pl.bounds.size.height;
-    int hid = v.hidden ? 1 : 0, m = (mk && mk.path) ? 1 : 0;
-    int anim = (int)v.layer.animationKeys.count;
-    if (P29T[i].has
-        && fabs(b.size.width - P29T[i].b.size.width) < 0.5
-        && fabs(b.size.height - P29T[i].b.size.height) < 0.5
-        && fabs(dia - (CGFloat)P29T[i].dia) < 0.5
-        && fabsf(a - P29T[i].a) < 0.02f
-        && fabsf(pa - P29T[i].pa) < 0.02f
-        && fabsf(pw - P29T[i].pw) < 0.5f && fabsf(ph - P29T[i].ph) < 0.5f
-        && hid == P29T[i].hid && m == P29T[i].mk && anim == P29T[i].anim) return;
-    P29T[i].b = b; P29T[i].dia = (float)dia; P29T[i].a = a; P29T[i].pa = pa;
-    P29T[i].pw = pw; P29T[i].ph = ph;
-    P29T[i].hid = hid; P29T[i].mk = m; P29T[i].anim = anim; P29T[i].has = 1;
-    P25Append([NSString stringWithFormat:
-        @"t=%.2f TAB[%d] model=%.1fx%.1f/%.2f pres=%.1fx%.1f/%.2f dia=%.1f hid=%d mask=%d anim=%d\n",
-        P7Now(), i, b.size.width, b.size.height, a, pw, ph, pa, dia, hid, m, anim]);
-}
 
 // probe31：可见性全量快照。视频证明整块白圆消失，而 alpha/bounds/mask 全正常 => 真凶在盲区。
 //   盲区清单：layer.hidden / layer.opacity / bounds.origin / frame / 祖先链 / mask 层自身 / 遮挡。
 // probe31b(A1)：逐字段判单位矩阵，避免引入 CATransform3DIsIdentity 外部符号。
 // 崩溃报 bad bind opcode 0x00，probe31 相对 probe30 唯一新增导入就是它，先摘掉。
-static int P30IsIdentity(CATransform3D t) {
-    return (t.m11 == 1.0 && t.m22 == 1.0 && t.m33 == 1.0 && t.m44 == 1.0
-            && t.m12 == 0.0 && t.m13 == 0.0 && t.m14 == 0.0
-            && t.m21 == 0.0 && t.m23 == 0.0 && t.m24 == 0.0
-            && t.m31 == 0.0 && t.m32 == 0.0 && t.m34 == 0.0
-            && t.m41 == 0.0 && t.m42 == 0.0 && t.m43 == 0.0) ? 0 : 1;
-}
 
-static void P30Snap(int i, UIView *v, CAShapeLayer *mk) {
-    if (i < 0 || i > 1 || !v) return;
-    CALayer *L = v.layer, *pl = L.presentationLayer ?: L;
-    CGRect f = v.frame, b = v.bounds;
-    float pa = (float)pl.opacity;
-    NSMutableString *ch = [NSMutableString string];
-    UIView *p = v.superview;
-    for (int k = 0; k < 5 && p; k++, p = p.superview)
-        [ch appendFormat:@"%@[h%d o%.2f lh%d lm%d] ", NSStringFromClass(p.class),
-            p.hidden ? 1 : 0, (double)p.alpha, L.hidden ? 1 : 0, p.layer.mask ? 1 : 0];
-    UIView *hit = nil;
-    @try {
-        CGPoint c = [v convertPoint:CGPointMake(b.size.width * 0.5f, b.size.height * 0.5f) toView:v.window];
-        hit = [v.window hitTest:c withEvent:nil];
-    } @catch (__unused NSException *e) {}
-    CGRect bb = mk.path ? CGPathGetBoundingBox(mk.path) : CGRectZero;
-    P25Append([NSString stringWithFormat:
-        @"t=%.2f SNAP[%d] f=(%.1f,%.1f,%.1fx%.1f) b=(%.1f,%.1f) a=%.2f lo=%.2f lh=%d tr=%d "
-        @"pres=%.2f mk[f=(%.1f,%.1f,%.1fx%.1f) bb=%.1fx%.1f h=%d o=%.2f] hit=%@ | %@\n",
-        P7Now(), i, f.origin.x, f.origin.y, f.size.width, f.size.height,
-        b.origin.x, b.origin.y, (double)v.alpha, (double)L.opacity, L.hidden ? 1 : 0,
-        P30IsIdentity(L.transform), (double)pa,
-        mk.frame.origin.x, mk.frame.origin.y, mk.frame.size.width, mk.frame.size.height,
-        bb.size.width, bb.size.height, mk.hidden ? 1 : 0, (double)mk.opacity,
-        hit ? NSStringFromClass(hit.class) : @"nil", ch]);
-}
 
 // probe31(A2)：心跳 —— 让「代码没跑」与「没有变化」在日志里可区分
-static void P31Shot(int i, CGRect wr, UIWindow *win);
 
-static void P30Heartbeat(int ia, int ib, int bar, UIView *barV) {
-    static int hb;
-    if (++hb % 15) return;
-    if (!barV) { P25Append([NSString stringWithFormat:@"t=%.2f HB items=%d/%d bar=0\n", P7Now(), ia, ib]); return; }
-    CGRect f = barV.frame;
-    P25Append([NSString stringWithFormat:
-        @"t=%.2f HB items=%d/%d bar=1 f=(%.0f,%.0f,%.0fx%.0f) a=%.2f lo=%.2f lh=%d msk=%d\n",
-        P7Now(), ia, ib, f.origin.x, f.origin.y, f.size.width, f.size.height,
-        (double)barV.alpha, (double)barV.layer.opacity, barV.layer.hidden ? 1 : 0,
-        barV.layer.mask ? 1 : 0]);
-}
 
 // probe32(A2)：不可见瞬间抓一张窗口实况，直接看屏幕上到底是什么。
 //   上限 6 张，避免写盘风暴；只在 bits 翻转时触发。
-static void P31Shot(int i, CGRect wr, UIWindow *win) {
-    static int shots;
-    if (shots >= 6 || !win) return;
-    shots++;
-    @try {
-        CGRect r = CGRectInset(wr, -40, -40);
-        if (!CGRectIntersectsRect(r, win.bounds) || r.size.width < 8.0f || r.size.height < 8.0f) return;
-        UIGraphicsImageRenderer *ren = [[UIGraphicsImageRenderer alloc] initWithSize:r.size];
-        UIImage *img = [ren imageWithActions:^(UIGraphicsImageRendererContext *ctx) {
-            [win drawViewHierarchyInRect:CGRectMake(-r.origin.x, -r.origin.y,
-                                                    win.bounds.size.width, win.bounds.size.height)
-                       afterScreenUpdates:NO];
-        }];
-        NSString *dir = [NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES) firstObject];
-        NSString *path = [dir stringByAppendingPathComponent:
-                          [NSString stringWithFormat:@"GaodeClean-vis%d-%d.png", i, shots]];
-        [UIImagePNGRepresentation(img) writeToFile:path atomically:YES];
-        P25Append([NSString stringWithFormat:@"t=%.2f SHOT[%d] %@\n", P7Now(), i, path.lastPathComponent]);
-    } @catch (__unused NSException *e) {}
-}
 
 // probe33(A1)：把 WINTabBar 单独渲染成位图（不含任何外部遮挡），采样按钮处亮度。
 //   probe32 铁证：9 条属性判据全绿(bits=0x000)，屏幕整块消失 => 属性对不等于像素对。
 //   栏内渲染有白圆而屏幕没有 => 被遮挡；栏内也没有 => 自身内容/裁剪问题。
 // probe34(A2)：自动标定坐标偏移。probe33 实测 全图max=0（内容被推到画布外）。
 //   renderInContext 的绘制原点不确定，两种偏移各试一次，取最大亮度高的那个。
-static unsigned char *P32RenderBar(UIView *bar, size_t *ow, size_t *oh) {
-    CGRect b = bar.bounds;
-    size_t w = (size_t)b.size.width, h = (size_t)b.size.height;
-    if (w < 8 || h < 8 || w > 2048 || h > 2048) return NULL;
-    unsigned char *best = NULL; int bestMax = -1;
-    CGRect fr = bar.frame;
-    CGFloat offs[2][2] = { {0.0, 0.0}, {-fr.origin.x, -fr.origin.y} };
-    for (int t = 0; t < 2; t++) {
-        unsigned char *buf = (unsigned char *)calloc(w * h * 4, 1);
-        if (!buf) continue;
-        CGColorSpaceRef cs = CGColorSpaceCreateDeviceRGB();
-        CGContextRef ctx = CGBitmapContextCreate(buf, w, h, 8, w * 4, cs, kCGImageAlphaPremultipliedLast);
-        CGColorSpaceRelease(cs);
-        if (!ctx) { free(buf); continue; }
-        CGContextTranslateCTM(ctx, 0, (CGFloat)h);
-        CGContextScaleCTM(ctx, 1.0, -1.0);
-        CGContextTranslateCTM(ctx, offs[t][0], offs[t][1]);
-        @try { [bar.layer renderInContext:ctx]; } @catch (__unused NSException *e) {}
-        CGContextRelease(ctx);
-        int mx = 0;
-        for (size_t k = 0; k < w * h; k++) {
-            int v = (buf[k * 4] * 30 + buf[k * 4 + 1] * 59 + buf[k * 4 + 2] * 11) / 100;
-            if (v > mx) mx = v;
-        }
-        static int loggedOffset;
-        if (mx > bestMax) { if (best) free(best); best = buf; bestMax = mx; }
-        else free(buf);
-        if (!loggedOffset && mx > 50) {
-            loggedOffset = 1;
-            P25Append([NSString stringWithFormat:@"t=%.2f RENDER-CAL offset=%d max=%d\n", P7Now(), t, mx]);
-        }
-    }
-    if (!best) return NULL;
-    *ow = w; *oh = h;
-    return best;
-}
 
 // probe33(A2)：白圆消失时把「栏的渲染结果」存图，上限 6 张。
-static void P32Shot(int i, UIView *bar) {
-    static int shots;
-    if (shots >= 6) return;
-    size_t w = 0, h = 0;
-    unsigned char *buf = P32RenderBar(bar, &w, &h);
-    if (!buf) return;
-    shots++;
-    @try {
-        CGColorSpaceRef cs = CGColorSpaceCreateDeviceRGB();
-        CGContextRef c2 = CGBitmapContextCreate(buf, w, h, 8, w * 4, cs, kCGImageAlphaPremultipliedLast);
-        CGColorSpaceRelease(cs);
-        if (c2) {
-            CGImageRef cg = CGBitmapContextCreateImage(c2);
-            if (cg) {
-                UIImage *img = [UIImage imageWithCGImage:cg];
-                NSString *dir = [NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES) firstObject];
-                NSString *path = [dir stringByAppendingPathComponent:
-                                  [NSString stringWithFormat:@"GaodeClean-bar%d-%d.png", i, shots]];
-                [UIImagePNGRepresentation(img) writeToFile:path atomically:YES];
-                P25Append([NSString stringWithFormat:@"t=%.2f BARSHOT %@\n", P7Now(), path.lastPathComponent]);
-                CGImageRelease(cg);
-            }
-            CGContextRelease(c2);
-        }
-    } @catch (__unused NSException *e) {}
-    free(buf);
-}
 
 // probe34(A1)：mask 层全状态。probe33 只看了 path 包围盒(恒 54x54)，
 //   但 mask 能不能透出内容还取决于 frame/position/opacity/hidden/动画。
 //   两个钮同时消失、搜索钮不受影响、属性全绿 => 最大嫌疑就是这个 mask。
-static void P33Mask(int i, UIView *it, CAShapeLayer *mk) {
-    if (!mk || i < 0 || i > 1 || !it) return;
-    CALayer *pl = mk.presentationLayer;
-    CGRect mf = mk.frame, pf = pl ? pl.frame : CGRectZero;
-    float v[8] = { (float)mf.origin.x, (float)mf.origin.y, (float)mf.size.width, (float)mf.size.height,
-                   (float)mk.opacity, (float)pf.origin.x, (float)pf.origin.y, (float)pf.size.width };
-    int h[3] = { mk.hidden ? 1 : 0, (int)mk.animationKeys.count, (it.layer.mask == mk) ? 1 : 0 };
-    static float lv[2][8]; static int lh[2][3]; static int has[2];
-    BOOL ch = !has[i];
-    if (!ch) { for (int k = 0; k < 8; k++) if (fabsf(v[k] - lv[i][k]) > 0.5f) { ch = YES; break; } }
-    if (!ch) { for (int k = 0; k < 3; k++) if (h[k] != lh[i][k]) { ch = YES; break; } }
-    if (!ch) return;
-    has[i] = 1;
-    for (int k = 0; k < 8; k++) lv[i][k] = v[k];
-    for (int k = 0; k < 3; k++) lh[i][k] = h[k];
-    CGRect bb = mk.path ? CGPathGetBoundingBox(mk.path) : CGRectZero;
-    P25Append([NSString stringWithFormat:
-        @"t=%.2f MSK[%d] f=(%.1f,%.1f,%.1fx%.1f) pres=(%.1f,%.1f,%.1f) o=%.2f h=%d anim=%d inst=%d path=%.0fx%.0f keys=%@\n",
-        P7Now(), i, mf.origin.x, mf.origin.y, mf.size.width, mf.size.height,
-        pf.origin.x, pf.origin.y, pf.size.width, (double)mk.opacity,
-        h[0], h[1], h[2], bb.size.width, bb.size.height,
-        mk.animationKeys.count ? [mk.animationKeys componentsJoinedByString:@","] : @"-"]);
-}
 
 // probe33(A1)：每 2 帧采一次。同时统计全图最大亮度做自检（渲染失败会接近 0）。
-static void P32Pixel(UIView *a, UIView *b) {
-    static int tick;
-    if (++tick % 2) return;
-    UIView *bar = CachedTabBar;
-    if (!bar || !a || !b) return;
-    size_t w = 0, h = 0;
-    unsigned char *buf = P32RenderBar(bar, &w, &h);
-    if (!buf) return;
-    int mx = 0;
-    for (size_t k = 0; k < w * h; k++) {
-        int v = (buf[k * 4] * 30 + buf[k * 4 + 1] * 59 + buf[k * 4 + 2] * 11) / 100;
-        if (v > mx) mx = v;
-    }
-    CGRect fa = a.frame, fb = b.frame;
-    int cur[2] = { -1, -1 };
-    CGRect fr[2] = { fa, fb };
-    for (int i = 0; i < 2; i++) {
-        CGFloat px = CGRectGetMidX(fr[i]), py = CGRectGetMinY(fr[i]) + 47.0;
-        if (px >= 0 && py >= 0 && px < (CGFloat)w && py < (CGFloat)h) {
-            size_t o = ((size_t)py * w + (size_t)px) * 4;
-            cur[i] = (buf[o] * 30 + buf[o + 1] * 59 + buf[o + 2] * 11) / 100;
-        }
-    }
-    free(buf);
-    static int la[2] = { -999, -999 };
-    static int lastMx;
-    for (int i = 0; i < 2; i++) {
-        if (cur[i] < 0) continue;
-        int now = (cur[i] > 180) ? 1 : 0;
-        int old = (la[i] == -999) ? now : ((la[i] > 180) ? 1 : 0);
-        if (now != old) {
-            la[i] = cur[i];
-            P25Append([NSString stringWithFormat:
-                @"t=%.2f PIX[%d] 亮度=%d 全图max=%d => %@ | 栏f=(%.0f,%.0f,%.0fx%.0f)\n",
-                P7Now(), i, cur[i], mx,
-                now ? @"白圆在(栏内画出来了→被遮挡)" : @"白圆不在(栏内也没画→自身问题)",
-                bar.frame.origin.x, bar.frame.origin.y, bar.frame.size.width, bar.frame.size.height]);
-            if (!now) P32Shot(i, bar);
-        }
-        la[i] = cur[i];
-    }
-    static int zeroRun;
-    if (mx < 50) { zeroRun++; } else { zeroRun = 0; }
-    if (zeroRun == 30) P25Append([NSString stringWithFormat:@"t=%.2f RENDER-FAIL 连续30次 max<50\n", P7Now()]);
-    (void)lastMx;
-}
 
 // probe37(A1)：抓「谁在给底栏加滑入动画」—— 直接打调用栈。
 //   本轮实测：底栏移除 0 次，滑入动画 10 次，每次 position{from={0,84} to={0,0}}。
@@ -1010,419 +653,40 @@ static void P36Track(UIView *bar) {
 //   probe35 铁证：四次闪烁精确对应 WINTabBar 的 k1，但 model/pres 透明度恒 1.00、
 //   bounds 恒 393x60，视频显示两钮先消失再从下方偏外回来
 //   => 动画一定在 position/transform 上。
-static void P35Anim(int i, UIView *v) {
-    if (i < 0 || i > 2 || !v) return;
-    CALayer *L = v.layer;
-    NSArray<NSString *> *keys = L.animationKeys;
-    static NSArray *last[3]; static int has[3];
-    if (has[i] && ((!keys && !last[i]) || (keys && [keys isEqualToArray:last[i]]))) return;
-    has[i] = 1; last[i] = keys;
-    NSMutableString *s = [NSMutableString string];
-    for (NSString *k in keys) {
-        CAAnimation *a = [L animationForKey:k];
-        if ([a isKindOfClass:[CABasicAnimation class]]) {
-            CABasicAnimation *b = (CABasicAnimation *)a;
-            [s appendFormat:@"%@{from=%@ to=%@ dur=%.2f} ", k, b.fromValue, b.toValue, (double)b.duration];
-        } else if (a) {
-            [s appendFormat:@"%@{%@} ", k, NSStringFromClass(a.class)];
-        }
-    }
-    if (i == 0 && keys.count) P36Who();
-    CALayer *pl = L.presentationLayer ?: L;
-    P25Append([NSString stringWithFormat:
-        @"t=%.2f ANM[%d] %@ %@| pos=(%.1f,%.1f)->(%.1f,%.1f) tf=(%.3f,%.3f,%.3f,%.3f) o=%.2f\n",
-        P7Now(), i, NSStringFromClass(v.class), s.length ? s : @"(无)",
-        L.position.x, L.position.y, pl.position.x, pl.position.y,
-        pl.transform.m11, pl.transform.m22, pl.transform.m41, pl.transform.m42,
-        (double)pl.opacity]);
-}
 
 // probe35(A1)：祖先链的「表现层」状态。
 //   probe34 铁证：item 自身 model/pres 全绿、无动画、树无变化，屏幕却整块消失。
 //   => 唯一没查的是祖先的 presentationLayer：祖先跑淡出动画时模型值恒 1.00，
 //      子视图全绿，屏幕上整棵子树消失。
 //   搜索钮不在 WINTabBar 里（WINQuickSearchBarV2 是独立视图），所以它不受影响。
-static void P34Anc(int i, UIView *v) {
-    if (i < 0 || i > 1 || !v) return;
-    NSMutableString *s = [NSMutableString string];
-    unsigned sig = 0;
-    UIView *p = v;
-    for (int k = 0; k < 8 && p; k++, p = p.superview) {
-        CALayer *L = p.layer;
-        CALayer *pl = L.presentationLayer ?: L;
-        float mo = (float)L.opacity, po = (float)pl.opacity;
-        int nk = (int)L.animationKeys.count;
-        CGRect pb = pl.bounds;
-        [s appendFormat:@"%@[m%.2f p%.2f k%d %.0fx%.0f h%d] ", NSStringFromClass(p.class),
-            (double)mo, (double)po, nk, pb.size.width, pb.size.height, p.hidden ? 1 : 0];
-        sig = sig * 31u + (unsigned)(po * 100.0f) + (unsigned)nk * 7u + (unsigned)pb.size.width;
-    }
-    static unsigned last[2]; static int has[2];
-    if (has[i] && sig == last[i]) return;
-    has[i] = 1; last[i] = sig;
-    P25Append([NSString stringWithFormat:@"t=%.2f ANC[%d] %@\n", P7Now(), i, s]);
-}
 
 // probe35(A2)：2Hz 打印底栏全部子视图，确认中间那个圆钮到底是谁。
-static void P34BarKids(UIView *bar) {
-    static int tick;
-    if (++tick % 30) return;
-    if (!bar) return;
-    NSMutableString *s = [NSMutableString string];
-    for (UIView *v in bar.subviews) {
-        CALayer *pl = v.layer.presentationLayer ?: v.layer;
-        [s appendFormat:@"%@(%.0f,%.0f,%.0fx%.0f m%.2f/p%.2f h%d) ",
-         NSStringFromClass(v.class), v.frame.origin.x, v.frame.origin.y,
-         v.frame.size.width, v.frame.size.height,
-         (double)v.layer.opacity, (double)pl.opacity, v.hidden ? 1 : 0];
-    }
-    P25Append([NSString stringWithFormat:@"t=%.2f KIDS %@\n", P7Now(), s]);
-}
 
 // probe32(A1)：每帧算一次「到底看不看得见」，翻转即记。
 //   probe31b 铁证：心跳零断档 + 属性全恒定 + 屏幕上整块没有
 //   => 成因只可能在「兄弟遮挡」或「自身绘制内容被清」，两者 SNAP 都没覆盖。
-static void P31Vis(int i, UIView *v, CAShapeLayer *mk, UIWindow *win) {
-    if (i < 0 || i > 1 || !v || !win) return;
-    unsigned bits = 0;
-    NSString *culprit = @"-";
-    UIView *p = v.superview;
-    for (int k = 0; k < 8 && p; k++, p = p.superview) {
-        if (p.hidden) { bits |= 1u << 4; if (culprit.length < 2) culprit = [NSString stringWithFormat:@"%@.hidden", NSStringFromClass(p.class)]; }
-        if (p.alpha < 0.05f) { bits |= 1u << 4; if (culprit.length < 2) culprit = [NSString stringWithFormat:@"%@.alpha=%.2f", NSStringFromClass(p.class), (double)p.alpha]; }
-        if (p.layer.hidden) { bits |= 1u << 4; if (culprit.length < 2) culprit = [NSString stringWithFormat:@"%@.lh", NSStringFromClass(p.class)]; }
-        if (p.layer.opacity < 0.05f) { bits |= 1u << 4; if (culprit.length < 2) culprit = [NSString stringWithFormat:@"%@.lo=%.2f", NSStringFromClass(p.class), (double)p.layer.opacity]; }
-        if (!P30IsIdentity(p.layer.transform)) { bits |= 1u << 4; if (culprit.length < 2) culprit = [NSString stringWithFormat:@"%@.xform", NSStringFromClass(p.class)]; }
-        if (p.bounds.size.width < 4.0f || p.bounds.size.height < 4.0f) { bits |= 1u << 4; if (culprit.length < 2) culprit = [NSString stringWithFormat:@"%@.bounds0", NSStringFromClass(p.class)]; }
-    }
-    if (v.hidden) bits |= 1u << 0;
-    if (v.alpha < 0.05f) bits |= 1u << 1;
-    if (v.layer.hidden) bits |= 1u << 2;
-    if (v.layer.opacity < 0.05f) bits |= 1u << 3;
-    if (!mk || !mk.path || CGPathGetBoundingBox(mk.path).size.width < 8.0) bits |= 1u << 5;
-    CGFloat bgA = 0.0;
-    @try {
-        if (v.layer.backgroundColor) {
-            UIColor *bg = [UIColor colorWithCGColor:v.layer.backgroundColor];
-            if (bg) [bg getRed:NULL green:NULL blue:NULL alpha:&bgA];
-        }
-    } @catch (__unused NSException *e) {}
-    if (bgA < 0.05) bits |= 1u << 6;
-    int subs = 0, vis = 0;
-    for (UIView *sv in v.subviews) { subs++; if (!sv.hidden && sv.alpha > 0.05f) vis++; }
-    if (subs > 0 && vis == 0) bits |= 1u << 7;
-    CGRect wr = [v convertRect:v.bounds toView:win];
-    if (wr.size.width < 4.0f || wr.size.height < 4.0f || !CGRectIntersectsRect(wr, win.bounds)) bits |= 1u << 8;
-    static unsigned lastBits[2]; static int hasV[2];
-    if (hasV[i] && bits == lastBits[i]) return;
-    hasV[i] = 1; lastBits[i] = bits;
-    NSMutableString *sib = [NSMutableString string];
-    if (v.superview) {
-        NSArray *ss = v.superview.subviews;
-        NSUInteger idx = [ss indexOfObject:v];
-        for (NSUInteger k = idx + 1; k < ss.count && sib.length < 120; k++) {
-            UIView *sv = ss[k];
-            if (sv.hidden || sv.alpha < 0.05f) continue;
-            [sib appendFormat:@"%@(z%lu) ", NSStringFromClass(sv.class), (unsigned long)k];
-        }
-    }
-    P25Append([NSString stringWithFormat:
-        @"t=%.2f VIS[%d] bits=0x%03X culprit=%@ bgA=%.2f subs=%d/%d wr=(%.0f,%.0f,%.0fx%.0f) above=[%@]\n",
-        P7Now(), i, bits, culprit, (double)bgA, vis, subs,
-        wr.origin.x, wr.origin.y, wr.size.width, wr.size.height, sib]);
-    if (bits) P31Shot(i, wr, win);
-}
 
 // probe30(A2)：父链 —— App 可能淡出整个 WINTabBar，item 自身 alpha 永远 1.0
-static float P29BarA = -1, P29BarPA = -1; static int P29BarHid = -1, P29BarHas;
-static void P29Bar(UIView *bar) {
-    if (!bar) return;
-    CALayer *pl = bar.layer.presentationLayer ?: bar.layer;
-    float a = (float)bar.alpha, pa = (float)pl.opacity;
-    int hid = bar.hidden ? 1 : 0;
-    if (P29BarHas && fabsf(a - P29BarA) < 0.02f && fabsf(pa - P29BarPA) < 0.02f
-        && hid == P29BarHid) return;
-    P29BarA = a; P29BarPA = pa; P29BarHid = hid; P29BarHas = 1;
-    P25Append([NSString stringWithFormat:
-        @"t=%.2f BAR model=%.2f pres=%.2f hid=%d\n", P7Now(), a, pa, hid]);
-}
-static void P25FpsTick(void) {
-    P25EnvOnce();
-    P25FrameCnt++;
-    double now = CACurrentMediaTime();
-    if (P25FpsT0 <= 0) { P25FpsT0 = now; return; }
-    double dt = now - P25FpsT0;
-    if (dt >= 2.0) {
-        P25Append([NSString stringWithFormat:@"t=%.1f fps=%.1f 屏上限=%ld\n",
-                   P7Now(), P25FrameCnt / dt, (long)UIScreen.mainScreen.maximumFramesPerSecond]);
-        P25FrameCnt = 0; P25FpsT0 = now;
-    }
-}
 
 // ── A1：表现层（CAAnimation 的屏幕上位置）独立通道 ──────────────────────
-static BOOL  P25PAct[P37_MAX];
-static float P25PFromX[P37_MAX], P25PFromY[P37_MAX];
-static float P25PLastX[P37_MAX], P25PLastY[P37_MAX];
-static float P25PStartT[P37_MAX];
-static float P25PLastT[P37_MAX];
-static float P25PFromW[P37_MAX], P25PFromH[P37_MAX], P25PLastW[P37_MAX], P25PLastH[P37_MAX];
-static int   P25PFrames[P37_MAX], P25PQuiet[P37_MAX];
 
-static void P25EpisodeP(int i, float x, float y, float w, float h, float t) {
-    if (i < 0 || i >= P37_MAX) return;
-    BOOL moved = (fabsf(x - P25PLastX[i]) > 0.5f || fabsf(y - P25PLastY[i]) > 0.5f
-                  || fabsf(w - P25PLastW[i]) > 0.5f || fabsf(h - P25PLastH[i]) > 0.5f);
-    if (moved) {
-        if (!P25PAct[i]) {
-            P25PAct[i] = YES;
-            P25PFromX[i] = P25PLastX[i]; P25PFromY[i] = P25PLastY[i];
-            P25PFromW[i] = P25PLastW[i]; P25PFromH[i] = P25PLastH[i];
-            P25PStartT[i] = t; P25PFrames[i] = 0;
-        }
-        P25PLastX[i] = x; P25PLastY[i] = y; P25PLastW[i] = w; P25PLastH[i] = h; P25PLastT[i] = t;
-        P25PFrames[i]++; P25PQuiet[i] = 0;
-    } else if (P25PAct[i] && ++P25PQuiet[i] >= P25_QUIET) {
-        P25PAct[i] = NO;
-        P25Append([NSString stringWithFormat:
-            @"t=%.2f→%.2f (%d帧) P %@ (%.1f,%.1f)→(%.1f,%.1f) d=(%+.1f,%+.1f) sz=%.0fx%.0f→%.0fx%.0f\n",
-            P25PStartT[i], P25PLastT[i], P25PFrames[i], P25Name(i),
-            P25PFromX[i], P25PFromY[i], P25PLastX[i], P25PLastY[i],
-            P25PLastX[i] - P25PFromX[i], P25PLastY[i] - P25PFromY[i],
-            P25PFromW[i], P25PFromH[i], P25PLastW[i], P25PLastH[i]]);
-    }
-}
 
 // ── A2：全树差分（20Hz 兜底，不再依赖 12 个白名单目标）────────────────
 #define P26_MAXN 1200
 typedef struct { void *p; float x, y, w, h, a; int hid; int z; uintptr_t cls; } P26Node;
-static P26Node P26Cur[P26_MAXN], P26Prev[P26_MAXN];
-static int P26NPrev, P26Tick;
-static int P26Lines, P26Skipped;          // 限流：每秒最多 60 行，超出只计数
 
-static int P26Cmp(const void *a, const void *b) {
-    const P26Node *x = a, *y = b;
-    return (x->p < y->p) ? -1 : (x->p > y->p) ? 1 : 0;
-}
 
-static int P26Collect(UIWindow *win, P26Node *out, int max) {
-    int n = 0;
-    NSMutableArray *st = [NSMutableArray arrayWithObject:win];
-    while (st.count && n < max) {
-        UIView *v = [st lastObject]; [st removeLastObject];
-        CGRect r = [v convertRect:v.bounds toView:win];
-        if (CGRectGetMaxY(r) < 0 || r.origin.y > win.bounds.size.height) continue;
-        P26Node *d = &out[n++];
-        d->p = (__bridge void *)v;
-        d->x = (float)r.origin.x; d->y = (float)r.origin.y;
-        d->w = (float)r.size.width; d->h = (float)r.size.height;
-        d->a = (float)v.alpha; d->hid = v.hidden ? 1 : 0;
-        d->z = (int)[v.superview.subviews indexOfObject:v];
-        d->cls = (uintptr_t)v.class;
-        if (!v.hidden && v.alpha > 0.01f) [st addObjectsFromArray:v.subviews];
-    }
-    return n;
-}
 
-static void P26LogNode(char kind, const P26Node *c, const P26Node *p, float t) {
-    if (kind == '~') {
-        // probe28(A4)：先做显著性过滤再占配额，避免路名标签把网眼堵死
-        BOOL big = (c->h >= 30.0f || fabsf(c->x - p->x) >= 8.0f || fabsf(c->y - p->y) >= 8.0f
-                    || fabsf(c->w - p->w) >= 8.0f || fabsf(c->h - p->h) >= 8.0f);
-        BOOL vis2 = (fabsf(c->a - p->a) > 0.02f || c->hid != p->hid || c->z != p->z);
-        if (!big && !vis2) { P26Skipped++; return; }
-        if (P26Lines >= 120) { P26Skipped++; return; }
-        P26Lines++;
-    }
-    if (kind == '~') {
-        BOOL moved = (fabsf(c->x - p->x) > 0.5f || fabsf(c->y - p->y) > 0.5f
-                      || fabsf(c->w - p->w) > 0.5f || fabsf(c->h - p->h) > 0.5f);
-        BOOL vis = (fabsf(c->a - p->a) > 0.02f || c->hid != p->hid || c->z != p->z);
-        if (!moved && !vis) return;
-        if (moved) {
-            P25Append([NSString stringWithFormat:
-                @"t=%.2f ~ %@ (%.1f,%.1f,%.1f,%.1f)→(%.1f,%.1f,%.1f,%.1f) d=(%+.1f,%+.1f)\n",
-                t, NSStringFromClass((__bridge id)(void *)c->cls),
-                p->x, p->y, p->w, p->h, c->x, c->y, c->w, c->h,
-                c->x - p->x, c->y - p->y]);
-        }
-        if (vis) {
-            P25Append([NSString stringWithFormat:@"t=%.2f ~ %@ a=%.2f→%.2f hid=%d→%d z=%d→%d\n",
-                t, NSStringFromClass((__bridge id)(void *)c->cls),
-                p->a, c->a, p->hid, c->hid, p->z, c->z]);
-        }
-        return;
-    }
-    P25Append([NSString stringWithFormat:@"t=%.2f %c %@ (%.1f,%.1f,%.1f,%.1f) a=%.2f hid=%d\n",
-               t, kind, NSStringFromClass((__bridge id)(void *)c->cls),
-               c->x, c->y, c->w, c->h, c->a, c->hid]);
-}
 
-static void P26TreeDiff(UIWindow *win, float t) {
-    if (!win) return;
-    static int calls;
-    if (++calls % 20 == 0) {               // 每 20 次(≈1秒)重置配额
-        if (P26Skipped) P25Append([NSString stringWithFormat:@"t=%.2f （全树差分超限，省略 %d 条）\n", t, P26Skipped]);
-        P26Lines = 0; P26Skipped = 0;
-    }
-    int n = P26Collect(win, P26Cur, P26_MAXN);
-    if (P26NPrev == 0) {                       // 首帧只建基线，不刷 1200 行"+"
-        memcpy(P26Prev, P26Cur, sizeof(P26Node) * (size_t)n);
-        P26NPrev = n;
-        return;
-    }
-    qsort(P26Cur, (size_t)n, sizeof(P26Node), P26Cmp);
-    qsort(P26Prev, (size_t)P26NPrev, sizeof(P26Node), P26Cmp);
-    int i = 0, j = 0;
-    while (i < n || j < P26NPrev) {
-        if (j >= P26NPrev) { P26LogNode('+', &P26Cur[i], NULL, t); i++; continue; }
-        if (i >= n)        { P26LogNode('-', &P26Prev[j], NULL, t); j++; continue; }
-        if (P26Cur[i].p < P26Prev[j].p)      { P26LogNode('+', &P26Cur[i], NULL, t); i++; }
-        else if (P26Cur[i].p > P26Prev[j].p) { P26LogNode('-', &P26Prev[j], NULL, t); j++; }
-        else { P26LogNode('~', &P26Cur[i], &P26Prev[j], t); i++; j++; }
-    }
-    memcpy(P26Prev, P26Cur, sizeof(P26Node) * (size_t)n);
-    P26NPrev = n;
-}
 
-static void P25Lost(int i, float t) {
-    if (i < 0 || i >= P37_MAX || P25WasNil[i]) return;
-    P25WasNil[i] = YES; P25Act[i] = NO;
-    P25Append([NSString stringWithFormat:@"t=%.2f LOST %@\n", t, P25Name(i)]);
-}
 
-static void P37Sample(void) {
-    if (++P37ScanTick >= 6 || P37N == 0) { P37ScanTick = 0; P37RefreshTargets(); }
-    float t = (float)P7Now();
-    int jumpIdx = -1; float jumpFrom = 0, jumpTo = 0; float jumpA0 = 0, jumpA1 = 0;
-    for (int i = 0; i < P37N; i++) {
-        UIView *v = P37V[i];
-        P37Cell *c = &P37Ring[P37RingI][i];
-        memset(c, 0, sizeof(*c));
-        c->idx = (short)i;
-        if (!v) { P25Lost(i, t); continue; }
-        c->hid = (short)v.hidden;
-        c->a = (float)v.alpha;
-        if (v.window && v.superview) {
-            CGRect mr = [v convertRect:v.bounds toView:v.window];
-            c->mx = (float)mr.origin.x; c->my = (float)mr.origin.y;
-            c->mw = (float)mr.size.width; c->mh = (float)mr.size.height;
-            CALayer *pl = v.layer.presentationLayer;
-            CALayer *svp = v.superview.layer.presentationLayer;
-            if (pl && svp && v.window.layer) {
-                CGRect pr = [svp convertRect:pl.frame toLayer:v.window.layer];
-                c->px = (float)pr.origin.x; c->py = (float)pr.origin.y;
-            } else { c->px = c->mx; c->py = c->my; }
-            void *p = (__bridge void *)v;
-            if (P25Ptr[i] && P25Ptr[i] != p) {
-                P25Swap(i, c->mx, c->my, c->a, c->hid, t);
-            }
-            P25Ptr[i] = p;
-            if (i < P37Fixed && P37LastPtr[i] && P37LastPtr[i] != p) {
-                P37PtrSwap++;
-                if (jumpIdx < 0) { jumpIdx = i; jumpFrom = -1; jumpTo = -1; jumpA0 = c->a; jumpA1 = c->a; }
-            }
-            P37LastPtr[i] = p;
-            P25Episode(i, c->mx, c->my, c->mw, c->mh, c->a, c->hid, t);
-            P25EpisodeP(i, c->px, c->py, c->mw, c->mh, t);
-            if (P37LastPy[i] > 0 && fabsf(c->py - P37LastPy[i]) > 0.5f) {
-                P37Jumps[i]++;
-                if (jumpIdx < 0) { jumpIdx = i; jumpFrom = P37LastPy[i]; jumpTo = c->py; jumpA0 = c->a; jumpA1 = c->a; }
-            }
-            if (P37LastPx[i] > 0 && fabsf(c->px - P37LastPx[i]) > 0.5f) {
-                P37Jumps[i]++;
-                if (jumpIdx < 0) { jumpIdx = i; jumpFrom = P37LastPy[i]; jumpTo = c->py; jumpA0 = c->a; jumpA1 = c->a; }
-            }
-            P37LastPy[i] = c->py; P37LastPx[i] = c->px;
-        }
-    }
-    P37RT[P37RingI] = t;
-    P37RingI = (P37RingI + 1) % P37_RING;
-    if (P37RingN < P37_RING) P37RingN++;
-    // ③ 跳变流水：t≥8s 后每一跳都记（永不因名额满丢失）
-    if (jumpIdx >= 0 && t >= 0.0f) {
-        P37JmpLog[P37JmpI].t = t;
-        P37JmpLog[P37JmpI].tag = (short)jumpIdx;
-        P37JmpLog[P37JmpI].from = (short)(jumpFrom < -32000 ? -32000 : (jumpFrom > 32000 ? 32000 : jumpFrom));
-        P37JmpLog[P37JmpI].to = (short)(jumpTo < -32000 ? -32000 : (jumpTo > 32000 ? 32000 : jumpTo));
-        P37JmpLog[P37JmpI].a0 = (short)(jumpA0 * 100);
-        P37JmpLog[P37JmpI].a1 = (short)(jumpA1 * 100);
-        P37JmpI = (P37JmpI + 1) % P37_LOG;
-        P37JmpTotal++;
-        // ① 事件快照同样 8s 后、名额 6
-        if (P37EvCnt < P37_EVN && P37RingN >= 10) {
-            int n = P37RingN < P37_EVF ? P37RingN : P37_EVF;
-            for (int f = 0; f < n; f++) {
-                int idx = (P37RingI - n + f + P37_RING * 2) % P37_RING;
-                P37EvT[P37EvCnt][f] = P37RT[idx];
-                for (int i = 0; i < P37_MAX; i++) P37Ev[P37EvCnt][f][i] = P37Ring[idx][i];
-            }
-            P37EvN[P37EvCnt] = n;
-            P37EvTarget[P37EvCnt] = jumpIdx;
-            P37EvCnt++;
-        }
-    }
-}
 // ══ probe12：状态触发取证（纯只读，不写任何几何/透明度）══
 //   probe11 教训：故障态只出现在特定时刻，固定时间采样永远错过（5 段采样全是 735/实心）。
 //   A1 天气行偏移看门狗：|行顶-735|>8 持续 0.2s ⇒ 当场把「祖先链 model/pres + 对齐计数 +
 //      全部天气类实例坐标」拼成快照字符串存下（最多 3 份）。
 static NSMutableArray<NSString *> *P39Wx, *P39Ink;
-static int P39WxBadFrames;
-static double P39WxSince;
 static int P39AlignCalls, P39AlignWrites, P39AlignSkipCar, P39AlignSkipReenter;
 static int P37ParentFix, P37FreeFix;   // trial37：父容器拉回次数 / 游离天气实例归位次数
-static NSString *P39Chain(UIView *v) {
-    NSMutableString *s = [NSMutableString string];
-    int n = 0;
-    for (UIView *p = v; p && p != p.window && n < 12; p = p.superview, n++) {
-        CALayer *pl = p.layer.presentationLayer;
-        [s appendFormat:@"%@ model=%@ pres=%@ a=%.2f h=%d | ",
-            NSStringFromClass(p.class), NSStringFromCGRect(p.layer.frame),
-            pl ? NSStringFromCGRect(pl.frame) : @"(nil)", p.alpha, (int)p.hidden];
-    }
-    return s;
-}
-static void P39Store(NSMutableArray *arr, NSString *s) {
-    if (!arr) return;
-    [arr addObject:s];
-    while (arr.count > 3) [arr removeObjectAtIndex:0];
-}
-static void P39Sample(void) {
-    double t = P7Now();
-    if (!P39Wx) P39Wx = [NSMutableArray array];
-    if (!P39Ink) P39Ink = [NSMutableArray array];
-    // ── A1 天气行偏移看门狗
-    UIView *row = P7RowMir;
-    CGFloat y = -1;
-    if (row && row.window) y = [row convertRect:row.bounds toView:row.window].origin.y;
-    BOOL wxBad = (y > 0 && fabs(y - 735.0) > 8.0);
-    if (wxBad) {
-        if (P39WxBadFrames == 0) P39WxSince = t;
-        P39WxBadFrames++;
-        if (t - P39WxSince > 0.2 && (P39WxBadFrames % 30) == 0) {
-            NSMutableString *s = [NSMutableString stringWithFormat:
-                @"t=%.1f 行顶=%.0f(目标735) row=%@ chain: ", t, y, NSStringFromClass(row.class)];
-            [s appendString:P39Chain(row)];
-            [s appendFormat:@"| align 调=%d 写=%d 无车机=%d 重入=%d | 天气类实例: ",
-                P39AlignCalls, P39AlignWrites, P39AlignSkipCar, P39AlignSkipReenter];
-            for (UIWindow *w in GCAllWindows()) {
-                NSMutableArray *q = [NSMutableArray arrayWithObject:w];
-                for (NSUInteger i = 0; i < q.count && q.count < 1500; i++) {
-                    UIView *v = q[i];
-                    [q addObjectsFromArray:v.subviews];
-                    if (v.window && IsWeatherRowClass(NSStringFromClass(v.class)))
-                        [s appendFormat:@"%@ %@ a=%.2f h=%d / ",
-                            NSStringFromClass(v.class),
-                            NSStringFromCGRect([v convertRect:v.bounds toView:nil]),
-                            v.alpha, (int)v.hidden];
-                }
-            }
-            P39Store(P39Wx, s);
-        }
-    } else {
-        P39WxBadFrames = 0;
-    }
-}
 // ══ probe14：真身定位（纯只读）══
 //   矛盾铁证：2D 钮自身 {{339,609.7}} a=1.00 h=0，父容器 h=1 恒被 App 藏起；
 //   我们每帧拉回 1009+ 次仍 h=1 ⇒ 屏幕上那颗钮是**另一份绘制**（别的 window / 快照层）。
@@ -1430,110 +694,11 @@ static void P39Sample(void) {
 //   A3：记录 App 对天气类实例的 setFrame:/setCenter: 写入（只记不改）。
 static void Replace(Class cls, SEL sel, IMP replacement, const char *types);   // probe14：定义在后
 typedef struct { float t; char cls[28]; char sel[12]; float x, y, w, h; int mine; } P41Wr;
-static P41Wr P41Wrs[20];
-static int P41WrI, P41WrN;
 static int P41InAlign;
-static void P41Rec(const char *cls, const char *sel, CGRect r, int mine) {
-    P41Wr *p = &P41Wrs[P41WrI];
-    p->t = (float)P7Now();
-    strncpy(p->cls, cls, 27); p->cls[27] = 0;
-    strncpy(p->sel, sel, 11); p->sel[11] = 0;
-    p->x = (float)r.origin.x; p->y = (float)r.origin.y;
-    p->w = (float)r.size.width; p->h = (float)r.size.height;
-    p->mine = mine;
-    P41WrI = (P41WrI + 1) % 20;
-    if (P41WrN < 20) P41WrN++;
-}
-static NSMutableSet<NSString *> *P41Hooked(void) {
-    static NSMutableSet *s;
-    static dispatch_once_t once;
-    dispatch_once(&once, ^{ s = [NSMutableSet set]; });
-    return s;
-}
-static void P41HookWeatherWrites(void) {
-    // 类名必须走混淆表（门禁：明文命中即 FAIL）——113=WINGroupMapWidget
-    //   115=WINWeatherLimitView、114=WINScaleLineLogoMapWidget（索引=表行号-1）
-    NSArray *names = @[GCStrAt(113), GCStrAt(115), GCStrAt(114)];
-    for (NSString *nm in names) {
-        Class rc = NSClassFromString(nm);
-        if (!rc || [P41Hooked() containsObject:nm]) continue;
-        [P41Hooked() addObject:nm];
-        Method mf = class_getInstanceMethod(rc, @selector(setFrame:));
-        if (mf) {
-            IMP o = method_getImplementation(mf);
-            const char *t = method_getTypeEncoding(mf);
-            Replace(rc, @selector(setFrame:), imp_implementationWithBlock(^(UIView *self, CGRect f) {
-                ((void (*)(id, SEL, CGRect))o)(self, @selector(setFrame:), f);
-                P41Rec([nm UTF8String], "setFrame:", self.frame, P41InAlign);
-            }), t);
-        }
-        Method mc = class_getInstanceMethod(rc, @selector(setCenter:));
-        if (mc) {
-            IMP o2 = method_getImplementation(mc);
-            const char *t2 = method_getTypeEncoding(mc);
-            Replace(rc, @selector(setCenter:), imp_implementationWithBlock(^(UIView *self, CGPoint c) {
-                ((void (*)(id, SEL, CGPoint))o2)(self, @selector(setCenter:), c);
-                P41Rec([nm UTF8String], "setCenter:", self.frame, P41InAlign);
-            }), t2);
-        }
-    }
-}
 // 全窗口找「2D/3D 钮真身」：任何含 LOTAnimationView / WINAJXCombinedItemView 的方形视图
-static NSString *P41LottieList(void) {
-    NSMutableString *s = [NSMutableString string];
-    Class cItem = NSClassFromString(@"WINAJXCombinedItemView");
-    Class cLot = NSClassFromString(@"LOTAnimationView");
-    int wi = 0, cnt = 0;
-    for (UIWindow *w in GCAllWindows()) {
-        wi++;
-        NSMutableArray *q = [NSMutableArray arrayWithObject:w];
-        for (NSUInteger i = 0; i < q.count && q.count < 3000; i++) {
-            UIView *v = q[i];
-            [q addObjectsFromArray:v.subviews];
-            if (!v.window) continue;
-            if (!((cItem && [v isKindOfClass:cItem]) || (cLot && [v isKindOfClass:cLot]))) continue;
-            cnt++;
-            CGRect r = [v convertRect:v.bounds toView:nil];
-            // 祖先链第一个异常层
-            NSString *bad = @"";
-            int n = 0;
-            for (UIView *p = v.superview; p && n < 12; p = p.superview, n++) {
-                if (p.hidden || p.alpha < 0.05f || p.layer.opacity < 0.05f) {
-                    bad = [NSString stringWithFormat:@" 祖先%@(h=%d,a=%.2f,op=%.2f)",
-                           NSStringFromClass(p.class), (int)p.hidden, p.alpha, p.layer.opacity];
-                    break;
-                }
-                if (p == p.window) break;
-            }
-            [s appendFormat:@"[w%d]%@ %@ a=%.2f h=%d%@ / ", wi,
-                NSStringFromClass(v.class), NSStringFromCGRect(r),
-                v.alpha, (int)v.hidden,
-                bad];
-        }
-    }
-    if (!cnt) [s appendString:@"(无)"];
-    return s;
-}
 // ══ probe13：替身/可见性取证（纯只读）══
 //   probe12 教训：墨量判据把「我们自己写的白底」当成墨 ⇒ 永远判不出透明；
 //   且未检查祖先与 window 可见性、未查是否存在第二个实例。
-static NSString *P40WeatherList(void) {
-    NSMutableString *s = [NSMutableString string];
-    for (UIWindow *w in GCAllWindows()) {
-        NSMutableArray *q = [NSMutableArray arrayWithObject:w];
-        for (NSUInteger i = 0; i < q.count && q.count < 2000; i++) {
-            UIView *v = q[i];
-            [q addObjectsFromArray:v.subviews];
-            if (!v.window) continue;
-            if (!IsWeatherRowClass(NSStringFromClass(v.class))) continue;
-            [s appendFormat:@"%@ %@ a=%.2f h=%d%@ winh=%d wina=%.2f / ",
-                NSStringFromClass(v.class), NSStringFromCGRect([v convertRect:v.bounds toView:nil]),
-                v.alpha, (int)v.hidden, (v == P7RowMir) ? @"★缓存" : @"",
-                (int)v.window.hidden, v.window.alpha];
-        }
-    }
-    return s.length ? s : @"(无)";
-}
 #ifdef GAODECLEAN_PROBE
 // ══ probe15：每秒轨迹（8 控件 模型位置 vs 视觉位置，各 60 行）══
 //   目的：dump 已证明我们钉的坐标是准的，但画面仍在动 ⇒ 动的是别的东西。
@@ -3314,16 +2479,6 @@ static void GCProbeDump7(NSString *reason) {
                 if (ln) [o appendFormat:@"  %@\n", ln];
             }
         }
-        [o appendFormat:@"P41 Lottie真身: %@\n", P41LottieList()];
-        [o appendString:@"P41 天气写入: "];
-        for (int i41 = 0; i41 < 20; i41++) {
-            P41Wr *p41 = &P41Wrs[(P41WrI - 20 + i41 + 40) % 20];
-            if (p41->t <= 0) continue;
-            [o appendFormat:@"(t=%.1f %s %s y=%.0f %@) ", p41->t, p41->cls, p41->sel,
-                p41->y, p41->mine ? @"我方" : @"App"];
-        }
-        [o appendString:@"\n"];
-        [o appendFormat:@"P40天气实例: %@\n", P40WeatherList()];
     }
 #endif
     if (CachedCar) {
@@ -4439,10 +3594,6 @@ static void GCStylePinTabItems(UIWindow *win) {
         if (rebuild) P25Append([NSString stringWithFormat:@"t=%.2f TAB-REBUILD (实例已换，重新收圆)\n", P7Now()]);
 #endif
     }
-#ifdef GAODECLEAN_PROBE
-    P29Bar(CachedTabBar);
-    P30Heartbeat(CachedTabItemA ? 1 : 0, CachedTabItemB ? 1 : 0, CachedTabBar ? 1 : 0, CachedTabBar);
-#endif
 
     // ★trial52(A1)：清除 App 反复给底栏加的「滑入」动画。
     //   probe37 铁证：App 在主线程 RunLoop 里给 WINTabBar 加
@@ -4470,11 +3621,7 @@ static void GCStylePinTabItems(UIWindow *win) {
         [CachedTabBar.layer removeAllAnimations];
     }
 #ifdef GAODECLEAN_PROBE
-    P34BarKids(CachedTabBar);
-    P35Anim(0, CachedTabBar);
     P36Track(CachedTabBar);
-    P35Anim(1, CachedTabItemA);
-    P35Anim(2, CachedTabItemB);
 #endif
     UIView *arr[2] = { CachedTabItemA, CachedTabItemB };
     for (int i = 0; i < 2; i++) {
@@ -4554,21 +3701,6 @@ static void GCStylePinTabItems(UIWindow *win) {
             mk.path = p23;
             CGPathRelease(p23);
         }
-#ifdef GAODECLEAN_PROBE
-        P29Tab(i, it, dia, mk);
-        { static float lf[2][4]; static int has[2];
-          if (!has[i] || fabsf((float)it.frame.origin.y - lf[i][1]) > 0.5f
-              || fabsf((float)it.frame.origin.x - lf[i][0]) > 0.5f
-              || fabsf((float)it.layer.opacity - lf[i][2]) > 0.02f
-              || fabsf((float)it.bounds.origin.y - lf[i][3]) > 0.5f) {
-              has[i] = 1; lf[i][0] = (float)it.frame.origin.x; lf[i][1] = (float)it.frame.origin.y;
-              lf[i][2] = (float)it.layer.opacity; lf[i][3] = (float)it.bounds.origin.y;
-              P30Snap(i, it, mk);
-          } }
-        P31Vis(i, it, mk, win);
-        P33Mask(i, it, mk);
-        P34Anc(i, it);
-#endif
 
         // ★probe23(A2)：内容子项水平居中 —— 实测 SubItem 54 宽贴在 x=0，
         //   图标中心 27 而 item 中心 42，右边空 30pt，视觉重心失衡。
@@ -4584,9 +3716,6 @@ static void GCStylePinTabItems(UIWindow *win) {
         }
         [CATransaction commit];
     }
-#ifdef GAODECLEAN_PROBE
-    P32Pixel(CachedTabItemA, CachedTabItemB);
-#endif
 }
 // ★trial25(A2)：重入守卫包装 —— pin 现有帧级驱动/容器钩子/子控件钩子/layoutSubviews 钩子
 //   四路并发，写 frame 会级联触发钩子，无守卫有自激风暴风险。
@@ -4605,20 +3734,12 @@ static void GCStylePinWidgets(UIWindow *win) {
     P64KnobProbe(win, "pin");
 #endif
 #ifdef GAODECLEAN_PROBE
-    P33Watch(CachedCar, 0);
-    P33Watch((UIView *)(CachedLiteGroup && CachedLiteGroup.window ? CachedLiteGroup : CachedRight), 1);
-    if (++P26Tick >= 3) { P26Tick = 0; P26TreeDiff(win, (float)P7Now()); }
     GCStyleMapTypeAlign(win);   // trial51(A4)：2D/3D 钮帧级对齐（App 每帧都能挪，5Hz 追不上）
-#ifdef GAODECLEAN_PROBE
     GCCapTrace(win);            // probe49：导航胶囊晚出现定责（只读）
-#endif
-    P37Sample();
-    P39Sample();
     P43Snap();
 #ifdef GAODECLEAN_PROBE
     P63BlankProbe();
 #endif
-    P41HookWeatherWrites();
 #endif
     GCStylePinBusy = NO;
 }
@@ -4633,7 +3754,6 @@ static void GCStylePinWidgets(UIWindow *win) {
 - (void)fire {
 #ifdef GAODECLEAN_PROBE
     P8Trace();
-    P25FpsTick();
 #endif
     UIView *av = CachedCar ?: CachedRight ?: CachedRoute;
     UIWindow *pw = av.window ?: CachedTabBar.window ?: SearchBarView.window;
