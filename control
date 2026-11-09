@@ -1,6 +1,6 @@
 Package: com.jibamao.gaodeclean
 Name: GaodeClean 高德精简
-Version: 0.9.134
+Version: 0.9.135
 Architecture: iphoneos-arm64
 Description: 高德地图界面精简：去广告、去白雾、控件归位，深色模式自适应。
  .
