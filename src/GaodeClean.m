@@ -18,7 +18,7 @@
 // ---- jibamao 个人标识（编译进 dylib，可用 strings 核对）----
 static NSString *const kGCAuthor      = @"jibamao";
 static NSString *const kGCRepo        = @"https://gan-jibamao.github.io/";
-static NSString *const kGCVersion     = @"0.9.138";
+static NSString *const kGCVersion     = @"0.9.139";
 
 // 0.9.18（A1）：底边间隙**按控件分开**，对表原生（搜索栏白底顶边 = 702.6pt）
 //   车机钮（连接车机 · WINDeviceInterconnectWidget）：原生底 652 → 间隙 50.6 → 取 50
@@ -478,6 +478,20 @@ static CGFloat GCPinBottom(UIWindow *win) {
 //  判据：锚点值连续 ≥3 次采样不变、且已稳定 ≥0.25s，才允许写 frame。
 //  不满足时本拍只跳过写入（不动 hidden/alpha，控件保持 App 自己的位置）。
 // ═══════════════════════════════════════════════════════════════════════════
+
+// 0.9.138（A12）：切回首页后的底栏填色冻结窗
+//   视频逐帧（120fps）：点车机返回首页，f404~412（≈40ms）三个钮是 139 的深色，
+//   f414 才回到 235。139 = 深色 41 与亮底 235 各半 —— 我们带着车机页的深色底回来了。
+//   修法：检测到「回到首页」后 0.45s 内不重刷底栏底色，等采样稳定再说。
+static double GCTabFillFreezeUntil;
+static char GCHoldKey;
+static CGFloat GCCurrentBarTop(void) {
+    UIWindow *w = (SearchBarView && SearchBarView.window) ? SearchBarView.window : GCAnyMainWindow();
+    if (!w) return 0;
+    if (SearchBarView && SearchBarView.window) return [SearchBarView convertPoint:CGPointZero toView:w].y;
+    return GCPinBottom(w) - GCSearchTopFromPin;
+}
+
 static BOOL GCAnchorStable(CGFloat v) {
     static CGFloat last; static double since; static int n;
     double now = CACurrentMediaTime();
@@ -500,7 +514,6 @@ static BOOL GCAnchorStable(CGFloat v) {
 //  只按住我们自己藏的实例（关联对象打标），绝不碰 App 自己藏的情况；
 //  40 拍（≈8s）超时兜底放行，宁可早放，不可不放。
 // ═══════════════════════════════════════════════════════════════════════════
-static char GCHoldKey;
 static BOOL GCCarHoldIfTransient(UIView *v, CGFloat barTop) {
     if (!v) return YES;
     if (GCAnchorStable(barTop)) {
@@ -2259,6 +2272,8 @@ static void GCStyleTab(UIView *anchor) {
                              !CGColorEqualToColor(it.backgroundColor.CGColor, fillTab.CGColor);
             BOOL layerDiff = !it.layer.backgroundColor ||
                              !CGColorEqualToColor(it.layer.backgroundColor, fillTab.CGColor);
+            // ★0.9.138（A12）：冻结窗内不重刷（视频铁证：回首页后 40ms 底栏是深色 139）
+            if (CACurrentMediaTime() < GCTabFillFreezeUntil) { viewDiff = NO; layerDiff = NO; }
             if (viewDiff || layerDiff) {
                 [CATransaction begin]; [CATransaction setDisableActions:YES];
                 it.layer.backgroundColor = fillTab.CGColor;
@@ -3148,6 +3163,13 @@ static void GCStylePinOne(UIView *v) {
         CGRect g;
         BOOL gcSkipWrite = NO;                               // 0.9.137（A7）
         if (isCar) {
+#ifdef GAODECLEAN_PROBE
+            // 验收用：车机钮「可见且明显不在钉死位」记一条（应为 0 条）
+            if (!v.hidden && wr.origin.y < 600) {
+                static int nFlash;
+                if (nFlash < 8) { nFlash++; P7Note(@"CARFLASH y=%.0f", wr.origin.y); }
+            }
+#endif
             // ★trial50(A3)：回退 0.9.29 公式 —— bottom = 搜索栏顶 - GCGapCar(50)
             //   0.9.29 原文：AlignOneWidget(bar, CachedCar, barTop, GCGapCar)
             //   注释铁证：「车机钮 原生底 652 → 间隙 50.6」（搜索栏顶 702.6）
@@ -3448,9 +3470,17 @@ static void GCStylePinWidgetsInner(UIWindow *win) {   // trial25(A2)：原体改
             P7Write(0, p7b, local, p7oc);
 #endif
         }
+        // ★0.9.138（A13'）：**到钉死位才打标** —— 只判「锚点稳」不够，锚点可以稳定地错着。
+        CGRect nowc = [car convertRect:car.bounds toView:win];
+        BOOL atTarget = fabs(nowc.origin.y - carY) < 1.0 && fabs(nowc.origin.x - 10.0) < 1.0;
+        if (atTarget && GCAnchorStable(GCCurrentBarTop()))
+            objc_setAssociatedObject(car, &AlignedKey, @(1), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     }
     // trial10：钉完即放行扣留（AlignedKey），控件首 tick 就出现，不再等 settle
-    if (car) objc_setAssociatedObject(car, &AlignedKey, @(1), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    // ★0.9.138（A13）：**锚点没稳不许打标**。
+    //   120fps 录屏铁证：f160（t=1.333s）车机钮在 y=357 亮了整整一帧。
+    //   根因不在写 frame（A7 已挡住），而在这行**无条件**打 AlignedKey ——
+    //   而 setHidden: 钩子只认这个标，标一打就放行，位置还错着也照样亮。
     // ★0.9.123（A2）：外壳与内层**各自独立**打标记，都过钉位包络校验。
     //   0.9.122 用的是 `capTarget`（互斥二选一的产物），外壳一旦抢占 cap 而没钉成，
     //   内层就一次都没被标记 ⇒ 真机退化到 1.275s。
@@ -5487,6 +5517,8 @@ static void WatchHomeTransition(id tabs) {
     if (prevHome != home) { CleanForce = YES; GCCActiveUntil = TickCount + 8;
         // 0.9.99（A4）：回到首页的瞬间运营位会重建，立刻扫一次（不等下一拍）
         if (home) ArmTopBannerSweep();
+        // ★0.9.138（A12）：回首页瞬间冻结底栏填色，别把上一页的深色带回来
+        if (home) GCTabFillFreezeUntil = CACurrentMediaTime() + 0.45;
     }
 }
 
@@ -7332,6 +7364,7 @@ static BOOL GCShouldProtectPinnedWidget(UIView *v) {
     return YES;
 }
 
+
 static void InstallPromoAndWidgetHooks(void) {
     HookVoid(GCStrAt(275), GCStrAt(91), ^(id view) { if (IsHiddenMapPromo(view)) [view setHidden:YES]; });
     Class cls = NSClassFromString(GCStrAt(275));
@@ -7445,7 +7478,8 @@ static void InstallPromoAndWidgetHooks(void) {
                     if (hidden && GCShouldProtectPinnedWidget(self)) {
                         return;      // 已就位却被隐藏 → 拒绝
                     }
-                    if (!hidden && self.window &&
+                    // ★0.9.139：40 拍（≈8s）后不再按住 —— 锚点万一一直不稳，不能永久藏
+                    if (!hidden && self.window && ColdTicks < 40 &&
                         !objc_getAssociatedObject(self, &AlignedKey)) {
                         ((void (*)(id, SEL, BOOL))orig)(self, sh, YES);
                         [ColdWidgets addObject:self];
