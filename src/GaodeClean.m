@@ -18,7 +18,7 @@
 // ---- jibamao 个人标识（编译进 dylib，可用 strings 核对）----
 static NSString *const kGCAuthor      = @"jibamao";
 static NSString *const kGCRepo        = @"https://gan-jibamao.github.io/";
-static NSString *const kGCVersion     = @"0.9.135";
+static NSString *const kGCVersion     = @"0.9.138";
 
 // 0.9.18（A1）：底边间隙**按控件分开**，对表原生（搜索栏白底顶边 = 702.6pt）
 //   车机钮（连接车机 · WINDeviceInterconnectWidget）：原生底 652 → 间隙 50.6 → 取 50
@@ -37,6 +37,16 @@ static const CGFloat GCGapMapType = 13.3;
 // 0.9.98（A3）：SearchBarView 尚未就绪时，用「底栏底 − 52.4」估算搜索栏顶
 //   实测 702.6 − 755 ≈ −52.4；三处兜底同值同义，收敛为常量防漂移。
 static const CGFloat GCSearchTopFromPin = 52.4;
+
+// ── 0.9.136（A2）：顶部横幅扫描的深度与预算 ──────────────────────────────
+//   真机铁证（gcprobe，高德 17.03.1）：运营蓝条挂在视图树 **第 11 层**
+//     UIWindow → UITransitionView → … → MapWidgetContainerView
+//       → WINImageTextBlueBarMapWidgetView
+//   而 0.9.126~0.9.135 三通道的 BFS 上限是 6 / 8 / 6 层 —— 它一次都没被检查过。
+//   深度放到 16（留 5 层余量）；预算按实测节点数（首页 560）放大到 2600，
+//   同时用 GCCSubtreeOutOfTopBand() 把完全落在顶部带外的子树整棵剪掉。
+#define GC_BANNER_MAX_DEPTH 16
+#define GC_BANNER_BUDGET    2600
 
 // 对外签名（供 log / 诊断 / 二次核对使用）
 const char *GaodeCleanSignature(void) {
@@ -448,6 +458,29 @@ static CGFloat GCPinBottom(UIWindow *win) {
     if (now - stableSince > 0.5) { locked = raw; stableSince = now; }
     return locked;
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  0.9.137（A7）：锚点稳定门 —— 车机钮「乱跳」的根因
+//
+//  真机 probe7 铁证（0.9.136 probe1，冷启动）：
+//    [0.0s] DISC 车机→新实例 {{10,357},{44,44}}
+//    [0.7s] WRITE#0 357 → 294      ← 往上拽 63pt
+//    [0.8s] WRITE#0 353 → 549      ← 往下甩 255pt
+//    [0.9s] P8DIVERGE 模型=549 呈现=294
+//  车机钮的钉位目标 = 搜索栏顶 − 50 − 高度，而冷启动期搜索栏顶每帧都在变
+//  （388 → 643 → 702）⇒ 目标跟着变 ⇒ 每拍照写 = 屏幕上来回跳。
+//
+//  判据：锚点值连续 ≥3 次采样不变、且已稳定 ≥0.25s，才允许写 frame。
+//  不满足时本拍只跳过写入（不动 hidden/alpha，控件保持 App 自己的位置）。
+// ═══════════════════════════════════════════════════════════════════════════
+static BOOL GCAnchorStable(CGFloat v) {
+    static CGFloat last; static double since; static int n;
+    double now = CACurrentMediaTime();
+    if (fabs(v - last) > 0.5) { last = v; since = now; n = 0; return NO; }
+    n++;
+    return (n >= 3) && (now - since >= 0.25);
+}
+
 static int BarFixStalls;      // 0.6.8：早退续窗次数上限，防止 8ms 自旋
 static int BarFixIdle;        // 0.6.9：连续「无改动」拍数，够了就立刻收窗
 static void AlignWeatherRowTick(UIWindow *win);
@@ -2313,7 +2346,6 @@ static void P7LiveScan(NSMutableString *o) {
     int budget = 3000, found = 0;
     [o appendString:@"---[probe7 全窗口活实例扫描]---\n"];
     for (UIWindow *w in wins) {
-        if (![w isKindOfClass:UIWindow.class] || w.hidden) continue;
         NSMutableArray *q = [NSMutableArray arrayWithObject:w];
         while (q.count && budget-- > 0) {
             UIView *v = q.firstObject; [q removeObjectAtIndex:0];
@@ -2605,9 +2637,15 @@ static void GCStyleDiscoverWidgets(UIWindow *win) {
             // ★0.9.120（A3）：发现新胶囊的**同一拍**即钉位（与车机钮的 A3 同一套路）。
             //   0.9.119 实测：车机钮 1.05s（发现即钉位），胶囊 2.50s（只写缓存，等下一轮
             //   GCStylePinWidgets）。差的这 1.45s 全花在「等」上。
-            if (CachedRight != v) foundRight = YES;
-            CachedRight = v;
-            GCPinnedRightStrong = v;          // 强引用（A2）
+            // ★0.9.137（A9）：**优先取可见实例**。真机铁证：缓存里那份 8.1s 仍 hid=1，
+            //   屏幕上那颗是另一份实例 ⇒ 我们一直在钉一个看不见的壳。
+            BOOL curOK = (CachedRight && CachedRight.window && !CachedRight.hidden);
+            BOOL vOK   = (v.window && !v.hidden);
+            if (CachedRight != v && (!curOK || vOK)) {
+                foundRight = YES;
+                CachedRight = v;
+                GCPinnedRightStrong = v;      // 强引用（A2）
+            }
         }
         else if ([cn isEqualToString:GCStrAt(141)]) CachedRoute = v;
         else if (GCCIsLiteGroupCapsule(v)) CachedLiteGroup = v;
@@ -3069,6 +3107,7 @@ static void GCStylePinOne(UIView *v) {
         const CGFloat pinBottom = GCPinBottom(win);          // 与 GCStylePinWidgets 同源
         CGRect wr = [v convertRect:v.bounds toView:win];
         CGRect g;
+        BOOL gcSkipWrite = NO;                               // 0.9.137（A7）
         if (isCar) {
             // ★trial50(A3)：回退 0.9.29 公式 —— bottom = 搜索栏顶 - GCGapCar(50)
             //   0.9.29 原文：AlignOneWidget(bar, CachedCar, barTop, GCGapCar)
@@ -3076,6 +3115,8 @@ static void GCStylePinOne(UIView *v) {
             //   原公式 pinBottom-20-18 锚在底栏顶（755）⇒ 顶边 673，比 0.9.29 低 64.4pt。
             CGFloat barTop = SearchBarView ? [SearchBarView convertPoint:CGPointZero toView:win].y
                                            : (pinBottom - GCSearchTopFromPin);
+            // ★0.9.137（A7）：锚点没稳就不写 —— 否则就是 357→294→549 那串乱跳
+            if (!GCAnchorStable(barTop)) gcSkipWrite = YES;
             g = CGRectMake(10, barTop - GCGapCar - wr.size.height, wr.size.width, wr.size.height);
             // ★trial35（P33 哨兵铁证：车机钮每 ~20s 被 App 把 alpha 清 0，坐标恒在 (10,673)）：
             //   位置钉住 ≠ 看得见。可见性同钉，幂等（达标即不写）。
@@ -3100,7 +3141,7 @@ static void GCStylePinOne(UIView *v) {
         //   根因 = 这些控件仍受 App 的 AutoLayout 约束管理 ⇒ 我们写 frame 被布局引擎覆盖，
         //   每帧互相覆盖 = 跳动。改为：**关掉自动约束**（frame 权威），并同步把内部内容钉回自身 bounds。
         // ★trial42(A1)：同上，控件侧也不碰约束标志（见 GCStyleTab 内的说明）。
-        if (!CGRectEqualToRect(local, v.frame)) {
+        if (!gcSkipWrite && !CGRectEqualToRect(local, v.frame)) {
             [CATransaction begin]; [CATransaction setDisableActions:YES];
             [v.layer removeAllAnimations]; v.frame = local;
             [CATransaction commit];
@@ -5219,6 +5260,13 @@ static void AlignCornerWidgets(UIView *bar) {
         GCWidgetAtPinnedSlot(CachedLiteGroup)) {
         CachedLiteGroup.hidden = NO;
     }
+    // ★0.9.137（A8）：右下胶囊同样放行 —— 冷启动实测「车机 3.0s 到位、胶囊 5.5s」，
+    //   差的 2.5 秒全在等 App 自己把外壳点亮。已落在钉位包络内就当场放行，
+    //   不依赖 SearchBarSettled（本机圆钮底栏永远不 settled）。
+    if (CachedRight && CachedRight.window && CachedRight.hidden &&
+        ColdTicks < 60 && GCWidgetAtPinnedSlot(CachedRight)) {
+        CachedRight.hidden = NO;
+    }
 }
 
 static void HookWidgetSetFrame(NSString *className, CGFloat gap) {
@@ -5911,7 +5959,20 @@ static BOOL GCCLooksLikeCloseControl(UIView *v) {
     //     b. 尺寸小巧（≤44pt 见方），符合「关闭按钮」的视觉规格
     //     c. 是横幅子树里的**叶子**（subviews 为空），排除容器
     //   位置校验（靠右）在 GCCBannerHasLegalAdMark 里用横幅坐标另判。
-    if (![v isKindOfClass:UIControl.class]) {
+    //
+    // ★0.9.136（A1）：UIControl 也要走几何兜底。
+    //   铁证（gcprobe 视图树，0.9.135 / 高德 17.03.1 / iOS 16.2）：
+    //     UIButton f={303,81,20,20} alpha=0.50 axL="default common messageview clo"
+    //   高德把 AX 标签截在 30 字符，"close" 只剩 "clo" ⇒ ①②③ 全不中；
+    //   而这道 `if (![v isKindOfClass:UIControl.class])` 又把 UIButton 挡在门外
+    //   ⇒ 「右侧关闭控件」双证三条通道同时断，横幅永远拦不掉。
+    //   放开这道门，但对 UIControl 追加一条硬约束：**≤24pt**。
+    //   依据同一份视图树：右侧常驻的「更多 / 图层」是 44×44 的 UIControl，
+    //   真正的 ✕ 是 20×20 —— 24pt 把两者干净切开，不会把常驻钮当关闭钮。
+    BOOL isCtl = [v isKindOfClass:UIControl.class];
+    BOOL leafLike = (v.subviews.count == 0) ||
+                    (v.subviews.count == 1 && [v.subviews.firstObject isKindOfClass:UIImageView.class]);
+    if (!isCtl || leafLike) {
         // ★0.9.127（A1）：交互性向上查 4 层，不再只看父级一层。
         //   真机上关闭按钮的点击热区经常挂到「按钮容器」或更上层的整条横幅上，
         //   尤其是深色主题用的是另一套资源（✕ 常被换成另一个 UIImageView），
@@ -5921,10 +5982,11 @@ static BOOL GCCLooksLikeCloseControl(UIView *v) {
         for (int i = 0; i < 4 && p; i++, p = p.superview) {
             if (p.userInteractionEnabled) { interactive = YES; break; }
         }
-        if (v.subviews.count == 0) {
+        if (v.subviews.count <= 1) {
             CGSize sz = v.bounds.size;
+            CGFloat sizeCap = isCtl ? 24.0 : 44.0;
             BOOL sized = (sz.width > 0 && sz.height > 0 &&
-                          sz.width <= 44 && sz.height <= 44 &&
+                          sz.width <= sizeCap && sz.height <= sizeCap &&
                           sz.width >= 8 && sz.height >= 8);
             if (sized) {
                 // 快通道：可交互 ⇒ 直接认（最可靠，亮/深色通用）
@@ -6130,6 +6192,18 @@ static BOOL GCSubtreeHasOpsNotice(UIView *v) {
 // 被隐藏过的横幅打标（幂等）—— 声明必须在所有使用点之前
 static char BannerHiddenKey;
 
+// 0.9.136（A2）：带外剪枝 —— 顶部带扫描只关心 y < 33% 屏高的子树。
+//   子视图 frame 完全落在带外、且没有 transform 时，其整棵子树都不可能落进带内，
+//   直接跳过。首页实测 560 个节点里 382 个在带内；展开搜索面板后可上千，
+//   没有这道剪枝，深度一放到 16 就会把每 600ms 一次的扫描做成负担。
+static BOOL GCCSubtreeOutOfTopBand(UIView *v, UIWindow *win) {
+    if (!v || !win) return NO;
+    if (!CGAffineTransformIsIdentity(v.transform)) return NO;   // 有变换不敢剪
+    CGRect r = [v convertRect:v.bounds toView:win];
+    if (!isfinite(r.origin.y) || !isfinite(r.size.height)) return NO;
+    return CGRectGetMinY(r) > win.bounds.size.height * 0.33;
+}
+
 // 结构判据（只判几何，不碰文案）
 static BOOL GCCIsBannerStripShape(UIView *v, UIWindow *win) {
     if (!v || !win) return NO;
@@ -6171,6 +6245,29 @@ static BOOL GCCStripHasRightClose(UIView *v) {
         [q addObjectsFromArray:s.subviews];
     }
     return NO;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  0.9.136（A3）：**类名精确通道** —— 高德运营蓝条
+//
+//  真机视图树（gcprobe，高德 17.03.1 / iOS 16.2）：
+//      WINImageTextBlueBarMapWidgetView {66,69,261,44}      ← 类名即语义
+//        └ WINOperationBgView {66,75,261,32}
+//            ├ UILabel "双11来淘金币，狂享20亿…"
+//            ├ UILabel "广告"
+//            └ UIButton ✕ {303,81,20,20}
+//
+//  「Image + Text + BlueBar + MapWidget」不会与任何原生控件重名，误伤面为零；
+//  形状与输入控件两道校验仍保留 —— 防未来同族类被复用成可输入条。
+// ═══════════════════════════════════════════════════════════════════════════
+static BOOL GCCIsImageTextBlueBar(UIView *v, UIWindow *win) {
+    if (!v || v.hidden || v.alpha < 0.02 || !win) return NO;
+    if (objc_getAssociatedObject(v, &BannerHiddenKey)) return NO;
+    if (![NSStringFromClass(v.class) containsString:GCStrAt(295)]) return NO;
+    if (GCCIsPinnedHomeView(v) || GCCAncestryIsPinnedHome(v)) return NO;
+    if (GCCSubtreeHasInput(v)) return NO;
+    if (!GCCIsBannerStripShape(v, win)) return NO;
+    return YES;
 }
 
 // 完整结构判据
@@ -6376,24 +6473,30 @@ static void SweepTopBannerAds(void) {
 
         // ★0.9.126（A1）：**结构通道优先** —— 不看任何文案，只看几何 + 结构。
         //   这是三次漏网换来的结论：文案是运营随便改的，靠文案判必然改一次漏一次。
-        //   BFS 到 6 层、上限 900，命中即收。
+        //   BFS 到 16 层、上限 2600，命中即收（0.9.136 A2：原 6 层扫不到 depth 11 的蓝条）。
         {
             NSMutableArray *qs = [NSMutableArray arrayWithObject:w];
             NSMutableArray *ds = [NSMutableArray arrayWithObject:@0];
             NSUInteger visitedS = 0;
-            for (NSUInteger i = 0; i < qs.count && visitedS < 900; i++) {
+            for (NSUInteger i = 0; i < qs.count && visitedS < GC_BANNER_BUDGET; i++) {
                 UIView *v = qs[i];
                 int d = [ds[i] intValue];
                 visitedS++;
                 if (v != w) {
+                    // ★0.9.136（A3）：类名精确通道优先（最短路径，零误伤）
+                    if (GCCIsImageTextBlueBar(v, w)) {
+                        GCHideTopBannerAd(v, "bluetext");
+                        return;
+                    }
                     if (GCCIsStructuralOpsBanner(v, w)) {
                         // 收到「这一条」本身，不再往上爬（往上会爬到整块首页）
                         GCHideTopBannerAd(v, "struct");
                         return;
                     }
                 }
-                if (d >= 6) continue;
+                if (d >= GC_BANNER_MAX_DEPTH) continue;
                 for (UIView *c in v.subviews) {
+                    if (GCCSubtreeOutOfTopBand(c, w)) continue;
                     [qs addObject:c];
                     [ds addObject:@(d + 1)];
                 }
@@ -6401,13 +6504,13 @@ static void SweepTopBannerAds(void) {
         }
 
         // ★0.9.124（A2）：文案直取通道（保留作兜底）—— 它不以形状为入口，
-        //   只扫顶部带内的节点（BFS 到 8 层、上限 1200），命中即收。
+        //   只扫顶部带内的节点（BFS 到 16 层、上限 2600），命中即收。
         {
             NSMutableArray *q0 = [NSMutableArray arrayWithObject:w];
             NSMutableArray *d0 = [NSMutableArray arrayWithObject:@0];
             CGFloat cut = w.bounds.size.height * 0.33;
             NSUInteger visited0 = 0;
-            for (NSUInteger i = 0; i < q0.count && visited0 < 1200; i++) {
+            for (NSUInteger i = 0; i < q0.count && visited0 < GC_BANNER_BUDGET; i++) {
                 UIView *v = q0[i];
                 int d = [d0[i] intValue];
                 visited0++;
@@ -6421,8 +6524,9 @@ static void SweepTopBannerAds(void) {
                         }
                     }
                 }
-                if (d >= 8) continue;
+                if (d >= GC_BANNER_MAX_DEPTH) continue;
                 for (UIView *c in v.subviews) {
+                    if (GCCSubtreeOutOfTopBand(c, w)) continue;
                     [q0 addObject:c];
                     [d0 addObject:@(d + 1)];
                 }
@@ -6430,24 +6534,25 @@ static void SweepTopBannerAds(void) {
         }
 
         // 通道①：形状 → 内容（沿用 0.9.124 A1 的解耦版）
-        // 广度优先下潜 6 层、上限 900 节点。只找「顶部带 + 通栏」的候选，
+        // 广度优先下潜 16 层、上限 2600 节点（0.9.136 A2）。只找「顶部带 + 通栏」的候选，
         // 命中即停（一条横幅一次只处理一个，避免同一拍重复遍历大子树）。
         NSMutableArray *q = [NSMutableArray arrayWithObject:w];
         NSMutableArray *depth = [NSMutableArray arrayWithObject:@0];
         NSUInteger visited = 0;
-        for (NSUInteger i = 0; i < q.count && visited < 900; i++) {
+        for (NSUInteger i = 0; i < q.count && visited < GC_BANNER_BUDGET; i++) {
             UIView *v = q[i];
             int d = [depth[i] intValue];
             visited++;
-            if (v != w && d <= 6) {
+            if (v != w && d <= GC_BANNER_MAX_DEPTH) {
                 if (GCCIsTopBannerAd(v, w ?: v.window)) {
                     UIView *target = GCBannerTopAncestor(v, v.window ?: w);
                     GCHideTopBannerAd(target, "sweep");
                     return;
                 }
             }
-            if (d >= 6) continue;
+            if (d >= GC_BANNER_MAX_DEPTH) continue;
             for (UIView *c in v.subviews) {
+                if (GCCSubtreeOutOfTopBand(c, w)) continue;
                 [q addObject:c];
                 [depth addObject:@(d + 1)];
             }

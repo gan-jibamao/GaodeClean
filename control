@@ -1,15 +1,8 @@
 Package: com.jibamao.gaodeclean
 Name: GaodeClean 高德精简
-Version: 0.9.135
+Version: 0.9.138
 Architecture: iphoneos-arm64
-Description: 高德地图界面精简：去广告、去白雾、控件归位，深色模式自适应。
- .
- 删掉：开屏广告 · 顶部运营横幅与通知条 · 底栏上滑白雾 · 顶部模糊带 · 首页白块 · 上拉发现引导
- 归位：定位/路线胶囊、连接车机、搜索栏、天气行按原生关系摆放；切页不闪、冷启动不在屏幕中部裸奔
- 适配：全版本自适应（按类名与几何特征判定）；rootless 与 RootHide 各一份包
- .
- 装完即用，无需设置。注销（sbreload）或重启用户空间后再打开高德。
- 添加源 https://gan-jibamao.github.io 可获取更新。
+Description: 高德精简，无设置
 Maintainer: jibamao
 Author: jibamao
 Section: jibamao-Tweaks
