@@ -352,7 +352,12 @@ static BOOL GCIsDarkAppearance(UIWindow *win) {
             }
         } @catch (__unused NSException *e) {}
     }
-    if (!hasValid) return YES;    // 从未采到有效亮度 ⇒ 保守按深色（宁可早暗，不要白闪）
+    // ★0.9.138（A11）：**采样失败不许翻黑**。
+    //   老大真机：点车机钮再返回首页，底栏三钮闪一下黑色。
+    //   根因：切页动画期 drawViewHierarchy 会返回全黑帧（mean=0 ⇒ hasValid=NO），
+    //   旧写法 `return YES` 直接判深色 ⇒ 底栏刷成 colorWithWhite:0.16 ⇒ 一帧黑闪。
+    //   改为沿用上一次的有效结论（冷启动默认亮色，与高德原生一致）。
+    if (!hasValid) return cached;
     // ★0.9.130（A14）：**采样没有真正跑过时，绝不能覆盖缓存**。
     //   真机铁证（老大：「切换后马上又会变白」）：
     //     ① trait 报亮色（高德恒为 Light）⇒ dark 初始为 NO
@@ -364,7 +369,7 @@ static BOOL GCIsDarkAppearance(UIWindow *win) {
     if (sampledThisRound) {
         cached = dark;
     } else if (!hasValid) {
-        return YES;
+        return cached;
     }
     return cached;
 }
@@ -479,6 +484,40 @@ static BOOL GCAnchorStable(CGFloat v) {
     if (fabs(v - last) > 0.5) { last = v; since = now; n = 0; return NO; }
     n++;
     return (n >= 3) && (now - since >= 0.25);
+}
+
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  0.9.138（A10）：车机钮「先在屏幕中间闪一下」的按住通道
+//
+//  老大真机反馈：冷启动时车机钮先出现在屏幕中间偏左，随即又跳回右下。
+//  根因（A7 只堵了一半）：App 建这颗钮时先摆在 (10,357) —— 屏幕中部；
+//  A7 挡住了「按旧锚点写 frame」，但**没挡住它就以那个位置被看见**。
+//  真机 probe：DISC 车机 {{10,357}} → 0.9s 才 WRITE 到 549。
+//  ⇒ 中间那 0.9 秒它一直在屏幕中部亮着。
+//
+//  修法：锚点未稳期间，把它**按住**（hidden=YES），锚点一稳立刻摆好再点亮。
+//  只按住我们自己藏的实例（关联对象打标），绝不碰 App 自己藏的情况；
+//  40 拍（≈8s）超时兜底放行，宁可早放，不可不放。
+// ═══════════════════════════════════════════════════════════════════════════
+static char GCHoldKey;
+static BOOL GCCarHoldIfTransient(UIView *v, CGFloat barTop) {
+    if (!v) return YES;
+    if (GCAnchorStable(barTop)) {
+        if (objc_getAssociatedObject(v, &GCHoldKey)) {
+            objc_setAssociatedObject(v, &GCHoldKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            v.hidden = NO;
+        }
+        return NO;
+    }
+    if (ColdTicks < 40) {
+        if (!v.hidden) {
+            objc_setAssociatedObject(v, &GCHoldKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            v.hidden = YES;
+        }
+        return YES;
+    }
+    return NO;      // 超时兜底：不再按住
 }
 
 static int BarFixStalls;      // 0.6.8：早退续窗次数上限，防止 8ms 自旋
@@ -3116,7 +3155,8 @@ static void GCStylePinOne(UIView *v) {
             CGFloat barTop = SearchBarView ? [SearchBarView convertPoint:CGPointZero toView:win].y
                                            : (pinBottom - GCSearchTopFromPin);
             // ★0.9.137（A7）：锚点没稳就不写 —— 否则就是 357→294→549 那串乱跳
-            if (!GCAnchorStable(barTop)) gcSkipWrite = YES;
+            // ★0.9.138（A10）：而且要先按住，别让它在屏幕中部被看见
+            gcSkipWrite = GCCarHoldIfTransient(v, barTop);
             g = CGRectMake(10, barTop - GCGapCar - wr.size.height, wr.size.width, wr.size.height);
             // ★trial35（P33 哨兵铁证：车机钮每 ~20s 被 App 把 alpha 清 0，坐标恒在 (10,673)）：
             //   位置钉住 ≠ 看得见。可见性同钉，幂等（达标即不写）。
@@ -3391,9 +3431,13 @@ static void GCStylePinWidgetsInner(UIWindow *win) {   // trial25(A2)：原体改
                                               : (pinBottom - GCSearchTopFromPin);
             carY = barTopCar - GCGapCar - wr.size.height;
         }
+        // ★0.9.138（A10）：与 GCStylePinOne 同一道门，两条写入路径都要堵
+        BOOL carHold = GCCarHoldIfTransient(car, SearchBarView
+                        ? [SearchBarView convertPoint:CGPointZero toView:win].y
+                        : (pinBottom - GCSearchTopFromPin));
         CGRect g = CGRectMake(10, carY, wr.size.width, wr.size.height);
         CGRect local = [car.superview convertRect:g fromView:win];
-        if (!CGRectEqualToRect(local, car.frame)) {
+        if (!carHold && !CGRectEqualToRect(local, car.frame)) {
 #ifdef GAODECLEAN_PROBE
             CGRect p7b = P7WR(car);
 #endif
