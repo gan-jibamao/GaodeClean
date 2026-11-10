@@ -18,7 +18,7 @@
 // ---- jibamao 个人标识（编译进 dylib，可用 strings 核对）----
 static NSString *const kGCAuthor      = @"jibamao";
 static NSString *const kGCRepo        = @"https://gan-jibamao.github.io/";
-static NSString *const kGCVersion     = @"0.9.140";
+static NSString *const kGCVersion     = @"0.9.141";
 
 // 0.9.18（A1）：底边间隙**按控件分开**，对表原生（搜索栏白底顶边 = 702.6pt）
 //   车机钮（连接车机 · WINDeviceInterconnectWidget）：原生底 652 → 间隙 50.6 → 取 50
@@ -524,30 +524,56 @@ __attribute__((unused)) static BOOL GCAnchorStable(CGFloat v) {
 //  只按住我们自己藏的实例（关联对象打标），绝不碰 App 自己藏的情况；
 //  40 拍（≈8s）超时兜底放行，宁可早放，不可不放。
 // ═══════════════════════════════════════════════════════════════════════════
-// 0.9.139（A14'）：以「它现在真的在目标位」为准 —— 与锚点是否稳无关。
-//   目标位由 GCCurrentBarTop() 的确定性兜底算出，从第一拍就是对的。
-//   在目标位 → 立刻放行；不在 → 按住（最多 40 拍）。
-static BOOL GCCarHoldIfTransient(UIView *v, CGFloat barTop) {
-    if (!v) return YES;
-    CGRect wr = v.window ? [v convertRect:v.bounds toView:v.window] : CGRectNull;
-    BOOL atTarget = (wr.size.width > 0 && fabs(wr.origin.y - (barTop - GCGapCar - wr.size.height)) < 1.0);
-    if (atTarget) {
-        if (objc_getAssociatedObject(v, &GCHoldKey)) {
-            objc_setAssociatedObject(v, &GCHoldKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-            v.hidden = NO;
+// 0.9.141（A16）：**先摆位，再判可见**。
+//   0.9.140 把「不在目标位就不写」当成了防闪手段 ⇒ 死锁：不写就永远不在目标位，
+//   于是一直按住，直到 40 拍超时才放行。真机实测：位置 1.0s 就对了，但直到 10.3s 才亮。
+//   现在拆成两步：写 frame 无条件（目标由 GCCurrentBarTop() 的确定性兜底给出），
+//   写完再拿「实际 frame vs 目标位」决定亮还是按。
+#ifdef GAODECLEAN_PROBE
+static void P7Note(NSString *fmt, ...);   // 前置声明（定义在 probe 块内）
+static double P7Now(void);
+#endif
+static void GCCarSyncVisibility(UIView *v, CGFloat barTop) {
+    if (!v || !v.window) return;
+#ifdef GAODECLEAN_PROBE
+    {   // 诊断：每秒一次，把「为什么看不见」的四个维度打全
+        static double lastLog;
+        double nowp = CACurrentMediaTime();
+        if (nowp - lastLog > 1.0 && ColdTicks < 40) {
+            lastLog = nowp;
+            UIView *sup = v.superview;
+            P7Note(@"CARST t=%.1f hid=%d a=%.2f y=%.0f sup=%@ supHid=%d",
+                   P7Now(), v.hidden, v.alpha,
+                   [v convertRect:v.bounds toView:v.window].origin.y,
+                   NSStringFromClass(sup.class), sup.hidden);
         }
-        return NO;
+    }
+#endif
+    CGRect wr = [v convertRect:v.bounds toView:v.window];
+    if (wr.size.width < 1 || wr.size.height < 1) return;
+    BOOL atTarget = fabs(wr.origin.y - (barTop - GCGapCar - wr.size.height)) < 1.0;
+    if (atTarget) {
+        objc_setAssociatedObject(v, &GCHoldKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        objc_setAssociatedObject(v, &AlignedKey, @(1), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        // ★0.9.141（A17）：**到位就点亮**。只「拒绝隐藏」不够 —— App 自己会把钮藏着，
+        //   等它主动亮要 3~10 秒（真机实测 0.9.140：位置 1.0s 对了，10.3s 才看得见）。
+        //   位置既然已经钉死，就不必再等 App 的调度。
+        if (v.hidden && ColdTicks < 40) {
+            v.hidden = NO;
+#ifdef GAODECLEAN_PROBE
+            static int nShow;
+            if (nShow < 4) { nShow++; P7Note(@"CARSHOW t=%.1f y=%.0f", P7Now(), wr.origin.y); }
+#endif
+        }
+        return;
     }
     if (ColdTicks < 40) {
         if (!v.hidden) {
             objc_setAssociatedObject(v, &GCHoldKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
             v.hidden = YES;
         }
-        return YES;
     }
-    return NO;      // 超时兜底：不再按住
 }
-
 static int BarFixStalls;      // 0.6.8：早退续窗次数上限，防止 8ms 自旋
 static int BarFixIdle;        // 0.6.9：连续「无改动」拍数，够了就立刻收窗
 static void AlignWeatherRowTick(UIWindow *win);
@@ -3176,7 +3202,7 @@ static void GCStylePinOne(UIView *v) {
         const CGFloat pinBottom = GCPinBottom(win);          // 与 GCStylePinWidgets 同源
         CGRect wr = [v convertRect:v.bounds toView:win];
         CGRect g;
-        BOOL gcSkipWrite = NO;                               // 0.9.137（A7）
+        CGFloat gcBarTop = 0;                                // 0.9.141（A16）
         if (isCar) {
 #ifdef GAODECLEAN_PROBE
             // 验收用：车机钮「可见且明显不在钉死位」记一条（应为 0 条）
@@ -3190,9 +3216,8 @@ static void GCStylePinOne(UIView *v) {
             //   注释铁证：「车机钮 原生底 652 → 间隙 50.6」（搜索栏顶 702.6）
             //   原公式 pinBottom-20-18 锚在底栏顶（755）⇒ 顶边 673，比 0.9.29 低 64.4pt。
             CGFloat barTop = GCCurrentBarTop();
-            // ★0.9.137（A7）：锚点没稳就不写 —— 否则就是 357→294→549 那串乱跳
-            // ★0.9.138（A10）：而且要先按住，别让它在屏幕中部被看见
-            gcSkipWrite = GCCarHoldIfTransient(v, barTop);
+            // ★0.9.141（A16）：写 frame 不设条件（目标本身已确定），可见性写完再判
+            gcBarTop = barTop;
             g = CGRectMake(10, barTop - GCGapCar - wr.size.height, wr.size.width, wr.size.height);
             // ★trial35（P33 哨兵铁证：车机钮每 ~20s 被 App 把 alpha 清 0，坐标恒在 (10,673)）：
             //   位置钉住 ≠ 看得见。可见性同钉，幂等（达标即不写）。
@@ -3217,13 +3242,14 @@ static void GCStylePinOne(UIView *v) {
         //   根因 = 这些控件仍受 App 的 AutoLayout 约束管理 ⇒ 我们写 frame 被布局引擎覆盖，
         //   每帧互相覆盖 = 跳动。改为：**关掉自动约束**（frame 权威），并同步把内部内容钉回自身 bounds。
         // ★trial42(A1)：同上，控件侧也不碰约束标志（见 GCStyleTab 内的说明）。
-        if (!gcSkipWrite && !CGRectEqualToRect(local, v.frame)) {
+        if (!CGRectEqualToRect(local, v.frame)) {
             [CATransaction begin]; [CATransaction setDisableActions:YES];
             [v.layer removeAllAnimations]; v.frame = local;
             [CATransaction commit];
 #ifdef GAODECLEAN_PROBE
 #endif
         }
+        if (isCar && gcBarTop > 0) GCCarSyncVisibility(v, gcBarTop);   // 0.9.141（A16）
     } @catch (__unused NSException *e) {}
     GCStylePinOneBusy = NO;
 }
@@ -3466,11 +3492,11 @@ static void GCStylePinWidgetsInner(UIWindow *win) {   // trial25(A2)：原体改
                                               : (pinBottom - GCSearchTopFromPin);
             carY = barTopCar - GCGapCar - wr.size.height;
         }
-        // ★0.9.138（A10）：与 GCStylePinOne 同一道门，两条写入路径都要堵
-        BOOL carHold = GCCarHoldIfTransient(car, GCCurrentBarTop());
+        // ★0.9.141（A16）：与 GCStylePinOne 同源 —— 先写，写完再判可见
+        CGFloat carBarTop = GCCurrentBarTop();
         CGRect g = CGRectMake(10, carY, wr.size.width, wr.size.height);
         CGRect local = [car.superview convertRect:g fromView:win];
-        if (!carHold && !CGRectEqualToRect(local, car.frame)) {
+        if (!CGRectEqualToRect(local, car.frame)) {
 #ifdef GAODECLEAN_PROBE
             CGRect p7b = P7WR(car);
 #endif
@@ -3481,11 +3507,8 @@ static void GCStylePinWidgetsInner(UIWindow *win) {   // trial25(A2)：原体改
             P7Write(0, p7b, local, p7oc);
 #endif
         }
-        // ★0.9.138（A13'）：**到钉死位才打标** —— 只判「锚点稳」不够，锚点可以稳定地错着。
-        CGRect nowc = [car convertRect:car.bounds toView:win];
-        BOOL atTarget = fabs(nowc.origin.y - carY) < 1.0 && fabs(nowc.origin.x - 10.0) < 1.0;
-        if (atTarget)
-            objc_setAssociatedObject(car, &AlignedKey, @(1), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        // ★0.9.141（A16）：到位即放行（摆位已在上面无条件完成）
+        GCCarSyncVisibility(car, carBarTop);
     }
     // trial10：钉完即放行扣留（AlignedKey），控件首 tick 就出现，不再等 settle
     // ★0.9.138（A13）：**锚点没稳不许打标**。
