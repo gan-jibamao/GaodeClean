@@ -18,7 +18,7 @@
 // ---- jibamao 个人标识（编译进 dylib，可用 strings 核对）----
 static NSString *const kGCAuthor      = @"jibamao";
 static NSString *const kGCRepo        = @"https://gan-jibamao.github.io/";
-static NSString *const kGCVersion     = @"0.9.139";
+static NSString *const kGCVersion     = @"0.9.140";
 
 // 0.9.18（A1）：底边间隙**按控件分开**，对表原生（搜索栏白底顶边 = 702.6pt）
 //   车机钮（连接车机 · WINDeviceInterconnectWidget）：原生底 652 → 间隙 50.6 → 取 50
@@ -484,15 +484,25 @@ static CGFloat GCPinBottom(UIWindow *win) {
 //   f414 才回到 235。139 = 深色 41 与亮底 235 各半 —— 我们带着车机页的深色底回来了。
 //   修法：检测到「回到首页」后 0.45s 内不重刷底栏底色，等采样稳定再说。
 static double GCTabFillFreezeUntil;
+static BOOL GCOnHomePage = YES;   // 0.9.139（A15）：非首页期间不刷底栏填色
 static char GCHoldKey;
+// 0.9.139（A14）：锚点取值**不再等稳定**。
+//   真机逐帧铁证：0.9.139 把「锚点稳 0.25s」作为放行条件后，车机钮拖到 2.625s 才出现
+//   （0.9.138 是 1.5s）。根因是 SearchBarView 在冷启动期给的是瞬态值（643），
+//   要等到 2.6s 才落到 702；而 **兜底公式 pinBottom-52.4 从第一拍就是对的**（755-52.4=702.6）。
+//   判据：两者相差 ≤24pt 才采信搜索栏，否则一律用兜底 —— 位置从第一拍就准，不必等。
 static CGFloat GCCurrentBarTop(void) {
     UIWindow *w = (SearchBarView && SearchBarView.window) ? SearchBarView.window : GCAnyMainWindow();
     if (!w) return 0;
-    if (SearchBarView && SearchBarView.window) return [SearchBarView convertPoint:CGPointZero toView:w].y;
-    return GCPinBottom(w) - GCSearchTopFromPin;
+    CGFloat fb = GCPinBottom(w) - GCSearchTopFromPin;
+    if (SearchBarView && SearchBarView.window && !SearchBarView.hidden && SearchBarView.alpha > 0.5f) {
+        CGFloat sb = [SearchBarView convertPoint:CGPointZero toView:w].y;
+        if (fabs(sb - fb) <= 24.0) return sb;
+    }
+    return fb;
 }
 
-static BOOL GCAnchorStable(CGFloat v) {
+__attribute__((unused)) static BOOL GCAnchorStable(CGFloat v) {
     static CGFloat last; static double since; static int n;
     double now = CACurrentMediaTime();
     if (fabs(v - last) > 0.5) { last = v; since = now; n = 0; return NO; }
@@ -514,9 +524,14 @@ static BOOL GCAnchorStable(CGFloat v) {
 //  只按住我们自己藏的实例（关联对象打标），绝不碰 App 自己藏的情况；
 //  40 拍（≈8s）超时兜底放行，宁可早放，不可不放。
 // ═══════════════════════════════════════════════════════════════════════════
+// 0.9.139（A14'）：以「它现在真的在目标位」为准 —— 与锚点是否稳无关。
+//   目标位由 GCCurrentBarTop() 的确定性兜底算出，从第一拍就是对的。
+//   在目标位 → 立刻放行；不在 → 按住（最多 40 拍）。
 static BOOL GCCarHoldIfTransient(UIView *v, CGFloat barTop) {
     if (!v) return YES;
-    if (GCAnchorStable(barTop)) {
+    CGRect wr = v.window ? [v convertRect:v.bounds toView:v.window] : CGRectNull;
+    BOOL atTarget = (wr.size.width > 0 && fabs(wr.origin.y - (barTop - GCGapCar - wr.size.height)) < 1.0);
+    if (atTarget) {
         if (objc_getAssociatedObject(v, &GCHoldKey)) {
             objc_setAssociatedObject(v, &GCHoldKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
             v.hidden = NO;
@@ -2273,7 +2288,7 @@ static void GCStyleTab(UIView *anchor) {
             BOOL layerDiff = !it.layer.backgroundColor ||
                              !CGColorEqualToColor(it.layer.backgroundColor, fillTab.CGColor);
             // ★0.9.138（A12）：冻结窗内不重刷（视频铁证：回首页后 40ms 底栏是深色 139）
-            if (CACurrentMediaTime() < GCTabFillFreezeUntil) { viewDiff = NO; layerDiff = NO; }
+            if (CACurrentMediaTime() < GCTabFillFreezeUntil || !GCOnHomePage) { viewDiff = NO; layerDiff = NO; }
             if (viewDiff || layerDiff) {
                 [CATransaction begin]; [CATransaction setDisableActions:YES];
                 it.layer.backgroundColor = fillTab.CGColor;
@@ -3174,8 +3189,7 @@ static void GCStylePinOne(UIView *v) {
             //   0.9.29 原文：AlignOneWidget(bar, CachedCar, barTop, GCGapCar)
             //   注释铁证：「车机钮 原生底 652 → 间隙 50.6」（搜索栏顶 702.6）
             //   原公式 pinBottom-20-18 锚在底栏顶（755）⇒ 顶边 673，比 0.9.29 低 64.4pt。
-            CGFloat barTop = SearchBarView ? [SearchBarView convertPoint:CGPointZero toView:win].y
-                                           : (pinBottom - GCSearchTopFromPin);
+            CGFloat barTop = GCCurrentBarTop();
             // ★0.9.137（A7）：锚点没稳就不写 —— 否则就是 357→294→549 那串乱跳
             // ★0.9.138（A10）：而且要先按住，别让它在屏幕中部被看见
             gcSkipWrite = GCCarHoldIfTransient(v, barTop);
@@ -3300,8 +3314,7 @@ static void GCStyleLayerFix(CALayer *la) {
             //   probe23 日志铁证：改前车机恒在 673（旧公式 pinBottom-20-18-h），
             //   而 0.9.29 的 AlignOneWidget(bar, CachedCar, barTop, 50) 给出 608.6。
             //   ★这是真正生效的路径（全局 layer 钩子），GCStylePinOne 的 isCar 分支是死代码。
-            CGFloat barTopCar = SearchBarView ? [SearchBarView convertPoint:CGPointZero toView:win].y
-                                              : (pinBottom - GCSearchTopFromPin);
+            CGFloat barTopCar = GCCurrentBarTop();
             g = CGRectMake(10, barTopCar - GCGapCar - wr.size.height, wr.size.width, wr.size.height);
         } else {
             g = CGRectMake(sw - 10 - wr.size.width, pinBottom - wr.size.height, wr.size.width, wr.size.height);
@@ -3454,9 +3467,7 @@ static void GCStylePinWidgetsInner(UIWindow *win) {   // trial25(A2)：原体改
             carY = barTopCar - GCGapCar - wr.size.height;
         }
         // ★0.9.138（A10）：与 GCStylePinOne 同一道门，两条写入路径都要堵
-        BOOL carHold = GCCarHoldIfTransient(car, SearchBarView
-                        ? [SearchBarView convertPoint:CGPointZero toView:win].y
-                        : (pinBottom - GCSearchTopFromPin));
+        BOOL carHold = GCCarHoldIfTransient(car, GCCurrentBarTop());
         CGRect g = CGRectMake(10, carY, wr.size.width, wr.size.height);
         CGRect local = [car.superview convertRect:g fromView:win];
         if (!carHold && !CGRectEqualToRect(local, car.frame)) {
@@ -3473,7 +3484,7 @@ static void GCStylePinWidgetsInner(UIWindow *win) {   // trial25(A2)：原体改
         // ★0.9.138（A13'）：**到钉死位才打标** —— 只判「锚点稳」不够，锚点可以稳定地错着。
         CGRect nowc = [car convertRect:car.bounds toView:win];
         BOOL atTarget = fabs(nowc.origin.y - carY) < 1.0 && fabs(nowc.origin.x - 10.0) < 1.0;
-        if (atTarget && GCAnchorStable(GCCurrentBarTop()))
+        if (atTarget)
             objc_setAssociatedObject(car, &AlignedKey, @(1), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     }
     // trial10：钉完即放行扣留（AlignedKey），控件首 tick 就出现，不再等 settle
@@ -5515,6 +5526,7 @@ static void WatchHomeTransition(id tabs) {
     if (home && !prevHome && ColdTicks >= 15) KickBarFixFor(0.32);
     // 0.7.2：切页 = 内容必然重排 → 强制全量 CleanPage
     if (prevHome != home) { CleanForce = YES; GCCActiveUntil = TickCount + 8;
+        GCOnHomePage = home;   // 0.9.139（A15）
         // 0.9.99（A4）：回到首页的瞬间运营位会重建，立刻扫一次（不等下一拍）
         if (home) ArmTopBannerSweep();
         // ★0.9.138（A12）：回首页瞬间冻结底栏填色，别把上一页的深色带回来
