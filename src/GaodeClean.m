@@ -2257,6 +2257,39 @@ static void GCStyleKillShadows(CALayer *la, int depth) {
     for (CALayer *c in la.sublayers) GCStyleKillShadows(c, depth + 1);
 }
 // 底栏 → 两枚 54pt 圆钮（中心 c±33，总占地 120 = 原 240 的一半）；pill 族全隐藏
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  0.9.141（A18）：底栏闪黑的真正根因 —— 「首页被压栈页面盖住」检测
+//
+//  真机 probe 铁证（0.9.141-probe4）：
+//    [13.5s] TABST aHid=0 aA=1.00 barWin=1 dark=1 onHome=1
+//  点进车机页后整屏是深色，但底栏仍 alpha=1、仍在窗口里，选中的 tab 还是「首页」
+//  ⇒ onHome 判不出来 ⇒ 我们照屏幕采样把三个钮刷成 colorWithWhite:0.16
+//  ⇒ 返回首页第一帧就是黑的（视频：f548 单帧 RGB 139）。
+//
+//  判据换成「窗口的顶层 VC 是否就是首页那个 VC」——压栈/模态都会换人。
+// ═══════════════════════════════════════════════════════════════════════════
+static NSString *GCHomeTopVCClass;
+
+__attribute__((unused)) static NSString *GCTopVCClass(UIWindow *w) {
+    UIViewController *vc = w.rootViewController;
+    for (int guard = 0; vc && guard < 12; guard++) {
+        UIViewController *next = nil;
+        if (vc.presentedViewController && !vc.presentedViewController.isBeingDismissed)
+            next = vc.presentedViewController;
+        else if ([vc isKindOfClass:UINavigationController.class]) {
+            UIViewController *t = ((UINavigationController *)vc).topViewController;
+            if (t && t != vc) next = t;
+        } else if ([vc isKindOfClass:UITabBarController.class]) {
+            UIViewController *sel = ((UITabBarController *)vc).selectedViewController;
+            if (sel && sel != vc) next = sel;
+        }
+        if (!next) break;
+        vc = next;
+    }
+    return vc ? NSStringFromClass(vc.class) : nil;
+}
+
 static void GCStyleTab(UIView *anchor) {
     CGFloat sw = anchor.bounds.size.width;
     if (sw < 100) return;
@@ -2284,6 +2317,35 @@ static void GCStyleTab(UIView *anchor) {
     [items sortUsingComparator:^NSComparisonResult(UIView *a, UIView *b) {
         return a.frame.origin.x < b.frame.origin.x ? NSOrderedAscending : NSOrderedDescending;
     }];
+#ifdef GAODECLEAN_PROBE
+    {   // 诊断：窗口清单（每秒一条，回答「车机页是不是另一个 window」）
+        static double lastW;
+        double nowW = CACurrentMediaTime();
+        if (nowW - lastW > 1.0) {
+            lastW = nowW;
+            NSMutableString *ws = [NSMutableString string];
+            for (UIWindow *x in GCAllWindows())
+                [ws appendFormat:@"[%@ lvl=%.0f hid=%d a=%.2f %@]",
+                 NSStringFromClass(x.class), x.windowLevel, x.hidden, x.alpha,
+                 NSStringFromCGRect(x.bounds)];
+            P7Note(@"WINLIST t=%.1f %@", P7Now(), ws);
+        }
+    }
+    {   // 诊断：底栏与条目的可见性（每秒一条）
+        static double lastT;
+        double nowT = CACurrentMediaTime();
+        if (nowT - lastT > 1.0) {
+            lastT = nowT;
+            UIView *it0 = items.count ? items[0] : nil;
+            P7Note(@"TABST t=%.1f aHid=%d aA=%.2f barWin=%d itHid=%d itA=%.2f dark=%d onHome=%d top=%@ home=%@",
+                   P7Now(), anchor.hidden, anchor.alpha, anchor.window != nil,
+                   it0 ? it0.hidden : -1, it0 ? it0.alpha : -1,
+                   anchor.window ? (int)(GCIsDarkAppearance(anchor.window)) : -1,
+                   (int)GCOnHomePage,
+                   GCTopVCClass(anchor.window) ?: @"-", @"-");
+        }
+    }
+#endif
     for (NSUInteger i = 0; i < items.count && i < 2; i++) {
         UIView *it = items[i];
         // ★probe22(A1)：不再强写 x —— probe21 实测 App 的窄栏布局是 ±60（中心 136.5/256.5），
@@ -2307,14 +2369,33 @@ static void GCStyleTab(UIView *anchor) {
         //   启动早期 App 会直接写 view.backgroundColor（不经过 layer），把我们的深色盖掉。
         //   修法：两边都写，且每帧对齐（幂等，值相同不触发重绘）。
         {
-            UIColor *fillTab = GCStyleFillColor(it);
+            // ★0.9.141（A19）：底栏三钮**恒用亮色**。
+            //   深色判定靠屏幕采样，而车机页/搜索页会把整屏变暗 —— 采样分不清
+            //   「高德切了深色主题」和「上方盖了一层深色页面」，实测每次从车机页回来
+            //   三个钮都带一帧深色（视频 f548 RGB 139，背景 234）。
+            //   底栏只在首页出现，首页恒为亮色系 ⇒ 直接锁亮，绝不再闪黑。
+            UIColor *fillTab = [UIColor colorWithWhite:0.96 alpha:0.92];
             // 0.9.109：view 与 layer 双写；新实例首次进来时两者都还没写过 ⇒ 一并落地。
             BOOL viewDiff  = !it.backgroundColor ||
                              !CGColorEqualToColor(it.backgroundColor.CGColor, fillTab.CGColor);
             BOOL layerDiff = !it.layer.backgroundColor ||
                              !CGColorEqualToColor(it.layer.backgroundColor, fillTab.CGColor);
             // ★0.9.138（A12）：冻结窗内不重刷（视频铁证：回首页后 40ms 底栏是深色 139）
-            if (CACurrentMediaTime() < GCTabFillFreezeUntil || !GCOnHomePage) { viewDiff = NO; layerDiff = NO; }
+            // ★0.9.141（A18'）：**命中测试**判遮盖。
+            //   车机页不是压栈 VC（顶层始终是 GDMapViewController），而是盖在同一个窗口上的
+            //   全屏层 —— 底栏 alpha 仍是 1、仍在窗口里，VC 判据完全失效。
+            //   换个问法：这个钮的中心点，现在点下去是谁接？不是它自己 ⇒ 被盖着 ⇒ 不刷。
+            BOOL covered = NO;
+            if (it.window) {
+                CGPoint ctr = [it convertPoint:CGPointMake(CGRectGetMidX(it.bounds),
+                                                          CGRectGetMidY(it.bounds)) toView:it.window];
+                UIView *hit = [it.window hitTest:ctr withEvent:nil];
+                covered = !(hit == it || (hit && [hit isDescendantOfView:it]));
+            }
+            // ★0.9.141（A19'）：填色已恒亮，冻结窗反而害事 —— 转场那 0.45s 里
+            //   正是 App 给三个钮刷深色实心圆盘的时候（逐帧：实心盘 ~76 灰），
+            //   我们一冻结就盖不住。现在立即回填。
+            (void)covered;
             if (viewDiff || layerDiff) {
                 [CATransaction begin]; [CATransaction setDisableActions:YES];
                 it.layer.backgroundColor = fillTab.CGColor;
