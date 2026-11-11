@@ -18,7 +18,7 @@
 // ---- jibamao 个人标识（编译进 dylib，可用 strings 核对）----
 static NSString *const kGCAuthor      = @"jibamao";
 static NSString *const kGCRepo        = @"https://gan-jibamao.github.io/";
-static NSString *const kGCVersion     = @"0.9.148";
+static NSString *const kGCVersion     = @"0.9.149";
 
 // 0.9.18（A1）：底边间隙**按控件分开**，对表原生（搜索栏白底顶边 = 702.6pt）
 //   车机钮（连接车机 · WINDeviceInterconnectWidget）：原生底 652 → 间隙 50.6 → 取 50
@@ -7492,6 +7492,29 @@ static BOOL GCShouldProtectPinnedWidget(UIView *v) {
 //  纵向在屏高 35%~85% 之间（正是「我的位置」667 上方那一带）。
 //  左上角罗盘 midY≈91（=10.7%），天然不在范围内。
 // ═══════════════════════════════════════════════════════════════════════════
+
+// 0.9.149（A25）：单视图判据 —— 罗盘/2D 是同一个视图，只许待在左上角罗盘位。
+//   位移的第一帧就要判（setFrame:/setCenter:/layoutSubviews 三条钩子），
+//   否则它会「边飞边显示」约 0.1s（视频 t≈6.68~6.75 能 OCR 到「2D」字样）。
+static void GCCompassFixOne(UIView *v) {
+    if (!v || !v.window) return;
+    UIWindow *w = v.window;
+    CGFloat W = w.bounds.size.width, H = w.bounds.size.height;
+    if (W < 1 || H < 1) return;
+    CGRect r = [v convertRect:v.bounds toView:w];
+    if (r.size.width < 1 || r.size.height < 1) return;
+    CGFloat midx = CGRectGetMidX(r), midy = CGRectGetMidY(r);
+    BOOL atCompassSlot = (midx < W * 0.30 && midy < H * 0.20);
+    if (atCompassSlot) {
+        if (v.hidden) v.hidden = NO;
+        if (v.userInteractionEnabled) v.userInteractionEnabled = NO;
+        for (UIView *sub in v.subviews)
+            if (GCStyleHas2D3DText(sub) && !sub.hidden) sub.hidden = YES;
+    } else if (!v.hidden) {
+        v.hidden = YES;
+    }
+}
+
 static void GCKillMapTypeButton(UIWindow *win) {
     if (!win) return;
     CGFloat W = win.bounds.size.width, H = win.bounds.size.height;
@@ -7530,23 +7553,7 @@ static void GCKillMapTypeButton(UIWindow *win) {
         //    所以规则不是「右边才藏」，而是「只许待在左上角罗盘位」：
         //      · 在罗盘位（左列 + 顶部带）⇒ 保持可见，但关掉交互、藏掉 2D/3D 文字层
         //      · 一旦离开（开始飞/落到右侧）⇒ 立刻隐藏，飞的过程也看不见
-        if (compassCls) {
-            BOOL atCompassSlot = (midx < W * 0.30 && midy < H * 0.20);
-            if (atCompassSlot) {
-                if (v.hidden) v.hidden = NO;
-                if (v.userInteractionEnabled) v.userInteractionEnabled = NO;
-                for (UIView *sub in v.subviews) {
-                    if (GCStyleHas2D3DText(sub) && !sub.hidden) sub.hidden = YES;
-                }
-            } else if (!v.hidden) {
-                v.hidden = YES;
-#ifdef GAODECLEAN_PROBE
-                static int nFly;
-                if (nFly < 6) { nFly++; P7Note(@"COMPASS fly-hide f=%@", NSStringFromCGRect(r)); }
-#endif
-            }
-            continue;
-        }
+        if (compassCls) { GCCompassFixOne(v); continue; }
         if (byClass || bySlot) {
             v.hidden = YES;
 #ifdef GAODECLEAN_PROBE
@@ -7572,7 +7579,26 @@ static void GCInstallCompassMoveHooks(void) {
         NSString *cn = NSStringFromClass(c);
         if (!cn.length || ![cn containsString:needle]) continue;
         if (![(id)c isSubclassOfClass:UIView.class]) continue;
-        HookVoid(cn, GCStrAt(123), ^(UIView *v) { if (v.window) GCKillMapTypeButton(v.window); });
+        HookVoid(cn, GCStrAt(123), ^(UIView *v) { GCCompassFixOne(v); });          // didMoveToWindow
+        HookVoid(cn, GCStrAt(91),  ^(UIView *v) { GCCompassFixOne(v); });          // layoutSubviews
+        for (NSString *selName in @[@"setFrame:", @"setCenter:"]) {
+            SEL sel = NSSelectorFromString(selName);
+            Method m = class_getInstanceMethod(c, sel);
+            if (!m) continue;
+            IMP o = method_getImplementation(m);
+            const char *t = method_getTypeEncoding(m);
+            if ([selName isEqualToString:@"setFrame:"]) {
+                Replace(c, sel, imp_implementationWithBlock(^(UIView *self, CGRect f) {
+                    ((void (*)(id, SEL, CGRect))o)(self, sel, f);
+                    GCCompassFixOne(self);
+                }), t);
+            } else {
+                Replace(c, sel, imp_implementationWithBlock(^(UIView *self, CGPoint pt) {
+                    ((void (*)(id, SEL, CGPoint))o)(self, sel, pt);
+                    GCCompassFixOne(self);
+                }), t);
+            }
+        }
     }
     free(buf);
 }
