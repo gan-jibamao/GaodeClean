@@ -18,7 +18,7 @@
 // ---- jibamao 个人标识（编译进 dylib，可用 strings 核对）----
 static NSString *const kGCAuthor      = @"jibamao";
 static NSString *const kGCRepo        = @"https://gan-jibamao.github.io/";
-static NSString *const kGCVersion     = @"0.9.146";
+static NSString *const kGCVersion     = @"0.9.147";
 
 // 0.9.18（A1）：底边间隙**按控件分开**，对表原生（搜索栏白底顶边 = 702.6pt）
 //   车机钮（连接车机 · WINDeviceInterconnectWidget）：原生底 652 → 间隙 50.6 → 取 50
@@ -7512,7 +7512,20 @@ static void GCKillMapTypeButton(UIWindow *win) {
         //    （「我的位置」从 78% 起、「更多/图层」在 8%~18%，中间这条带平时是空的）
         BOOL square = (r.size.width >= 36 && r.size.width <= 56 &&
                        fabs(r.size.width - r.size.height) <= 6);
-        BOOL bySlot = square && midx > W * 0.70 && midy > H * 0.55 && midy < H * 0.76;
+        // 0.9.147（A23）：带宽 55%~76% 太窄 —— 真机那颗会落到 76% 以下一点。
+        //   放到 45%~95%，再用「胶囊矩形」把「我的位置 / 路线」保护起来：
+        //   它们都住在 CachedRight 的 44×88 里，与它相交就不动。
+        BOOL protectedRect = NO;
+        for (UIView *pin in @[CachedRight ?: (id)[NSNull null], CachedRoute ?: (id)[NSNull null],
+                              CachedLiteGroup ?: (id)[NSNull null]]) {
+            if (![pin isKindOfClass:UIView.class]) continue;
+            UIView *pv = (UIView *)pin;
+            if (!pv.window) continue;
+            CGRect pr = [pv convertRect:pv.bounds toView:win];
+            if (CGRectIsEmpty(pr)) continue;
+            if (CGRectIntersectsRect(CGRectInset(r, -2, -2), pr)) { protectedRect = YES; break; }
+        }
+        BOOL bySlot = square && !protectedRect && midx > W * 0.70 && midy > H * 0.45 && midy < H * 0.95;
         // ③ 左上角那颗是**罗盘本体**：保留它，只把「2D/3D 开关」摘掉
         //    —— 老大原话「罗盘那个 2D3D 按钮也移除，但是不移除罗盘」。
         //    做法：关掉交互（点它不再切 2D/3D）+ 藏掉子树里写着 2D/3D 的文字层，
