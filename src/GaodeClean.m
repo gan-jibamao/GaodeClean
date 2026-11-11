@@ -18,7 +18,7 @@
 // ---- jibamao 个人标识（编译进 dylib，可用 strings 核对）----
 static NSString *const kGCAuthor      = @"jibamao";
 static NSString *const kGCRepo        = @"https://gan-jibamao.github.io/";
-static NSString *const kGCVersion     = @"0.9.145";
+static NSString *const kGCVersion     = @"0.9.146";
 
 // 0.9.18（A1）：底边间隙**按控件分开**，对表原生（搜索栏白底顶边 = 702.6pt）
 //   车机钮（连接车机 · WINDeviceInterconnectWidget）：原生底 652 → 间隙 50.6 → 取 50
@@ -7513,6 +7513,24 @@ static void GCKillMapTypeButton(UIWindow *win) {
         BOOL square = (r.size.width >= 36 && r.size.width <= 56 &&
                        fabs(r.size.width - r.size.height) <= 6);
         BOOL bySlot = square && midx > W * 0.70 && midy > H * 0.55 && midy < H * 0.76;
+        // ③ 左上角那颗是**罗盘本体**：保留它，只把「2D/3D 开关」摘掉
+        //    —— 老大原话「罗盘那个 2D3D 按钮也移除，但是不移除罗盘」。
+        //    做法：关掉交互（点它不再切 2D/3D）+ 藏掉子树里写着 2D/3D 的文字层，
+        //    罗盘指针本身不动。
+        BOOL leftCol = compassCls && midx < W * 0.30;
+        if (leftCol) {
+            if (v.userInteractionEnabled) v.userInteractionEnabled = NO;
+            for (UIView *sub in v.subviews) {
+                if (GCStyleHas2D3DText(sub) && !sub.hidden) {
+                    sub.hidden = YES;
+#ifdef GAODECLEAN_PROBE
+                    static int nL;
+                    if (nL < 4) { nL++; P7Note(@"COMPASS label hidden %@", NSStringFromClass(sub.class)); }
+#endif
+                }
+            }
+            continue;
+        }
         if (byClass || bySlot) {
             v.hidden = YES;
 #ifdef GAODECLEAN_PROBE
