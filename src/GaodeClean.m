@@ -18,7 +18,7 @@
 // ---- jibamao 个人标识（编译进 dylib，可用 strings 核对）----
 static NSString *const kGCAuthor      = @"jibamao";
 static NSString *const kGCRepo        = @"https://gan-jibamao.github.io/";
-static NSString *const kGCVersion     = @"0.9.144";
+static NSString *const kGCVersion     = @"0.9.145";
 
 // 0.9.18（A1）：底边间隙**按控件分开**，对表原生（搜索栏白底顶边 = 702.6pt）
 //   车机钮（连接车机 · WINDeviceInterconnectWidget）：原生底 652 → 间隙 50.6 → 取 50
@@ -7501,16 +7501,24 @@ static void GCKillMapTypeButton(UIWindow *win) {
         UIView *v = q[i];
         [q addObjectsFromArray:v.subviews];
         if (v.hidden) continue;
-        NSString *cn = NSStringFromClass(v.class);
-        if (!cn.length || ![cn containsString:GCStrAt(296)]) continue;   // "Compass"
         CGRect r = [v convertRect:v.bounds toView:win];
         if (r.size.width < 8 || r.size.height < 8) continue;
         CGFloat midx = CGRectGetMidX(r), midy = CGRectGetMidY(r);
-        if (midx > W * 0.70 && midy > H * 0.35 && midy < H * 0.85) {
+        NSString *cn = NSStringFromClass(v.class);
+        BOOL compassCls = [cn containsString:GCStrAt(296)];   // "Compass"（罗盘族）
+        // ① 类名族 + 右列（罗盘在左上角 midY≈11%，天然排除）
+        BOOL byClass = compassCls && midx > W * 0.70 && midy > H * 0.35 && midy < H * 0.85;
+        // ② 位置兜底：右列、近正方 36~56pt、落在 55%~76% 屏高
+        //    （「我的位置」从 78% 起、「更多/图层」在 8%~18%，中间这条带平时是空的）
+        BOOL square = (r.size.width >= 36 && r.size.width <= 56 &&
+                       fabs(r.size.width - r.size.height) <= 6);
+        BOOL bySlot = square && midx > W * 0.70 && midy > H * 0.55 && midy < H * 0.76;
+        if (byClass || bySlot) {
             v.hidden = YES;
 #ifdef GAODECLEAN_PROBE
             static int nMT;
-            if (nMT < 6) { nMT++; P7Note(@"MAPTYPE hidden %@ f=%@", cn, NSStringFromCGRect(r)); }
+            if (nMT < 8) { nMT++; P7Note(@"MAPTYPE %@ %@ f=%@", byClass ? @"cls" : @"slot", cn,
+                                          NSStringFromCGRect(r)); }
 #endif
         }
     }
