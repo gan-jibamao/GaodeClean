@@ -18,7 +18,7 @@
 // ---- jibamao 个人标识（编译进 dylib，可用 strings 核对）----
 static NSString *const kGCAuthor      = @"jibamao";
 static NSString *const kGCRepo        = @"https://gan-jibamao.github.io/";
-static NSString *const kGCVersion     = @"0.9.141";
+static NSString *const kGCVersion     = @"0.9.142";
 
 // 0.9.18（A1）：底边间隙**按控件分开**，对表原生（搜索栏白底顶边 = 702.6pt）
 //   车机钮（连接车机 · WINDeviceInterconnectWidget）：原生底 652 → 间隙 50.6 → 取 50
@@ -552,26 +552,16 @@ static void GCCarSyncVisibility(UIView *v, CGFloat barTop) {
     CGRect wr = [v convertRect:v.bounds toView:v.window];
     if (wr.size.width < 1 || wr.size.height < 1) return;
     BOOL atTarget = fabs(wr.origin.y - (barTop - GCGapCar - wr.size.height)) < 1.0;
-    if (atTarget) {
-        objc_setAssociatedObject(v, &GCHoldKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-        objc_setAssociatedObject(v, &AlignedKey, @(1), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-        // ★0.9.141（A17）：**到位就点亮**。只「拒绝隐藏」不够 —— App 自己会把钮藏着，
-        //   等它主动亮要 3~10 秒（真机实测 0.9.140：位置 1.0s 对了，10.3s 才看得见）。
-        //   位置既然已经钉死，就不必再等 App 的调度。
-        if (v.hidden && ColdTicks < 40) {
-            v.hidden = NO;
+    // ★0.9.142（A20）：**车机钮整个移除**（老大指定）。
+    //   位置照钉（天气行的对齐锚点依赖它的 frame），但永远不显示。
+    objc_setAssociatedObject(v, &AlignedKey, @(1), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    if (!v.hidden) {
+        objc_setAssociatedObject(v, &GCHoldKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        v.hidden = YES;
 #ifdef GAODECLEAN_PROBE
-            static int nShow;
-            if (nShow < 4) { nShow++; P7Note(@"CARSHOW t=%.1f y=%.0f", P7Now(), wr.origin.y); }
+        static int nHide;
+        if (nHide < 4) { nHide++; P7Note(@"CARHIDE t=%.1f y=%.0f", P7Now(), wr.origin.y); }
 #endif
-        }
-        return;
-    }
-    if (ColdTicks < 40) {
-        if (!v.hidden) {
-            objc_setAssociatedObject(v, &GCHoldKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-            v.hidden = YES;
-        }
     }
 }
 static int BarFixStalls;      // 0.6.8：早退续窗次数上限，防止 8ms 自旋
@@ -7590,18 +7580,10 @@ static void InstallPromoAndWidgetHooks(void) {
             if (m) {
                 IMP orig = method_getImplementation(m);
                 const char *t = method_getTypeEncoding(m);
-                Replace(carCls, sh, imp_implementationWithBlock(^(UIView *self, BOOL hidden) {
-                    if (hidden && GCShouldProtectPinnedWidget(self)) {
-                        return;      // 已就位却被隐藏 → 拒绝
-                    }
-                    // ★0.9.139：40 拍（≈8s）后不再按住 —— 锚点万一一直不稳，不能永久藏
-                    if (!hidden && self.window && ColdTicks < 40 &&
-                        !objc_getAssociatedObject(self, &AlignedKey)) {
-                        ((void (*)(id, SEL, BOOL))orig)(self, sh, YES);
-                        [ColdWidgets addObject:self];
-                        return;
-                    }
-                    ((void (*)(id, SEL, BOOL))orig)(self, sh, hidden);
+                Replace(carCls, sh, imp_implementationWithBlock(^(UIView *self, __unused BOOL hidden) {
+                    // ★0.9.142（A20）：车机钮已整体移除 —— 任何显示请求一律改写为隐藏
+                    ((void (*)(id, SEL, BOOL))orig)(self, sh, YES);
+                    objc_setAssociatedObject(self, &GCHoldKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
                 }), t);
             }
         }
@@ -7610,7 +7592,7 @@ static void InstallPromoAndWidgetHooks(void) {
     //   全程不调 setHidden:」这条路径（0.9.116 实测它会把控件按到 5.0s）。
     HookVoid(GCStrAt(140), GCStrAt(123), ^(UIView *w) {
         if (!w.window) return;
-        if (w.hidden && GCShouldProtectPinnedWidget(w)) w.hidden = NO;
+        w.hidden = YES;    // ★0.9.142（A20）：车机钮已移除，上窗即按下
     });
     // 0.9.14（A6 回退）：0.9.9（A3）给车机圆钮补的 setHidden:/setAlpha: 两条拦截已移除。
     //   与右下钮同源的「未对齐拒绝显示」逻辑 —— 车机钮虽然靠类名能被 CachedCar 稳定找到
