@@ -551,7 +551,6 @@ static void GCCarSyncVisibility(UIView *v, CGFloat barTop) {
 #endif
     CGRect wr = [v convertRect:v.bounds toView:v.window];
     if (wr.size.width < 1 || wr.size.height < 1) return;
-    BOOL atTarget = fabs(wr.origin.y - (barTop - GCGapCar - wr.size.height)) < 1.0;
     // ★0.9.142（A20）：**车机钮整个移除**（老大指定）。
     //   位置照钉（天气行的对齐锚点依赖它的 frame），但永远不显示。
     objc_setAssociatedObject(v, &AlignedKey, @(1), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
