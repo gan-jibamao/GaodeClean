@@ -18,7 +18,7 @@
 // ---- jibamao 个人标识（编译进 dylib，可用 strings 核对）----
 static NSString *const kGCAuthor      = @"jibamao";
 static NSString *const kGCRepo        = @"https://gan-jibamao.github.io/";
-static NSString *const kGCVersion     = @"0.9.143";
+static NSString *const kGCVersion     = @"0.9.144";
 
 // 0.9.18（A1）：底边间隙**按控件分开**，对表原生（搜索栏白底顶边 = 702.6pt）
 //   车机钮（连接车机 · WINDeviceInterconnectWidget）：原生底 652 → 间隙 50.6 → 取 50
@@ -1023,6 +1023,7 @@ static NSMutableDictionary<NSString *, NSNumber *> *AjxCache;  // 0.7.2：类名
 static void InstallSplashAdGuard(void);
 static void SplashAdTick(void);
 static void SweepTopBannerAds(void);      // 0.9.99（A4）：顶部横幅广告常驻扫描
+static void GCKillMapTypeButton(UIWindow *win);   // 0.9.144（A22）：右侧 2D/3D 钮
 static void ArmTopBannerSweep(void);      // 0.9.99（A4）：事件驱动的即时扫描
 #ifdef GAODECLEAN_PROBE
 static void GCBannerProbeDump(const char *reason);   // 0.9.99（A5）：顶部带视图树取证
@@ -1818,6 +1819,7 @@ static void Schedule(void) {
         // 冷启动头 60 拍（≈12s）每拍扫一次（运营位落地最密集的时段），
         // 之后降到每 3 拍（600ms）—— 整趟是 6 层/900 节点上限的有界 BFS，开销可控。
         if (TickCount < 60 || TickCount % 3 == 0) SweepTopBannerAds();
+        if (TickCount < 60 || TickCount % 2 == 0) GCKillMapTypeButton(GCAnyMainWindow());   // 0.9.144（A22）
 #ifdef GAODECLEAN_PROBE
         // 0.9.99（A5）：0.8s / 2s / 5s / 10s / 20s / 40s 各取证一次顶部带视图树
         {
@@ -7478,36 +7480,40 @@ static BOOL GCShouldProtectPinnedWidget(UIView *v) {
 //    WINPermanentCompassView / WINCompassView，frame={{10,69},{44,44}}
 //  AX 标识 win_compass_normal，点它会切 2D/3D。
 //  按类名族（含 "Compass"）整体按下：any 子类的上窗与 setHidden: 两条入口都改写为隐藏。
+
+
 // ═══════════════════════════════════════════════════════════════════════════
-static void GCHideCompassFamily(void) {
-    int n = objc_getClassList(NULL, 0);
-    if (n <= 0) return;
-    Class *buf = (Class *)malloc(sizeof(Class) * (size_t)n);
-    if (!buf) return;
-    n = objc_getClassList(buf, n);
-    NSString *needle = GCStrAt(296);          // "Compass"
-    int hits = 0;
-    for (int i = 0; i < n; i++) {
-        Class c = buf[i];
-        NSString *cn = NSStringFromClass(c);
-        if (!cn.length || ![cn containsString:needle]) continue;
-        if (![(id)c isSubclassOfClass:UIView.class]) continue;
-        hits++;
-        HookVoid(cn, GCStrAt(123), ^(UIView *v) { if (v.window) v.hidden = YES; });
-        SEL sh = @selector(setHidden:);
-        Method m = class_getInstanceMethod(c, sh);
-        if (m) {
-            IMP o = method_getImplementation(m);
-            const char *t = method_getTypeEncoding(m);
-            Replace(c, sh, imp_implementationWithBlock(^(UIView *self, __unused BOOL h) {
-                ((void (*)(id, SEL, BOOL))o)(self, sh, YES);
-            }), t);
+//  0.9.144（A22）：右上那列偶尔冒出来的 2D/3D 钮
+//
+//  老大说明：「偶尔会出现在右侧定位和线路胶囊按钮上方」。
+//  它与左上角罗盘是**同一个类**（WINPermanentCompassView 族），所以不能整族按掉
+//  —— 上一版 0.9.143 就是这么干的，把罗盘一起藏了，老大立刻发现。
+//  判据改成**位置**：类名含 Compass、且落在右列（midX>70% 屏宽）、
+//  纵向在屏高 35%~85% 之间（正是「我的位置」667 上方那一带）。
+//  左上角罗盘 midY≈91（=10.7%），天然不在范围内。
+// ═══════════════════════════════════════════════════════════════════════════
+static void GCKillMapTypeButton(UIWindow *win) {
+    if (!win) return;
+    CGFloat W = win.bounds.size.width, H = win.bounds.size.height;
+    if (W < 1 || H < 1) return;
+    NSMutableArray *q = [NSMutableArray arrayWithObject:win];
+    for (NSUInteger i = 0; i < q.count && q.count < 900; i++) {
+        UIView *v = q[i];
+        [q addObjectsFromArray:v.subviews];
+        if (v.hidden) continue;
+        NSString *cn = NSStringFromClass(v.class);
+        if (!cn.length || ![cn containsString:GCStrAt(296)]) continue;   // "Compass"
+        CGRect r = [v convertRect:v.bounds toView:win];
+        if (r.size.width < 8 || r.size.height < 8) continue;
+        CGFloat midx = CGRectGetMidX(r), midy = CGRectGetMidY(r);
+        if (midx > W * 0.70 && midy > H * 0.35 && midy < H * 0.85) {
+            v.hidden = YES;
+#ifdef GAODECLEAN_PROBE
+            static int nMT;
+            if (nMT < 6) { nMT++; P7Note(@"MAPTYPE hidden %@ f=%@", cn, NSStringFromCGRect(r)); }
+#endif
         }
     }
-    free(buf);
-#ifdef GAODECLEAN_PROBE
-    P7Note(@"COMPASS hooked=%d", hits);
-#endif
 }
 
 static void InstallPromoAndWidgetHooks(void) {
@@ -7684,7 +7690,6 @@ static void InstallPromoAndWidgetHooks(void) {
             ((void (*)(id, SEL, BOOL))original)(self, sel, hidden || IsHiddenMapPromo(self));
         }), method_getTypeEncoding(method));
     }
-    GCHideCompassFamily();
 }
 
 static void InstallRegistryHooks(void) {
