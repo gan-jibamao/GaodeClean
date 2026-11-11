@@ -18,7 +18,7 @@
 // ---- jibamao 个人标识（编译进 dylib，可用 strings 核对）----
 static NSString *const kGCAuthor      = @"jibamao";
 static NSString *const kGCRepo        = @"https://gan-jibamao.github.io/";
-static NSString *const kGCVersion     = @"0.9.147";
+static NSString *const kGCVersion     = @"0.9.148";
 
 // 0.9.18（A1）：底边间隙**按控件分开**，对表原生（搜索栏白底顶边 = 702.6pt）
 //   车机钮（连接车机 · WINDeviceInterconnectWidget）：原生底 652 → 间隙 50.6 → 取 50
@@ -1819,7 +1819,7 @@ static void Schedule(void) {
         // 冷启动头 60 拍（≈12s）每拍扫一次（运营位落地最密集的时段），
         // 之后降到每 3 拍（600ms）—— 整趟是 6 层/900 节点上限的有界 BFS，开销可控。
         if (TickCount < 60 || TickCount % 3 == 0) SweepTopBannerAds();
-        if (TickCount < 60 || TickCount % 2 == 0) GCKillMapTypeButton(GCAnyMainWindow());   // 0.9.144（A22）
+        GCKillMapTypeButton(GCAnyMainWindow());   // 0.9.148：每拍都跑，飞行第一帧就判
 #ifdef GAODECLEAN_PROBE
         // 0.9.99（A5）：0.8s / 2s / 5s / 10s / 20s / 40s 各取证一次顶部带视图树
         {
@@ -7526,21 +7526,24 @@ static void GCKillMapTypeButton(UIWindow *win) {
             if (CGRectIntersectsRect(CGRectInset(r, -2, -2), pr)) { protectedRect = YES; break; }
         }
         BOOL bySlot = square && !protectedRect && midx > W * 0.70 && midy > H * 0.45 && midy < H * 0.95;
-        // ③ 左上角那颗是**罗盘本体**：保留它，只把「2D/3D 开关」摘掉
-        //    —— 老大原话「罗盘那个 2D3D 按钮也移除，但是不移除罗盘」。
-        //    做法：关掉交互（点它不再切 2D/3D）+ 藏掉子树里写着 2D/3D 的文字层，
-        //    罗盘指针本身不动。
-        BOOL leftCol = compassCls && midx < W * 0.30;
-        if (leftCol) {
-            if (v.userInteractionEnabled) v.userInteractionEnabled = NO;
-            for (UIView *sub in v.subviews) {
-                if (GCStyleHas2D3DText(sub) && !sub.hidden) {
-                    sub.hidden = YES;
-#ifdef GAODECLEAN_PROBE
-                    static int nL;
-                    if (nL < 4) { nL++; P7Note(@"COMPASS label hidden %@", NSStringFromClass(sub.class)); }
-#endif
+        // ③ 罗盘与 2D/3D 是**同一个视图**（老大：点定位切图时它从上左飞过来）。
+        //    所以规则不是「右边才藏」，而是「只许待在左上角罗盘位」：
+        //      · 在罗盘位（左列 + 顶部带）⇒ 保持可见，但关掉交互、藏掉 2D/3D 文字层
+        //      · 一旦离开（开始飞/落到右侧）⇒ 立刻隐藏，飞的过程也看不见
+        if (compassCls) {
+            BOOL atCompassSlot = (midx < W * 0.30 && midy < H * 0.20);
+            if (atCompassSlot) {
+                if (v.hidden) v.hidden = NO;
+                if (v.userInteractionEnabled) v.userInteractionEnabled = NO;
+                for (UIView *sub in v.subviews) {
+                    if (GCStyleHas2D3DText(sub) && !sub.hidden) sub.hidden = YES;
                 }
+            } else if (!v.hidden) {
+                v.hidden = YES;
+#ifdef GAODECLEAN_PROBE
+                static int nFly;
+                if (nFly < 6) { nFly++; P7Note(@"COMPASS fly-hide f=%@", NSStringFromCGRect(r)); }
+#endif
             }
             continue;
         }
@@ -7553,6 +7556,25 @@ static void GCKillMapTypeButton(UIWindow *win) {
 #endif
         }
     }
+}
+
+
+// 0.9.148（A24）：罗盘/2D 位移的第一帧就判 —— 每拍 200ms 太慢，飞行会露出来。
+static void GCInstallCompassMoveHooks(void) {
+    int n = objc_getClassList(NULL, 0);
+    if (n <= 0) return;
+    Class *buf = (Class *)malloc(sizeof(Class) * (size_t)n);
+    if (!buf) return;
+    n = objc_getClassList(buf, n);
+    NSString *needle = GCStrAt(296);          // "Compass"
+    for (int i = 0; i < n; i++) {
+        Class c = buf[i];
+        NSString *cn = NSStringFromClass(c);
+        if (!cn.length || ![cn containsString:needle]) continue;
+        if (![(id)c isSubclassOfClass:UIView.class]) continue;
+        HookVoid(cn, GCStrAt(123), ^(UIView *v) { if (v.window) GCKillMapTypeButton(v.window); });
+    }
+    free(buf);
 }
 
 static void InstallPromoAndWidgetHooks(void) {
@@ -7729,6 +7751,7 @@ static void InstallPromoAndWidgetHooks(void) {
             ((void (*)(id, SEL, BOOL))original)(self, sel, hidden || IsHiddenMapPromo(self));
         }), method_getTypeEncoding(method));
     }
+    GCInstallCompassMoveHooks();
 }
 
 static void InstallRegistryHooks(void) {
