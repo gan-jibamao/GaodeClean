@@ -18,7 +18,7 @@
 // ---- jibamao 个人标识（编译进 dylib，可用 strings 核对）----
 static NSString *const kGCAuthor      = @"jibamao";
 static NSString *const kGCRepo        = @"https://gan-jibamao.github.io/";
-static NSString *const kGCVersion     = @"0.9.142";
+static NSString *const kGCVersion     = @"0.9.143";
 
 // 0.9.18（A1）：底边间隙**按控件分开**，对表原生（搜索栏白底顶边 = 702.6pt）
 //   车机钮（连接车机 · WINDeviceInterconnectWidget）：原生底 652 → 间隙 50.6 → 取 50
@@ -7470,6 +7470,46 @@ static BOOL GCShouldProtectPinnedWidget(UIView *v) {
 }
 
 
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  0.9.143（A21）：移除 2D/3D（罗盘族）按钮 —— 老大指定
+//
+//  本机高德 17.03.1 的 2D/3D 圆钮就是左上角那颗罗盘：
+//    WINPermanentCompassView / WINCompassView，frame={{10,69},{44,44}}
+//  AX 标识 win_compass_normal，点它会切 2D/3D。
+//  按类名族（含 "Compass"）整体按下：any 子类的上窗与 setHidden: 两条入口都改写为隐藏。
+// ═══════════════════════════════════════════════════════════════════════════
+static void GCHideCompassFamily(void) {
+    int n = objc_getClassList(NULL, 0);
+    if (n <= 0) return;
+    Class *buf = (Class *)malloc(sizeof(Class) * (size_t)n);
+    if (!buf) return;
+    n = objc_getClassList(buf, n);
+    NSString *needle = GCStrAt(296);          // "Compass"
+    int hits = 0;
+    for (int i = 0; i < n; i++) {
+        Class c = buf[i];
+        NSString *cn = NSStringFromClass(c);
+        if (!cn.length || ![cn containsString:needle]) continue;
+        if (![(id)c isSubclassOfClass:UIView.class]) continue;
+        hits++;
+        HookVoid(cn, GCStrAt(123), ^(UIView *v) { if (v.window) v.hidden = YES; });
+        SEL sh = @selector(setHidden:);
+        Method m = class_getInstanceMethod(c, sh);
+        if (m) {
+            IMP o = method_getImplementation(m);
+            const char *t = method_getTypeEncoding(m);
+            Replace(c, sh, imp_implementationWithBlock(^(UIView *self, __unused BOOL h) {
+                ((void (*)(id, SEL, BOOL))o)(self, sh, YES);
+            }), t);
+        }
+    }
+    free(buf);
+#ifdef GAODECLEAN_PROBE
+    P7Note(@"COMPASS hooked=%d", hits);
+#endif
+}
+
 static void InstallPromoAndWidgetHooks(void) {
     HookVoid(GCStrAt(275), GCStrAt(91), ^(id view) { if (IsHiddenMapPromo(view)) [view setHidden:YES]; });
     Class cls = NSClassFromString(GCStrAt(275));
@@ -7644,6 +7684,7 @@ static void InstallPromoAndWidgetHooks(void) {
             ((void (*)(id, SEL, BOOL))original)(self, sel, hidden || IsHiddenMapPromo(self));
         }), method_getTypeEncoding(method));
     }
+    GCHideCompassFamily();
 }
 
 static void InstallRegistryHooks(void) {
