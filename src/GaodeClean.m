@@ -18,7 +18,7 @@
 // ---- jibamao 个人标识（编译进 dylib，可用 strings 核对）----
 static NSString *const kGCAuthor      = @"jibamao";
 static NSString *const kGCRepo        = @"https://gan-jibamao.github.io/";
-static NSString *const kGCVersion     = @"0.9.149";
+static NSString *const kGCVersion     = @"0.9.150";
 
 // 0.9.18（A1）：底边间隙**按控件分开**，对表原生（搜索栏白底顶边 = 702.6pt）
 //   车机钮（连接车机 · WINDeviceInterconnectWidget）：原生底 652 → 间隙 50.6 → 取 50
@@ -1817,8 +1817,10 @@ static void Schedule(void) {
         // 0.9.99（A4）：顶部横幅广告 —— 常驻通道。横幅由运营位异步拉取落地，
         // 落点常在启动 15s 窗口之外，所以不能挂在 SplashAdTick 的有界窗口里。
         // 冷启动头 60 拍（≈12s）每拍扫一次（运营位落地最密集的时段），
-        // 之后降到每 3 拍（600ms）—— 整趟是 6 层/900 节点上限的有界 BFS，开销可控。
-        if (TickCount < 60 || TickCount % 3 == 0) SweepTopBannerAds();
+        // ★0.9.150（A26）：**每拍都扫**（200ms）。原来降到每 3 拍（600ms），
+        //   老大反馈「600ms 肉眼还可见」—— 运营位落地到被收掉之间能明显看到。
+        //   实测一趟 BFS 只走 82~560 个节点，5Hz 的开销可以忽略。
+        SweepTopBannerAds();
         GCKillMapTypeButton(GCAnyMainWindow());   // 0.9.148：每拍都跑，飞行第一帧就判
 #ifdef GAODECLEAN_PROBE
         // 0.9.99（A5）：0.8s / 2s / 5s / 10s / 20s / 40s 各取证一次顶部带视图树
@@ -7603,6 +7605,40 @@ static void GCInstallCompassMoveHooks(void) {
     free(buf);
 }
 
+
+// 0.9.150（A27）：横幅类「上窗即扫」—— 把 600ms 的轮询延迟压到 0。
+//   类名含 "ImageTextBlueBar" 的就是运营蓝条（GCStrAt(295)）。
+//   它一进窗口/被点亮，我们立刻跑一趟扫描并当场按下，不等下一拍。
+static void GCInstallBannerClassHooks(void) {
+    int n = objc_getClassList(NULL, 0);
+    if (n <= 0) return;
+    Class *buf = (Class *)malloc(sizeof(Class) * (size_t)n);
+    if (!buf) return;
+    n = objc_getClassList(buf, n);
+    NSString *needle = GCStrAt(295);          // "ImageTextBlueBar"
+    for (int i = 0; i < n; i++) {
+        Class c = buf[i];
+        NSString *cn = NSStringFromClass(c);
+        if (!cn.length || ![cn containsString:needle]) continue;
+        if (![(id)c isSubclassOfClass:UIView.class]) continue;
+        HookVoid(cn, GCStrAt(123), ^(UIView *v) {      // didMoveToWindow
+            if (!v.window) return;
+            v.hidden = YES;
+            SweepTopBannerAds();
+        });
+        SEL sh = @selector(setHidden:);
+        Method m = class_getInstanceMethod(c, sh);
+        if (m) {
+            IMP o = method_getImplementation(m);
+            const char *t = method_getTypeEncoding(m);
+            Replace(c, sh, imp_implementationWithBlock(^(UIView *self, __unused BOOL h) {
+                ((void (*)(id, SEL, BOOL))o)(self, sh, YES);
+            }), t);
+        }
+    }
+    free(buf);
+}
+
 static void InstallPromoAndWidgetHooks(void) {
     HookVoid(GCStrAt(275), GCStrAt(91), ^(id view) { if (IsHiddenMapPromo(view)) [view setHidden:YES]; });
     Class cls = NSClassFromString(GCStrAt(275));
@@ -7778,6 +7814,7 @@ static void InstallPromoAndWidgetHooks(void) {
         }), method_getTypeEncoding(method));
     }
     GCInstallCompassMoveHooks();
+    GCInstallBannerClassHooks();
 }
 
 static void InstallRegistryHooks(void) {
