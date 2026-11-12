@@ -18,7 +18,7 @@
 // ---- jibamao 个人标识（编译进 dylib，可用 strings 核对）----
 static NSString *const kGCAuthor      = @"jibamao";
 static NSString *const kGCRepo        = @"https://gan-jibamao.github.io/";
-static NSString *const kGCVersion     = @"0.9.150";
+static NSString *const kGCVersion     = @"0.9.151";
 
 // 0.9.18（A1）：底边间隙**按控件分开**，对表原生（搜索栏白底顶边 = 702.6pt）
 //   车机钮（连接车机 · WINDeviceInterconnectWidget）：原生底 652 → 间隙 50.6 → 取 50
@@ -502,13 +502,6 @@ static CGFloat GCCurrentBarTop(void) {
     return fb;
 }
 
-__attribute__((unused)) static BOOL GCAnchorStable(CGFloat v) {
-    static CGFloat last; static double since; static int n;
-    double now = CACurrentMediaTime();
-    if (fabs(v - last) > 0.5) { last = v; since = now; n = 0; return NO; }
-    n++;
-    return (n >= 3) && (now - since >= 0.25);
-}
 
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -574,7 +567,6 @@ static void KickBarFix(void);
 static void KickBarFixFor(NSTimeInterval seconds);
 static void WatchHomeTransition(id tabs);
 static __weak UIWindow *GCCMainWindow;
-static UIView *GCNarrowCapsule(UIView *anchor);           // 0.9.28 缩窄：取可见胶囊
 static void GCNarrowTick(void);                          // 0.9.28 缩窄：tick 兜底复核
 static void GCProbeTick6(void);                      // probe6：定时取证（前置声明）
 #ifdef GAODECLEAN_PROBE
@@ -1008,10 +1000,7 @@ __attribute__((unused)) static void P8Trace(void) {
 }
 #endif
 static void GCNarrowApply(UIView *anchor, BOOL isSearch); // 0.9.28 缩窄：点对点夹取
-static long GCNarrowBorderFixes;                 // 诊断计数（定义在缩窄模块，此处暂定声明）
-static long GCNarrowAmbFixes;                  // 诊断计数（暂定声明）
 static long GCNarrowHairHits;                  // 诊断计数（暂定声明）
-static CGFloat GCNarrowTargetWidth(void);        // 目标宽访问器（探针在缩窄模块之前，需前置）
 static __weak UIWindow *GCCSplashWindow;      // 已识别的广告窗口，之后拒绝其可见
 static NSInteger GCCSplashTicks;              // 兜底扫描剩余拍数（有界）
 static int GCCSplashUntil;                    // 0.7.5(B2)：窗口拉黑失效拍号（60s 后自动解除）
@@ -1028,7 +1017,6 @@ static void ArmTopBannerSweep(void);      // 0.9.99（A4）：事件驱动的即
 #ifdef GAODECLEAN_PROBE
 static void GCBannerProbeDump(const char *reason);   // 0.9.99（A5）：顶部带视图树取证
 #endif
-static void AlignOneWidget(UIView *bar, UIView *w, CGFloat barTop, CGFloat gap);
 
 @class GCCState;
 @interface GCCLimit : NSObject
@@ -1981,33 +1969,10 @@ static void HookVoid(NSString *name, NSString *methodName, void (^after)(id)) {
 //        居中后最小 236pt，取整 240（选中底衬距胶囊边留 10pt）。
 // ══════════════════════════════════════════════════════════════════════════
 static const CGFloat GCNarrowTargetW = 240.0;   // 两条栏的目标可见宽
-__attribute__((unused)) static CGFloat GCNarrowTargetWidth(void) { return GCNarrowTargetW; }
-__attribute__((unused)) static const CGFloat GCNarrowBtnGap  = 12.0;    // 原生：最右按钮右缘距胶囊右缘 12pt
-__attribute__((unused)) static const CGFloat GCNarrowAmbPad  = 24.0;    // 底栏环境层原生比胶囊每侧外扩 ~24pt（399 vs 351）
-__attribute__((unused)) static long GCNarrowBorderFixes = 0;      // 诊断：描边同步累计写入次数
-__attribute__((unused)) static long GCNarrowAmbFixes = 0;         // 诊断：环境层同步累计写入次数
 __attribute__((unused)) static long GCNarrowHairHits = 0;       // 诊断：发丝线处理累计次数
 static BOOL GCNarrowSearchHooked = NO;
 
 // 取 anchor 的「可见胶囊」：毛玻璃层 + 栏级尺寸 + 居中
-__attribute__((unused)) static UIView *GCNarrowCapsule(UIView *anchor) {
-    if (!anchor) return nil;
-    CGFloat sw = anchor.bounds.size.width;
-    if (sw < 200) return nil;
-    UIView *best = nil; CGFloat bw = 0;
-    for (UIView *v in anchor.subviews) {
-        if (v.hidden || v.alpha < 0.05) continue;
-        if (![v isKindOfClass:UIVisualEffectView.class]) continue;
-        CGRect f = v.frame;
-        if (f.size.height < 40 || f.size.height > 120) continue;
-        // ★A2：下界不能是 sw-140 —— 夹取后胶囊宽 240 会掉出判据，导致下一拍再也找不到胶囊、
-        //   GCNarrowApply 直接 return，App 把伴生层改回原生时我们永久失去纠正能力（trial1 教训）。
-        if (f.size.width < GCNarrowTargetW - 2 || f.size.width > sw - 4) continue;
-        if (fabs(CGRectGetMidX(f) - sw * 0.5) > 10) continue;
-        if (f.size.width > bw) { best = v; bw = f.size.width; }
-    }
-    return best;
-}
 // 胶囊内部的满幅背景层（防 autoresizing 未生效）：x≈0 且宽超出胶囊的，收进胶囊
 __attribute__((unused)) static void GCNarrowInnerFix(UIView *v, CGFloat capW, int depth, NSInteger *budget) {
     if (!v || depth > 3 || *budget <= 0) return;
@@ -2062,15 +2027,6 @@ __attribute__((unused)) static void GCNarrowHairWalk(CALayer *la, CGRect band, C
     }
     for (CALayer *c in [la.sublayers copy]) GCNarrowHairWalk(c, band, midY, sw, x, depth + 1, budget);
 }
-__attribute__((unused)) static void GCNarrowHairlineSweep(UIView *anchor, CGFloat sw, CGFloat x) {
-    CGRect band = [anchor convertRect:anchor.bounds toView:nil];
-    CGFloat midY = CGRectGetMidY(band);
-    for (UIWindow *w in GCAllWindows()) {
-        if (w.hidden || w.bounds.size.width < 200) continue;
-        NSInteger budget = 600;
-        GCNarrowHairWalk(w.layer, band, midY, sw, x, 0, &budget);
-    }
-}
 // ★trial10（probe5 定罪）：白底层 shd=0.20/shr=20 —— 带阴影的层在 frame 被夹窄后，
 //   显式 shadowPath / shouldRasterize 缓存**不会自动跟随** ⇒ 阴影仍按原生 377 圆角矩形绘制
 //   ⇒ 顶/底切线处的"发丝线"（右到 385、左 8pt 那条被裁图裁掉）。每次写完 frame 必须失效缓存。
@@ -2087,21 +2043,6 @@ static void GCNarrowInvalidateRender(CALayer *la) {
 //   没有对应 UIView —— 只夹 UIVisualEffectView 时它原地不动，于是"图标缩了、白底还是 377 宽"。
 //   实测：CALayer win=[8,702,377,54] corner=27 bg=rgba(1,1,1,0.90) + 同尺寸 CAGradientLayer。
 //   底栏无此类层（白来自胶囊内部 UICABackdropLayer）⇒ 本函数在底栏天然空转。
-__attribute__((unused)) static void GCNarrowStandaloneLayers(UIView *anchor, CGFloat sw, CGFloat x) {
-    NSArray *layers = [anchor.layer.sublayers copy];
-    for (CALayer *la in layers) {
-        if (la.hidden || la.opacity < 0.02f) continue;
-        BOOL backing = NO;
-        for (UIView *v in anchor.subviews) if (v.layer == la) { backing = YES; break; }
-        if (backing) continue;                       // 子视图的 backing layer 已由 UIView 路径处理
-        CGRect f = la.frame;
-        if (f.size.height < 40 || f.size.height > 120) continue;
-        if (f.size.width < GCNarrowTargetW - 2 || f.size.width > sw - 4) continue;
-        if (fabs(CGRectGetMidX(f) - sw * 0.5) > 20) continue;
-        CGRect g = f; g.origin.x = x; g.size.width = GCNarrowTargetW;
-        if (!CGRectEqualToRect(g, f)) { la.frame = g; GCNarrowInvalidateRender(la); }
-    }
-}
 // ★trial13（0.9.30+trial1）：圆形悬浮钮统一风格 —— 幂等、绝对几何
 static void GCStyleCenterIcon(UIView *root, CGFloat d, CGFloat icon, int depth) {
     if (!root || depth > 4) return;
@@ -5110,42 +5051,6 @@ static BOOL GCCIsLiteGroupCapsule(UIView *v) {
     return CGRectGetMidY(r) > win.bounds.size.height * 0.25;
 }
 
-__attribute__((unused)) static void AlignOneWidget(UIView *bar, UIView *w, CGFloat barTop, CGFloat gap) {
-    if (!w.window) return;
-    UIWindow *win = bar.window;
-    CGRect r = [w convertRect:w.bounds toView:win];
-    // 0.5.1：改底边对齐——不管 44/88 高，底边都贴在搜索框上方一段固定间隙
-    // 0.9.17（A1）：间隙对表原生实测。原生录屏（697 帧）vs 我们逐元素模板匹配
-    //   （score 0.906/0.934，对齐原生 1.000）：⊙ 原生 599.7 / 我们 612.1，
-    //   ↰ 原生 632.5 / 我们 644.9 —— 两图标位移完全一致 ⇒ 是整组平移；
-    //   而搜索栏白底顶边两边都是 702.6pt（完全同位）⇒ 差值全部来自间隙：
-    //   原生 19.5pt、我们只有 6.9pt。旧值 8 让 ⊙/↰（连接车机）整组低了 12.4pt，
-    //   并压掉了它与 2D/3D 按钮之间的原生间隙。
-    // 0.9.18（A1）：间隙按控件区分（GCGapCar / GCGapCapsule），不再共用。
-    CGFloat targetBottom = barTop - gap;
-    if (fabs(CGRectGetMaxY(r) - targetBottom) >= 1) {
-        CGRect f = w.frame;
-        f.origin.y += (targetBottom - CGRectGetMaxY(r));
-        w.frame = f;
-    }
-    // 逐 widget 对齐标记：对齐过才显示，避免冷启动在原生位置(如 {0,0})闪现
-    objc_setAssociatedObject(w, &AlignedKey, @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-    // 0.9.9（A2/A3 配套）：setAlpha: 拦截会把未对齐时的 alpha 压到 0，
-    // 这里必须一并恢复 —— 否则 hidden 放行了、按钮仍然全透明（A2/A3 的自伤点）。
-    if (w.alpha < 0.01) w.alpha = 1.0;
-    if (w.hidden) w.hidden = NO;
-    // 0.9.16（A2，A1 的对偶）：放行右下控件的「宿主」时，把 App 原生组容器一并放行。
-    //   胶囊的毛玻璃底与 ⊙/↰ 图标由它承载 —— 只按不还会缺背景。
-    //   两者同一时刻出现，正是「按钮与搜索栏同时出现」的设计意图。
-    if (w == CachedRight && CachedLiteGroup && CachedLiteGroup.window) {
-        CachedLiteGroup.hidden = NO;
-    }
-    // 0.9.14（A8 回退）：恢复 0.9.7 的「对齐即封门」。
-    // 有任一控件对齐成功，就说明首页布局已稳定、兜底无存在必要 ——
-    // 这正是 0.9.7 零裸露的机制：车机钮 ~1.3s 对齐 → HomeSettled=YES →
-    // 2.4s 的一次性兜底根本不跑，右下钮只能由本函数在**正确位置**显示。
-    HomeSettled = YES;
-}
 
 
 // 0.6.3：冷启动后天气行停在 app 原生位置（{{10,411}}），要切一次页才归位。

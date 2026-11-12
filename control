@@ -1,6 +1,6 @@
 Package: com.jibamao.gaodeclean
 Name: GaodeClean 高德精简
-Version: 0.9.150
+Version: 0.9.151
 Architecture: iphoneos-arm64
 Description: 高德精简，无设置
 Maintainer: jibamao
